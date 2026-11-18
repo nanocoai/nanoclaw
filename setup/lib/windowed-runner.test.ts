@@ -13,10 +13,11 @@ const fixture = vi.hoisted(() => ({
   logError: vi.fn(),
   brightSelect: vi.fn(),
   cancel: vi.fn(),
+  offerClaude: vi.fn(),
 }));
 vi.mock('../logs.js', () => ({ stepRawLog: () => fixture.rawLog, step: fixture.step }));
 vi.mock('./diagnostics.js', () => ({ emit: fixture.emit }));
-vi.mock('./claude-handoff.js', () => ({ offerClaudeOnFailure: vi.fn() }));
+vi.mock('./claude-handoff.js', () => ({ offerClaudeOnFailure: fixture.offerClaude }));
 vi.mock('./bright-select.js', () => ({ brightSelect: fixture.brightSelect }));
 vi.mock('@clack/prompts', () => ({
   log: { success: fixture.logSuccess, error: fixture.logError, warn: vi.fn() },
@@ -208,6 +209,28 @@ describe('runWindowedChild', () => {
       killTrees();
       await run;
       Object.assign(stdin, saved);
+    }
+  });
+
+  it('re-raises a signal once the tree is gone, without waiting for a Claude look', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    fixture.brightSelect.mockResolvedValueOnce('help');
+    let endLook!: () => void;
+    fixture.offerClaude.mockImplementationOnce(() => new Promise<void>((resolve) => (endLook = resolve)));
+    const tree = buildTree();
+    const reraised = spyOnSelfKill(tree);
+    const run = runWindowedChild('container-rebuild', process.execPath, ['-e', tree.script], LABELS);
+    try {
+      await until(() => tree.pids().length === 2);
+      await vi.advanceTimersByTimeAsync(65_000);
+      await until(() => fixture.offerClaude.mock.calls.length === 1);
+      process.emit('SIGTERM', 'SIGTERM');
+      await until(() => reraised.length === 1);
+      expect(reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false }]);
+    } finally {
+      killTrees();
+      endLook?.();
+      await run;
     }
   });
 

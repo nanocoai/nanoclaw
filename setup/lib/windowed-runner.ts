@@ -239,6 +239,14 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
   finished = true;
   clearInterval(frameTick);
   clearInterval(stallCheck);
+  if (reraise) {
+    // The child is gone: die the way the signal asked, without waiting on a
+    // Claude look. No listener is left, so this is the default action.
+    if (windowShown) clearBlock();
+    windowShown = false;
+    stopListening();
+    process.kill(process.pid, reraise);
+  }
   // An unanswered stall prompt would keep reading stdin into the next step's
   // prompt. Close it, and wait out a Claude look the user already asked for.
   closeStallPrompt.abort();
@@ -247,8 +255,6 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
   out.write(SHOW_CURSOR);
   process.off('exit', restoreCursorOnExit);
   stopListening();
-  // The child has exited; no listener is left, so this dies the default way.
-  if (reraise) process.kill(process.pid, reraise);
 
   const suffix = ` (${fmtDuration(Date.now() - start)})`;
   if (result.ok) {
