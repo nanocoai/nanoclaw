@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto';
-
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import {
   getPendingMessages,
@@ -434,8 +432,8 @@ export async function processQuery(
     unwrappedNudged: boolean;
     taskBlockNudged: boolean;
     nudgedWindow?: SeqWindow;
-    /** Names this turn's input in the provider's `consumed` events. */
-    inputId: string;
+    /** The id the provider gave this turn's input (`push`), if it reports `consumed`. */
+    inputId?: string;
   };
   const queuedTurns: QueuedTurn[] = [];
   // On a wrap-nudge retry: the rows the nudged turn wrote. The turn boundary
@@ -458,8 +456,7 @@ export async function processQuery(
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
   const pushRetry = (prompt: string, retryOf?: SeqWindow): void => {
-    const inputId = randomUUID();
-    query.push(prompt, inputId);
+    const inputId = query.push(prompt) || undefined;
     queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged, nudgedWindow: retryOf, inputId });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
   };
@@ -479,7 +476,10 @@ export async function processQuery(
     // By id, not by position: the contract names inputs, it does not promise
     // they are taken in push order.
     const absorbed: number[] = [];
-    for (let i = 0; i < queuedTurns.length; i++) if (consumed.has(queuedTurns[i].inputId)) absorbed.push(i);
+    for (let i = 0; i < queuedTurns.length; i++) {
+      const id = queuedTurns[i].inputId;
+      if (id !== undefined && consumed.has(id)) absorbed.push(i);
+    }
     if (absorbed.length === 0) return;
     const prompts = [archivePrompts[0]];
     for (const i of absorbed.reverse()) {
@@ -581,8 +581,7 @@ export async function processQuery(
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
-        const inputId = randomUUID();
-        query.push(prompt, inputId);
+        const inputId = query.push(prompt) || undefined;
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
           routing: extractRouting(keep),

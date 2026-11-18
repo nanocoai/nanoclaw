@@ -141,11 +141,11 @@ export type McpServerConfig =
 
 export interface AgentQuery {
   /**
-   * Push a follow-up message into the active query. `inputId`, when given,
-   * names this input in later `consumed` events; a provider that cannot
-   * report consumption ignores it.
+   * Push a follow-up message into the active query. A provider that can
+   * report which inputs a turn consumed returns the id it gave this input;
+   * that id appears in later `consumed` events. Others return nothing.
    */
-  push(message: string, inputId?: string): void;
+  push(message: string): string | void;
 
   /** Signal that no more input will be sent. */
   end(): void;
@@ -181,7 +181,7 @@ export type ProviderEvent =
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**
-   * The pushed inputs (by `inputId`) the current turn has consumed so far.
+   * The pushed inputs (by the id `push` returned) the current turn has consumed so far.
    * A runtime may answer several inputs in one turn with one `result` —
    * inputs waiting together at a turn boundary, or one folded into a running
    * turn — so results alone cannot say which input a turn answers. Optional:

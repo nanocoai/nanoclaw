@@ -11,6 +11,7 @@
  * as a batch of several messages answers under its first message's.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { randomUUID } from 'node:crypto';
 
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { closeSessionDb, getInboundDb, initTestSessionDb } from './mailbox/sqlite/connection.js';
@@ -73,6 +74,8 @@ async function run(
   script: Script,
   routing: RoutingContext = CHANNEL,
   first = 'm1',
+  /** False: a provider whose push returns no id (cannot report `consumed`). */
+  namesInputs = true,
 ): Promise<{
   stamps: Record<string, string | null>;
   rows: Array<{ text: string; threadId: string | null; inReplyTo: string | null }>;
@@ -92,7 +95,11 @@ async function run(
     return pushes[pushes.length - 1].inputId;
   };
   const query: AgentQuery = {
-    push: (prompt, inputId) => void pushes.push({ prompt, inputId }),
+    push: (prompt) => {
+      const inputId = namesInputs ? randomUUID() : undefined;
+      pushes.push({ prompt, inputId });
+      return inputId;
+    },
     end: () => {},
     events: script({ pushes, arrive }),
     abort: () => {},
@@ -139,11 +146,22 @@ function boundaryFold(reportConsumed: boolean, endTurn: ProviderEvent = result):
 }
 
 describe('inputs answered together in one turn (#4033)', () => {
-  it('gives every pushed input an id', async () => {
-    const { pushes } = await run(boundaryFold(true));
-    expect(pushes).toHaveLength(3);
-    expect(new Set(pushes.map((p) => p.inputId)).size).toBe(3);
-    expect(pushes.every((p) => typeof p.inputId === 'string' && p.inputId.length > 0)).toBe(true);
+  it('a provider whose push returns no id keeps one result per input, whatever it reports', async () => {
+    const { stamps } = await run(
+      async function* ({ arrive }) {
+        yield { type: 'init', continuation: 's1' };
+        await arrive('m2', 'second question');
+        yield { type: 'consumed', ids: ['anything'] };
+        yield say('answer to m1');
+        yield result;
+        yield say('answer to m2');
+        yield result;
+      },
+      CHANNEL,
+      'm1',
+      false,
+    );
+    expect(stamps).toEqual({ 'answer to m1': 'm1', 'answer to m2': 'm2' });
   });
 
   it('a boundary fold answers like a batch (first message), and the next turn no longer lags', async () => {

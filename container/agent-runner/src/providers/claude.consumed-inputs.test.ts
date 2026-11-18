@@ -52,22 +52,18 @@ function startQuery() {
 }
 
 describe('inputs a turn consumed', () => {
-  it('sends a pushed input with its id as the SDK message uuid', async () => {
-    const id = '0b6f2f43-8c1e-4c8e-9a52-3f1d2c4b5a69';
+  it('sends each pushed input with a fresh UUID and returns it from push', async () => {
     const q = startQuery();
-    q.push('second', id);
-    q.push('third');
-    q.push('fourth', 'not-a-uuid'); // the CLI takes only a UUID
+    const second = q.push('second');
+    const third = q.push('third');
     const iter = promptStream![Symbol.asyncIterator]();
-    const first = (await iter.next()).value;
-    const second = (await iter.next()).value;
-    const third = (await iter.next()).value;
-    const fourth = (await iter.next()).value;
+    const sent = [(await iter.next()).value, (await iter.next()).value, (await iter.next()).value];
     q.end();
-    expect(first.uuid).toBeUndefined();
-    expect(second).toMatchObject({ uuid: id, message: { content: 'second' } });
-    expect('uuid' in third).toBe(false);
-    expect('uuid' in fourth).toBe(false);
+    expect(sent.map((m) => m.message.content)).toEqual(['first', 'second', 'third']);
+    expect(sent[1].uuid).toBe(second as string);
+    expect(sent[2].uuid).toBe(third as string);
+    expect(second).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(second).not.toBe(third);
   });
 
   it('reports user_message_uuids as a consumed event, before the turn’s text and result', async () => {

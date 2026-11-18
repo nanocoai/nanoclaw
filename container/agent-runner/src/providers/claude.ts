@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
@@ -76,10 +77,8 @@ interface SDKUserMessage {
   parent_tool_use_id: null;
   session_id: string;
   /** Client id of this input; the CLI lists it in assistant.user_message_uuids. */
-  uuid?: Uuid;
+  uuid: ReturnType<typeof randomUUID>;
 }
-
-type Uuid = `${string}-${string}-${string}-${string}-${string}`;
 
 /** The `consumed` event for an SDK frame's user_message_uuids, if it has any. */
 function consumedInputs(message: unknown): { type: 'consumed'; ids: string[] } | null {
@@ -88,7 +87,6 @@ function consumedInputs(message: unknown): { type: 'consumed'; ids: string[] } |
   const ids = list.filter((id): id is string => typeof id === 'string');
   return ids.length > 0 ? { type: 'consumed', ids } : null;
 }
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Push-based async iterable for streaming user messages to the Claude SDK.
@@ -98,18 +96,20 @@ class MessageStream {
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string, uuid?: string): void {
+  /** Queue one input; returns the uuid it was sent with. */
+  push(text: string): ReturnType<typeof randomUUID> {
+    // The CLI echoes client uuids back in assistant.user_message_uuids,
+    // which is how translateEvents reports the inputs a turn consumed.
+    const uuid = randomUUID();
     this.queue.push({
       type: 'user',
       message: { role: 'user', content: text },
       parent_tool_use_id: null,
       session_id: '',
-      // The CLI echoes client uuids back in assistant.user_message_uuids,
-      // which is how translateEvents reports the inputs a turn consumed. It
-      // takes only a UUID; anything else goes unnamed (never reported).
-      ...(uuid && UUID_RE.test(uuid) ? { uuid: uuid as Uuid } : {}),
+      uuid,
     });
     this.waiting?.();
+    return uuid;
   }
 
   end(): void {
@@ -456,7 +456,7 @@ export class ClaudeProvider implements AgentProvider {
     }
 
     return {
-      push: (msg, inputId) => stream.push(msg, inputId),
+      push: (msg) => stream.push(msg),
       end: () => stream.end(),
       events: translateEvents(),
       abort: () => {
