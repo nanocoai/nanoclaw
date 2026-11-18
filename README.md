@@ -33,7 +33,7 @@ Spawn teammates from chat: every one gets its own bot identity, container, and m
 
 ## Why I Built NanoClaw
 
-[OpenClaw](https://github.com/openclaw/openclaw) is an impressive project, but I wouldn't have been able to sleep if I had given complex software I didn't understand full access to my life. OpenClaw has nearly half a million lines of code, 53 config files, and 70+ dependencies. Its security is at the application level (allowlists, pairing codes) rather than true OS-level isolation. Everything runs in one Node process with shared memory.
+[OpenClaw](https://github.com/openclaw/openclaw) is an impressive project, but I wouldn't have been able to sleep if I had given complex software I didn't understand full access to my life. Its security is at the application level (allowlists, pairing codes) rather than OS-level isolation.
 
 NanoClaw provides that same core functionality, but in a codebase small enough to understand: one host process, no microservices. Agents run in their own Linux containers with filesystem isolation, not merely behind permission checks.
 
