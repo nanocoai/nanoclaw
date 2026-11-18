@@ -143,6 +143,26 @@ describe('extractAttachmentFiles — inbox dir swapped after the checks', () => 
   });
 });
 
+describe('extractAttachmentFiles — operational errors are not unsafe-path refusals', () => {
+  it('propagates a disk error from opening the inbox instead of accepting the message without its files', async () => {
+    // The disk fills up as the host opens the session dir: an operational
+    // failure, not a planted symlink. Logging it as "Rejecting unsafe inbox
+    // directory" and storing the message anyway loses the attachment for
+    // good — the message is accepted with no localPath and never retried.
+    const original = fs.openSync as (...args: unknown[]) => unknown;
+    vi.spyOn(fs, 'openSync').mockImplementation(((...args: unknown[]) => {
+      if (args[0] === sessionDir(AG, SESS)) {
+        throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+      }
+      return original.apply(fs, args);
+    }) as never);
+
+    await expect(writeSessionMessage(AG, SESS, attachmentMessage('disk-full', ['a.txt']))).rejects.toThrow(
+      'no space left on device',
+    );
+  });
+});
+
 describe('extractAttachmentFiles — inbox-root symlink containment (#2828 sibling)', () => {
   it('does not write an attachment outside the session root via a symlinked inbox root', async () => {
     // Attacker-controlled location outside the session sandbox.

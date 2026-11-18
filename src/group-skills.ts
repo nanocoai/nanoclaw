@@ -23,7 +23,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { AnchoredDir, copyRegularFile } from './anchored-dir.js';
+import { AnchoredDir, copyRegularFile, isAnchoredRefusal } from './anchored-dir.js';
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 import { log } from './log.js';
 
@@ -65,10 +65,25 @@ export function materializeTemplateSkills(
   const destPath = destSegments ? path.resolve(destRoot, ...destSegments) : path.resolve(destRoot);
   if (path.resolve(source.root, ...source.segments) === destPath) return;
 
+  // The full-path shape's own refusal (a path with no safe anchor inside a
+  // group folder) is a warn-and-skip by contract, so it is resolved before
+  // the guarded section: the catch below classifies AnchoredDir errors, and
+  // this module's path refusal is not one of them.
+  let dest: { root: string; segments: readonly string[] };
+  if (destSegments) {
+    dest = { root: destRoot, segments: destSegments };
+  } else {
+    try {
+      dest = anchorWithinGroupFolder(destRoot);
+    } catch (err) {
+      log.warn('Template skills not materialized: unsafe skills directory', { agentGroupId, path: destPath, err });
+      return;
+    }
+  }
+
   let srcDir: AnchoredDir | null = null;
   let destDir: AnchoredDir | null = null;
   try {
-    const dest = destSegments ? { root: destRoot, segments: destSegments } : anchorWithinGroupFolder(destRoot);
     srcDir = AnchoredDir.open(source.root, source.segments);
     if (!srcDir) return; // no template store
     destDir = AnchoredDir.open(dest.root, dest.segments, true);
@@ -102,6 +117,12 @@ export function materializeTemplateSkills(
       }
     }
   } catch (err) {
+    // Only AnchoredDir's deliberate refusals downgrade to "not
+    // materialized". An operational failure mid-copy (ENOSPC, EIO, …)
+    // propagates and fails the spawn: the old skill is already deleted
+    // and its replacement only partly copied, so starting the container
+    // would hand the agent a half-materialized skill set.
+    if (!isAnchoredRefusal(err)) throw err;
     log.warn('Template skills not materialized: unsafe skills directory', { agentGroupId, path: destPath, err });
   } finally {
     srcDir?.close();
