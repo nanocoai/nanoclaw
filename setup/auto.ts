@@ -83,7 +83,7 @@ import {
 // Provider payloads self-register their picker entry + auth on import.
 import './providers/index.js';
 import { brightSelect } from './lib/bright-select.js';
-import { buildContainerImage } from './lib/container-build.js';
+import { buildContainerImageWindowed } from './lib/container-build.js';
 import { offerClaudeOnFailure } from './lib/claude-handoff.js';
 import { setPickedProvider } from './lib/picked-provider.js';
 import {
@@ -421,7 +421,7 @@ async function main(): Promise<void> {
 
     // A pulled image bakes /app/node_modules and the CLI manifest, and every
     // non-claude runtime changes one of them — so it needs an image this
-    // machine builds. Settle it here: buildContainerImage() below refuses on a
+    // machine builds. Settle it here: buildContainerImageWindowed() below refuses on a
     // pinned install, and reaching that refusal aborts setup with no way out
     // short of re-running it.
     const providerDescriptor = getInstallableProviderDescriptor(agentProvider);
@@ -471,16 +471,20 @@ async function main(): Promise<void> {
         await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, blockers.join('; '));
       }
       s.stop(`${agentProvider} installed.`);
-      p.log.info(brandBody('Rebuilding the container image with the new provider…'));
       // The rebuild is not optional here: the provider's CLI manifest is baked
       // into the image, so continuing past a failed build would authenticate a
       // runtime the container cannot actually start.
-      const rebuild = buildContainerImage();
+      const rebuild = await buildContainerImageWindowed({
+        running: `Rebuilding the sandbox with ${agentProvider}…`,
+        done: `Sandbox rebuilt with ${agentProvider}.`,
+        failed: `Couldn't rebuild the sandbox with ${agentProvider}.`,
+      });
       if (!rebuild.ok) {
         await fail(
           `add-${agentProvider}`,
           `Couldn't rebuild the container image for ${agentProvider}. ${rebuild.message}`,
           rebuild.hint,
+          rebuild.rawLog,
         );
       }
       // This process imported src/provider-contracts/index.ts at startup, and
