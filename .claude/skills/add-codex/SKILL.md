@@ -165,6 +165,22 @@ launchctl kickstart -k gui/$(id -u)/com.nanoclaw   # macOS; Linux: systemctl --u
 
 This affects only groups created afterward. Per-group `ncl groups config update --provider` still overrides the default in either direction. Creation itself stays provider-agnostic (no `--provider` flag — provider is a DB property stamped from the instance default at creation).
 
+## Turn timeouts
+
+Active turns have no fixed total-duration limit. Like the OpenCode provider,
+Codex allows 15 minutes without turn activity when no native tool is running.
+Tool output and other events for the active turn reset that idle budget.
+Running native tools, including sub-agent waits, own their execution deadlines;
+a quiet tool does not consume the idle budget and remains manually cancellable.
+A stuck tool which never completes must be cancelled by the operator.
+
+The runner emits host-liveness activity every five seconds while supervising a
+turn. These ticks do not reset the turn's idle budget. Unlike OpenCode's SSE
+transport, Codex stdio does not promise periodic server heartbeats, so there is
+no 60-second stream-silence timeout. App-server exit and bounded JSON-RPC request
+timeouts still end failed work. Timeout failures do not automatically replay a
+partially executed request or clear its conversation continuation.
+
 ## Troubleshooting
 
 - **Container dies at boot, channel silent:** `grep 'Container exited non-zero' logs/nanoclaw.error.log` — the `stderrTail` carries the reason (e.g. `Unknown provider: codex. Registered: claude` means the barrels aren't wired in the running build).
