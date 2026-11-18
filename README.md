@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/nanoclaw-logo.png" alt="NanoClaw" width="400">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/nanoclaw-logo-dark.svg">
+    <img src="assets/nanoclaw-logo-light.svg" alt="NanoClaw" width="310">
+  </picture>
 </p>
 
 <p align="center">
@@ -7,21 +10,11 @@
   Self-hosted, open source, and small enough to read. Each agent runs in its own container on your machine, on the harness you choose.
 </p>
 
-<p align="center"><strong><a href="#quick-start">🚀 Quick start</a></strong> · <a href="#usage">💬 Examples</a> · <a href="#what-it-supports">🔌 Channels</a> · <a href="#accounts-and-what-leaves-your-machine">🔒 Privacy</a> · <a href="#telemetry">📊 Telemetry</a></p>
-
-<p align="center">
-  <a href="https://nanoclaw.dev">nanoclaw.dev</a>&nbsp; • &nbsp;
-  <a href="https://docs.nanoclaw.dev">docs</a>&nbsp; • &nbsp;
-  <a href="README_zh.md">中文</a>&nbsp; • &nbsp;
-  <a href="README_ja.md">日本語</a>&nbsp; • &nbsp;
-  <a href="README_ko.md">한국어</a>&nbsp; • &nbsp;
-  <a href="https://discord.gg/VDdww8qS42"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord&v=2" alt="Discord" valign="middle"></a>&nbsp; • &nbsp;
-  <a href="repo-tokens"><img src="repo-tokens/badge.svg" alt="repo tokens" valign="middle"></a>
-</p>
+<p align="center"><strong><a href="#quick-start">🚀 Quick start</a></strong> &nbsp;·&nbsp; <a href="#usage">💬 Examples</a> &nbsp;·&nbsp; <a href="#what-it-supports">🔌 Channels</a> &nbsp;·&nbsp; <a href="https://docs.nanoclaw.dev">Documentation</a></p>
 
 <a name="the-always-on-agent-you-own"></a>
 
-## 🩵 The Always-On Agent You Own
+## 🩵 Why NanoClaw?
 
 Always-on assistants are a product category now. The big labs will run one for you: on their cloud, on their model, holding your credentials, behind code you can't read. NanoClaw has been doing this since January 2026, before the category had a name, and it does it the other way around.
 
@@ -65,6 +58,8 @@ git clone https://github.com/nanocoai/nanoclaw.git
 cd nanoclaw
 bash nanoclaw.sh
 ```
+
+**Release channels.** The clone above follows the repository’s default branch. For the latest stable version, see [Latest release](https://github.com/nanocoai/nanoclaw/releases/latest). Beta and release candidate builds appear under [Releases](https://github.com/nanocoai/nanoclaw/releases) when available. Check out a specific release tag to pin your install.
 
 `nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, installs a credential gateway, lets you pick the agent provider (Claude, Codex, Cursor or OpenCode) and registers its credential with the gateway, builds the agent container, and pairs your first channel (Slack, Telegram, Discord, WhatsApp, iMessage, or a local CLI).
 
@@ -352,7 +347,9 @@ This keeps the base system minimal and lets every user customize their installat
 
 ## 👥 Community
 
-Questions? Ideas? [Join the Discord](https://discord.gg/VDdww8qS42).
+[Website](https://nanoclaw.dev) · [Discord](https://discord.gg/VDdww8qS42) · [Repository token count](repo-tokens)
+
+**Read in another language** · [中文](README_zh.md) · [日本語](README_ja.md) · [한국어](README_ko.md)
 
 <a name="changelog"></a>
 
