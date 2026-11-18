@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import {
   getPendingMessages,
@@ -423,13 +425,17 @@ export async function processQuery(
   // pushed while an answer is still streaming waits its turn — the in-flight
   // answer keeps the destination it started with. Pushed routes queue in
   // push order (including retries) and advance at every result, mirroring
-  // archivePrompts. An empty initial prompt (a pre-warmed query) starts idle.
+  // archivePrompts. A provider that reports which inputs a turn consumed
+  // (`consumed`) lets the queue drop inputs answered inside another turn.
+  // An empty initial prompt (a pre-warmed query) starts idle.
   let answering = initialPrompt !== '';
   type QueuedTurn = {
     routing: RoutingContext;
     unwrappedNudged: boolean;
     taskBlockNudged: boolean;
     nudgedWindow?: SeqWindow;
+    /** Names this turn's input in the provider's `consumed` events. */
+    inputId: string;
   };
   const queuedTurns: QueuedTurn[] = [];
   // On a wrap-nudge retry: the rows the nudged turn wrote. The turn boundary
@@ -447,9 +453,34 @@ export async function processQuery(
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
   const pushRetry = (prompt: string, retryOf?: SeqWindow): void => {
-    query.push(prompt);
-    queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged, nudgedWindow: retryOf });
+    const inputId = randomUUID();
+    query.push(prompt, inputId);
+    queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged, nudgedWindow: retryOf, inputId });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
+  };
+  // The provider answered several inputs in one turn: they waited together at
+  // a turn boundary, or one was folded into the running turn. Results come one
+  // per turn, not one per input, so the queued turns of the absorbed inputs
+  // would never be answered by a result of their own: the queue would stay
+  // behind for the rest of the query, and every later turn would take an
+  // earlier message's routing. Drop them. The running turn keeps its own
+  // routing, run mode and retry guards, the same as a batch of several
+  // messages answers under its first message's routing (extractRouting).
+  // Their prompts are archived with this turn. archivePrompts holds the
+  // running turn's prompt then one per queued turn, in the same order, so
+  // the absorbed prompts are the ones right after the running turn's.
+  const absorbConsumed = (ids: string[]): void => {
+    const consumed = new Set(ids);
+    let absorbed = 0;
+    while (absorbed < queuedTurns.length && consumed.has(queuedTurns[absorbed].inputId)) absorbed++;
+    if (absorbed === 0) return;
+    const turns = queuedTurns.splice(0, absorbed);
+    // An absorbed wrap-nudge retry re-sends what its nudged turn already wrote;
+    // keep its echo window unless this turn has one of its own.
+    if (!nudgedWindow) for (const turn of turns) nudgedWindow = turn.nudgedWindow ?? nudgedWindow;
+    const prompts = archivePrompts.splice(0, absorbed + 1);
+    archivePrompts.unshift(prompts.join('\n\n'));
+    log(`Provider answered ${absorbed + 1} inputs in one turn: ${absorbed} queued turn(s) absorbed`);
   };
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
@@ -538,12 +569,14 @@ export async function processQuery(
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
-        query.push(prompt);
+        const inputId = randomUUID();
+        query.push(prompt, inputId);
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
           routing: extractRouting(keep),
           unwrappedNudged: false,
           taskBlockNudged: false,
+          inputId,
         };
         if (answering) queuedTurns.push(next);
         else adoptTurn(next);
@@ -585,7 +618,9 @@ export async function processQuery(
       handleEvent(event, routing);
       touchHeartbeat();
 
-      if (event.type === 'init') {
+      if (event.type === 'consumed') {
+        absorbConsumed(event.ids);
+      } else if (event.type === 'init') {
         queryContinuation = event.continuation;
         // Persist immediately so a mid-turn container crash still lets the
         // next wake resume the conversation. Without this, the session id

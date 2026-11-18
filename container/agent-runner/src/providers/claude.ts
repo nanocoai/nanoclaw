@@ -75,7 +75,12 @@ interface SDKUserMessage {
   message: { role: 'user'; content: string };
   parent_tool_use_id: null;
   session_id: string;
+  /** Client id of this input; the CLI lists it in assistant.user_message_uuids. */
+  uuid?: Uuid;
 }
+
+type Uuid = `${string}-${string}-${string}-${string}-${string}`;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Push-based async iterable for streaming user messages to the Claude SDK.
@@ -85,12 +90,16 @@ class MessageStream {
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string): void {
+  push(text: string, uuid?: string): void {
     this.queue.push({
       type: 'user',
       message: { role: 'user', content: text },
       parent_tool_use_id: null,
       session_id: '',
+      // The CLI echoes client uuids back in assistant.user_message_uuids,
+      // which is how translateEvents reports the inputs a turn consumed. It
+      // takes only a UUID; anything else goes unnamed (never reported).
+      ...(uuid && UUID_RE.test(uuid) ? { uuid: uuid as Uuid } : {}),
     });
     this.waiting?.();
   }
@@ -335,6 +344,14 @@ export class ClaudeProvider implements AgentProvider {
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'assistant') {
+          // Which pushed inputs this turn has consumed. The CLI answers inputs
+          // waiting together at a turn boundary in one turn with one result,
+          // so the poll-loop cannot count results to know which input a turn
+          // answers. Subagent frames carry no list.
+          const consumed = (message as { user_message_uuids?: unknown }).user_message_uuids;
+          if (Array.isArray(consumed) && consumed.length > 0) {
+            yield { type: 'consumed', ids: consumed.filter((id): id is string => typeof id === 'string') };
+          }
           // Surface each assistant message's text as it streams in. The final
           // `result` event only carries the LAST assistant text — a wrapped
           // <message> block composed between tool calls would otherwise be
@@ -428,7 +445,7 @@ export class ClaudeProvider implements AgentProvider {
     }
 
     return {
-      push: (msg) => stream.push(msg),
+      push: (msg, inputId) => stream.push(msg, inputId),
       end: () => stream.end(),
       events: translateEvents(),
       abort: () => {

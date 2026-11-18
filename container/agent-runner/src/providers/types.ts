@@ -140,8 +140,12 @@ export type McpServerConfig =
   | { type: 'http'; url: string; headers?: Record<string, string> };
 
 export interface AgentQuery {
-  /** Push a follow-up message into the active query. */
-  push(message: string): void;
+  /**
+   * Push a follow-up message into the active query. `inputId`, when given,
+   * names this input in later `consumed` events; a provider that cannot
+   * report consumption ignores it.
+   */
+  push(message: string, inputId?: string): void;
 
   /** Signal that no more input will be sent. */
   end(): void;
@@ -176,6 +180,15 @@ export type ProviderEvent =
   | { type: 'text'; text: string }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
+  /**
+   * The pushed inputs (by `inputId`) the current turn has consumed so far.
+   * A runtime may answer several inputs in one turn with one `result` —
+   * inputs waiting together at a turn boundary, or one folded into a running
+   * turn — so results alone cannot say which input a turn answers. Optional:
+   * a provider that cannot tell keeps the one-result-per-input assumption.
+   * Repeats are harmless; ids the poll-loop does not know are ignored.
+   */
+  | { type: 'consumed'; ids: string[] }
   | { type: 'file'; path: string }
   /**
    * Liveness signal. Providers MUST yield this on every underlying SDK
