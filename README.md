@@ -1,12 +1,13 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/nanoclaw-logo-dark.svg">
-    <img src="assets/nanoclaw-logo-light.svg" alt="NanoClaw" width="310">
+    <img src="assets/nanoclaw-logo-light.svg" alt="NanoClaw" width="440">
   </picture>
 </p>
 
+<h1 align="center">The always-on agent you own.</h1>
+
 <p align="center">
-  <strong>The always-on agent you own.</strong><br>
   Self-hosted, open source, and small enough to read. Each agent runs in its own container on your machine, on the harness you choose.
 </p>
 
