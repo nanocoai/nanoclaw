@@ -356,6 +356,17 @@ export function dumpTranscriptOnFailure(transcript: string): void {
   }
 }
 
+export interface FailOptions {
+  /** Raw step log handed to the Claude debug offer. */
+  rawLogPath?: string;
+  /** Fixed identifier for this failure branch, sent as `reason_code`. */
+  code?: string;
+  /** Step name to send instead of `stepName` when that holds a local name. */
+  diagnosticStep?: string;
+  /** First line of the bounce reason, for a caller with no terminal. Never sent. */
+  detail?: string;
+}
+
 /**
  * Abort the setup run with a user-facing error, logging the abort to the
  * progression log. Takes the step name explicitly so callers are clear
@@ -366,9 +377,11 @@ export function dumpTranscriptOnFailure(transcript: string): void {
  * process.exit. The return type is `Promise<never>`; control-flow
  * narrowing still works after `await`.
  */
-export async function fail(stepName: string, msg: string, hint?: string, rawLogPath?: string): Promise<never> {
+export async function fail(stepName: string, msg: string, hint?: string, opts: FailOptions = {}): Promise<never> {
+  const { rawLogPath, code = 'unspecified', diagnosticStep = stepName } = opts;
   setupLog.abort(stepName, msg);
-  phEmit('setup_aborted', { step: stepName, reason: msg });
+  // `msg` can carry names the operator typed and local paths; only the fixed code leaves the machine.
+  phEmit('setup_aborted', { step: diagnosticStep, reason_code: code });
   p.log.error(msg);
   if (hint) p.log.message(k.dim(hint));
   p.log.message(k.dim('Logs: logs/setup.log · Raw: logs/setup-steps/'));

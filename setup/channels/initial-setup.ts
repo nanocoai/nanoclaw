@@ -49,6 +49,49 @@ export function initialChannelOptions(): { value: ChannelChoice; label: string; 
   ];
 }
 
+/**
+ * Public channel names a typed "Other" answer may report: the channel skills
+ * this repo ships plus common platforms people ask for. A fixed list, not a
+ * skill lookup, so a private `add-<name>` skill never names itself.
+ */
+const KNOWN_OTHER_CHANNELS: ReadonlySet<string> = new Set([
+  // shipped as .claude/skills/add-<name>
+  'deltachat',
+  'dial',
+  'discord',
+  'emacs',
+  'gchat',
+  'github',
+  'imessage',
+  'linear',
+  'matrix',
+  'mattermost',
+  'resend',
+  'signal',
+  'slack',
+  'teams',
+  'telegram',
+  'webex',
+  'wechat',
+  'whatsapp',
+  'whatsapp-cloud',
+  // asked for, not shipped
+  'email',
+  'irc',
+  'line',
+  'messenger',
+  'rocketchat',
+  'sms',
+  'viber',
+  'xmpp',
+  'zulip',
+]);
+
+/** Diagnostics value for a typed "Other" channel; free text never leaves the machine. */
+export function otherChannelDiagnostic(name: string): string {
+  return KNOWN_OTHER_CHANNELS.has(name) ? name : 'unknown';
+}
+
 export function runInitialChannel(
   choice: InstallableChannel,
   displayName: string,
