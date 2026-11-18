@@ -11,6 +11,8 @@ import { join } from 'node:path';
 import type { SlackAdapter } from '@chat-adapter/slack';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { log } from '../log.js';
+
 const slackCalls: Array<{ method: string; args: Record<string, unknown> }> = [];
 let slackFailure: Error | null = null;
 
@@ -66,9 +68,11 @@ beforeAll(async () => {
     [
       'SLACK_BOT_TOKEN=xoxb-default',
       'SLACK_SIGNING_SECRET=default-secret',
-      'SLACK_INSTANCES=alpha',
+      'SLACK_INSTANCES=alpha,beta',
       'SLACK_BOT_TOKEN_ALPHA=xoxb-alpha',
       'SLACK_SIGNING_SECRET_ALPHA=alpha-secret',
+      'SLACK_BOT_TOKEN_BETA=xoxb-beta',
+      'SLACK_SIGNING_SECRET_BETA=beta-secret',
     ].join('\n') + '\n',
   );
   process.chdir(dir);
@@ -161,6 +165,51 @@ describe('errors reject, so the onboarding module can log and retry', () => {
   ])('rejects %s without calling Slack', async (_label, call) => {
     await expect(call()).rejects.toThrow();
     expect(slackCalls).toEqual([]);
+  });
+});
+
+/** What Slack returns to a plain (non-agent-view) app: no assistant:write. */
+function missingScope(needed: string): Error {
+  return Object.assign(new Error('An API error occurred: missing_scope'), {
+    data: { ok: false, error: 'missing_scope', needed, provided: 'chat:write,im:history' },
+  });
+}
+
+describe('plain app without assistant:write (slack-beta)', () => {
+  it('the first missing_scope turns decoration off for that bot only', async () => {
+    const info = vi.spyOn(log, 'info');
+    slackFailure = missingScope('assistant:write');
+
+    await expect(
+      registry.setSuggestedPrompts('slack-beta', 'slack:D0BETA', PROMPTS, 'Get started'),
+    ).resolves.toBeUndefined();
+    await expect(
+      registry.setThreadTitle('slack-beta', 'slack:D0BETA', 'slack:D0BETA:1700000000.000300', 'Beta thread'),
+    ).resolves.toBeUndefined();
+    await expect(registry.setSuggestedPrompts('slack-beta', 'slack:D0BETA', [])).resolves.toBeUndefined();
+
+    // One call reached Slack; the next two were skipped.
+    expect(slackCalls.map((c) => [c.method, c.args.token])).toEqual([
+      ['assistant.threads.setSuggestedPrompts', 'xoxb-beta'],
+    ]);
+    expect(info.mock.calls.filter(([msg]) => String(msg).includes('assistant:write'))).toEqual([
+      [expect.stringContaining('no assistant:write'), { instance: 'slack-beta' }],
+    ]);
+
+    // Other bots keep calling Slack.
+    slackFailure = null;
+    await registry.setSuggestedPrompts('slack', 'slack:D0DEFAULT', PROMPTS, 'Get started');
+    expect(slackCalls.at(-1)?.args.token).toBe('xoxb-default');
+    info.mockRestore();
+  });
+
+  it('a missing_scope for some other scope still rejects and changes nothing', async () => {
+    slackFailure = missingScope('chat:write.customize');
+    await expect(registry.setSuggestedPrompts('slack', 'slack:D0DEFAULT', PROMPTS)).rejects.toBe(slackFailure);
+
+    slackFailure = null;
+    await registry.setSuggestedPrompts('slack', 'slack:D0DEFAULT', PROMPTS);
+    expect(slackCalls).toHaveLength(2);
   });
 });
 
