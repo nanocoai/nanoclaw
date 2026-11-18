@@ -11,6 +11,7 @@ import type { Cli, SupervisedProcess } from './cli.js';
 export interface FakeCall {
   args: string[];
   input?: string;
+  timeoutMs?: number;
   /** Position in one sequence shared with `start()`, so ordering is assertable. */
   seq: number;
 }
@@ -50,15 +51,20 @@ export class FakeCli implements Cli {
   readonly started: Array<{ args: string[]; proc: FakeSupervisedProcess; seq: number }> = [];
   #seq = 0;
   /** Matched in order against the joined argv; first hit wins. */
-  responses: Array<{ match: RegExp; output?: string; throws?: Error | string }> = [];
+  responses: Array<{ match: RegExp; output?: string; throws?: Error | string; once?: boolean }> = [];
+  /** Runs after a call is recorded and before a response is matched; tests use it to simulate call latency. */
+  beforeRun?: (args: string[]) => void;
 
   constructor(readonly bin = 'fake') {}
 
-  run(args: string[], opts?: { input?: string }): string {
-    this.calls.push({ args, input: opts?.input, seq: this.#seq++ });
+  run(args: string[], opts?: { input?: string; timeoutMs?: number }): string {
+    this.calls.push({ args, input: opts?.input, timeoutMs: opts?.timeoutMs, seq: this.#seq++ });
+    this.beforeRun?.(args);
     const joined = args.join(' ');
     for (const response of this.responses) {
       if (!response.match.test(joined)) continue;
+      // A `once` entry is consumed by its first use; later calls fall through.
+      if (response.once) this.responses.splice(this.responses.indexOf(response), 1);
       if (response.throws) {
         throw response.throws instanceof Error ? response.throws : new Error(response.throws);
       }

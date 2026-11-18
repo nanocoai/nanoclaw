@@ -107,3 +107,44 @@ it('rejects a half-implemented connection before the provider can call it', asyn
     }),
   ).toThrow('invalid provider credential connection');
 });
+
+it('hands an exact path to the gateway and refuses anything that is not one', async () => {
+  const root = gateway(`
+    export function createCredentialStore() {
+      return {
+        has: async () => false,
+        save: async () => {},
+        connection: (target) => ({ find: async () => ({ path: target.path }), save: async () => {}, keep: async () => {} }),
+        connectionPaths: true,
+      };
+    }`);
+  const store = await getCredentialStore(root);
+  const target = (path?: string) => ({
+    name: 'scoped',
+    kind: 'api-key' as const,
+    host: 'models.example.test',
+    proxyValue: 'nc-fixture-token',
+    injection: { headerName: 'Authorization', valueFormat: 'Bearer {value}' },
+    ...(path === undefined ? {} : { path }),
+  });
+  expect(await store.connection!(target('/auth/exchange')).find()).toEqual({ path: '/auth/exchange' });
+  expect(await store.connection!(target()).find()).toEqual({ path: undefined });
+  for (const bad of ['', 'auth/exchange', '/v1/*', '/v1?x=1', '/v1#a', '/v 1', '/v1/[ab]', '/v1/a%20b', '/v1/{a,b}'])
+    expect(() => store.connection!(target(bad)), bad).toThrow('exact URL path');
+});
+
+it('refuses a path for a gateway that does not declare path-scoped connections', async () => {
+  const root = gateway(
+    'export function createCredentialStore(){return {has: async()=>false, save: async()=>{}, connection: () => ({ find: async () => null, save: async () => {}, keep: async () => {} })}}',
+  );
+  const store = await getCredentialStore(root);
+  const target = {
+    name: 'scoped',
+    kind: 'api-key' as const,
+    host: 'models.example.test',
+    proxyValue: 'nc-fixture-token',
+    injection: { headerName: 'Authorization', valueFormat: 'Bearer {value}' },
+  };
+  expect(() => store.connection!(target)).not.toThrow();
+  expect(() => store.connection!({ ...target, path: '/v1/exchange' })).toThrow('cannot limit a credential to one path');
+});

@@ -9,6 +9,8 @@ import { controlPaths, controlRequest, grantSecret } from './control.js';
 import { run, statePaths } from './setup.js';
 import { assertCredentialIsolation, ironHeaderName } from './credential-isolation.js';
 
+const CODEX_ACCOUNT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
 /**
  * Iron Control seeds a broker credential with only the refresh token and mints
  * its first access token on a once-a-minute poll. Until then the proxy injects
@@ -66,10 +68,13 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
   return {
     modelEndpoint: (url) => ironModelEndpoint(url, root),
     connection: (target) => createIronCredentialConnection(target, root),
+    connectionPaths: true,
     async has(provider) {
       check(provider);
       if (!fs.existsSync(metadata)) return false;
       const state = JSON.parse(fs.readFileSync(metadata, 'utf8'));
+      // The stand-in needs the workspace id; older logins never recorded it.
+      if (state.mode === 'chatgpt' && !CODEX_ACCOUNT_ID.test(state.accountId ?? '')) return false;
       for (const id of state.secretIds) {
         const secret = await controlRequest(root, `static_secrets/${id}`);
         // Old host-wide injection needs reconnection; values cannot be read back.
@@ -90,7 +95,7 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
     },
     async save(provider, credential) {
       check(provider);
-      let mode: 'api' | 'chatgpt', host: string, brokerId: string | undefined;
+      let mode: 'api' | 'chatgpt', host: string, brokerId: string | undefined, accountId: string | undefined;
       const secretIds: string[] = [];
       if (credential.kind === 'api-key') {
         mode = 'api';
@@ -110,8 +115,9 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
         await isolate(host);
         const auth = JSON.parse(fs.readFileSync(credential.file, 'utf8'));
         const tokens = auth.tokens;
-        if (!tokens?.refresh_token || !tokens?.account_id || !tokens?.id_token)
+        if (!tokens?.refresh_token || !CODEX_ACCOUNT_ID.test(tokens?.account_id ?? '') || !tokens?.id_token)
           throw new Error('Codex login did not produce a complete ChatGPT session.');
+        accountId = tokens.account_id;
         const claims = JSON.parse(Buffer.from(tokens.id_token.split('.')[1], 'base64url').toString());
         const clientId = typeof claims.aud === 'string' ? claims.aud : claims.aud?.[0];
         if (!clientId) throw new Error('Codex login did not identify its OAuth client.');
@@ -146,8 +152,8 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
       fs.writeFileSync(paths.allowedHosts, JSON.stringify([...new Set([...allowed, host])]), { mode: 0o600 });
       await run([], root);
       // Mark setup complete only after the proxy has accepted its new configuration.
-      // Record only non-secret IDs and mode. Iron owns all token refreshes.
-      fs.writeFileSync(metadata, JSON.stringify({ mode, brokerId, secretIds }) + '\n', { mode: 0o600 });
+      // Record only non-secret IDs, mode and workspace id. Iron owns all token refreshes.
+      fs.writeFileSync(metadata, JSON.stringify({ mode, brokerId, secretIds, accountId }) + '\n', { mode: 0o600 });
     },
   };
 }

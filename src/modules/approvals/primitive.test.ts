@@ -1,5 +1,6 @@
 /**
- * requestApproval delivery-failure cleanup, and which thread the card joins.
+ * requestApproval delivery-failure cleanup, the card length limit, and which
+ * thread the card joins.
  *
  * requestApproval records the pending_approvals row before delivering the
  * card to the single picked approver. If that delivery throws, the row used
@@ -15,6 +16,7 @@
 import * as fs from 'fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { CardTooLongError, MAX_CARD_QUESTION_LENGTH } from '../../channels/ask-question.js';
 import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
 import { createMessagingGroup } from '../../db/messaging-groups.js';
@@ -153,6 +155,65 @@ describe('requestApproval delivery failure', () => {
 
     expect(await getPendingApprovalsByAction('test_action')).toHaveLength(1);
     expect(vi.mocked(writeSessionMessage)).not.toHaveBeenCalled();
+  });
+});
+
+describe('requestApproval card length', () => {
+  it('refuses a question too long to show in full: no row, no card, the agent is told why', async () => {
+    const deliver = vi.fn().mockResolvedValue('pm-1');
+    setDeliveryAdapter({ deliver });
+
+    await requestApproval({
+      session,
+      agentName: 'Agent',
+      action: 'test_action',
+      payload: {},
+      title: 'Test Approval',
+      question: 'x'.repeat(MAX_CARD_QUESTION_LENGTH + 1),
+    });
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(await getPendingApprovalsByAction('test_action')).toHaveLength(0);
+    expect(lastNotifyText()).toMatch(/test_action failed: the request is too long to show in full/);
+  });
+
+  it('tells the agent why when the channel refuses the card as too long', async () => {
+    setDeliveryAdapter({
+      async deliver() {
+        throw new CardTooLongError('the request is too long to show in full on a card (1200 characters, limit 1000)');
+      },
+    });
+
+    await requestApproval({
+      session,
+      agentName: 'Agent',
+      action: 'test_action',
+      payload: {},
+      title: 'Test Approval',
+      question: 'Approve the thing?',
+    });
+
+    expect(await getPendingApprovalsByAction('test_action')).toHaveLength(0);
+    expect(lastNotifyText()).toBe(
+      'test_action failed: the request is too long to show in full on a card (1200 characters, limit 1000). Shorten the request and try again.',
+    );
+  });
+
+  it('cards a title plus question right at the limit', async () => {
+    const deliver = vi.fn().mockResolvedValue('pm-1');
+    setDeliveryAdapter({ deliver });
+
+    await requestApproval({
+      session,
+      agentName: 'Agent',
+      action: 'test_action',
+      payload: {},
+      title: 'Test Approval',
+      question: 'x'.repeat(MAX_CARD_QUESTION_LENGTH - 'Test Approval'.length),
+    });
+
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(await getPendingApprovalsByAction('test_action')).toHaveLength(1);
   });
 });
 

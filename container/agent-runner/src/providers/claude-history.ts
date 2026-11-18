@@ -209,9 +209,9 @@ function formatTranscriptMarkdown(
 }
 
 /**
- * Before resuming, drop a transcript that has grown too large or too old to
- * cold-resume within the host's idle ceiling. Archives what it can, moves the
- * `.jsonl` aside, and returns the reason; null keeps resuming.
+ * Before resuming, drop a transcript that is gone or has grown too large or too
+ * old to cold-resume within the host's idle ceiling. Archives what it can, moves
+ * the `.jsonl` aside, and returns the reason; null keeps resuming.
  */
 export function rotateClaudeContinuation(
   input: ClaudeContinuationRotationInput,
@@ -221,17 +221,21 @@ export function rotateClaudeContinuation(
     path.join(claudeConfigDirectory(), 'projects'),
     `${input.continuation}.jsonl`,
   );
-  if (!transcriptPath) return null;
+  // A failed lookup proves nothing, so keep resuming.
+  if (transcriptPath === undefined) return null;
+  // Claude Code deletes old transcripts (cleanupPeriodDays, 30 by default).
+  // Resuming one fails the turn with "No conversation found", so start fresh.
+  if (transcriptPath === null) return 'transcript not found';
 
   try {
     const size = fs.statSync(transcriptPath).size;
-    let firstLine = '';
+    let firstDatedLine = '';
     try {
-      firstLine = readFirstLine(transcriptPath);
+      firstDatedLine = readFirstDatedLine(transcriptPath);
     } catch {
       // Size-only rotation must survive an unreadable first entry.
     }
-    const decision = decideContinuationRotation({ size, firstLine }, fx);
+    const decision = decideContinuationRotation({ size, firstDatedLine }, fx);
     if (!decision?.reason) return null;
 
     archiveClaudeTranscript(
@@ -255,7 +259,7 @@ export function rotateClaudeContinuation(
 }
 
 function decideContinuationRotation(
-  input: { size: number; firstLine: string },
+  input: { size: number; firstDatedLine: string },
   fx: ClaudeHistoryClock,
 ): ClaudeContinuationRotationDecision | null {
   const maxBytes = Number(process.env.CLAUDE_TRANSCRIPT_ROTATE_BYTES) || 12 * 1024 * 1024;
@@ -264,7 +268,7 @@ function decideContinuationRotation(
   const maxAgeMs = !Number.isFinite(days) ? 14 * 86_400_000 : days > 0 ? days * 86_400_000 : Infinity;
   let startMs: number | null = null;
   try {
-    const timestamp = JSON.parse(input.firstLine)?.timestamp;
+    const timestamp = JSON.parse(input.firstDatedLine)?.timestamp;
     const parsed = timestamp ? Date.parse(timestamp) : NaN;
     if (!Number.isNaN(parsed)) startMs = parsed;
   } catch {
@@ -285,26 +289,42 @@ function decideContinuationRotation(
   return null;
 }
 
-function findContinuationFile(root: string, fileName: string): string | null {
+/** The transcript's path, null when it does not exist, undefined when the lookup itself failed. */
+function findContinuationFile(root: string, fileName: string): string | null | undefined {
   let directories: string[];
   try {
     directories = fs.readdirSync(root);
-  } catch {
-    return null;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined;
   }
   for (const directory of directories) {
     const candidate = path.join(root, directory, fileName);
-    if (fs.existsSync(candidate)) return candidate;
+    try {
+      fs.statSync(candidate);
+      return candidate;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return undefined;
+    }
   }
   return null;
 }
 
-function readFirstLine(filePath: string): string {
+// A transcript's age is its first entry that carries a timestamp, not its first line: Claude Code
+// 2.1.321 opens a transcript with a session-owner record that has none.
+function readFirstDatedLine(filePath: string): string {
   const fd = fs.openSync(filePath, 'r');
   try {
-    const buffer = Buffer.alloc(4096);
+    const buffer = Buffer.alloc(64 * 1024);
     const bytes = fs.readSync(fd, buffer, 0, buffer.length, 0);
-    return buffer.toString('utf-8', 0, bytes).split('\n', 1)[0];
+    for (const line of buffer.toString('utf-8', 0, bytes).split('\n')) {
+      try {
+        if (typeof JSON.parse(line)?.timestamp === 'string') return line;
+      } catch {
+        // A line cut off by the read window, or one that is not JSON, dates nothing.
+      }
+    }
+    return '';
   } finally {
     fs.closeSync(fd);
   }

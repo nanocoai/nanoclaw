@@ -23,6 +23,7 @@ import {
   extractRouting,
   categorizeMessage,
   FAILURE_NOTICE_FIELD,
+  GENERIC_FAILURE_NOTICE,
   isClearCommand,
   isRunnerCommand,
   isSessionEcho,
@@ -279,8 +280,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         setContinuation(config.providerName, continuation);
       }
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      log(`Query error: ${errMsg}`);
+      log(`Query error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
 
       // Stale/corrupt continuation recovery: ask the provider whether
       // this error means the stored continuation is unusable, and clear
@@ -643,7 +643,7 @@ export async function processQuery(
             // A failed turn needs a visible notice even after a partial reply.
             // Only the provider's dedicated error field is channel content;
             // unwrapped model output and raw diagnostics remain private.
-            const notice = event.error ?? 'The agent run failed. Check the logs for details.';
+            const notice = event.error ?? GENERIC_FAILURE_NOTICE;
             if (sendsFailureNotice(routing)) await deliverErrorResult(routing, notice);
             // Keep the reason in the runner log, since the skipped notice may
             // be the only place it would have been recorded.
@@ -747,7 +747,7 @@ export async function processQuery(
           continue;
         noticed.push(target);
         try {
-          await deliverErrorResult(target, 'The agent run failed. Check the logs for details.');
+          await deliverErrorResult(target, GENERIC_FAILURE_NOTICE);
         } catch (noticeError) {
           log(
             `Failed to deliver query error notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,

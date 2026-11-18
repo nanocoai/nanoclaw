@@ -15,6 +15,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(root, { recursive: true, force: true });
   fs.rmSync(outside, { recursive: true, force: true });
 });
@@ -23,6 +24,36 @@ function openOrThrow(segments: string[], create = false): AnchoredDir {
   const dir = AnchoredDir.open(root, segments, create);
   if (!dir) throw new Error('expected a directory');
   return dir;
+}
+
+/** Make `root/name` hold `levels` nested directories with a file in the innermost. */
+function nestDirs(name: string, levels: number): void {
+  let dir = path.join(root, name);
+  fs.mkdirSync(dir);
+  for (let level = 1; level < levels; level++) {
+    dir = path.join(dir, 'd');
+    fs.mkdirSync(dir);
+  }
+  fs.writeFileSync(path.join(dir, 'file'), 'deep');
+}
+
+/** Record every descriptor fs.openSync hands out and drop it again on fs.closeSync. */
+function trackDescriptors(): { open: Set<number>; opened: () => number } {
+  const open = new Set<number>();
+  let opened = 0;
+  const openSync = fs.openSync;
+  const closeSync = fs.closeSync;
+  vi.spyOn(fs, 'openSync').mockImplementation((file, flags, mode) => {
+    const fd = openSync(file, flags, mode);
+    open.add(fd);
+    opened++;
+    return fd;
+  });
+  vi.spyOn(fs, 'closeSync').mockImplementation((fd) => {
+    open.delete(fd);
+    closeSync(fd);
+  });
+  return { open, opened: () => opened };
 }
 
 describe('AnchoredDir.open', () => {
@@ -206,5 +237,176 @@ describe('operations stay on the opened directory', () => {
     }
     expect(fs.readFileSync(target, 'utf-8')).toBe('keep');
     expect(fs.readlinkSync(path.join(root, 'x'))).toBe('/app/skills/x');
+  });
+
+  it('recursive removal stays in the pinned directory and removes links without touching their targets', () => {
+    fs.mkdirSync(path.join(root, 'parent', 'tree', 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'parent', 'tree', 'nested', 'file'), 'remove');
+    fs.writeFileSync(path.join(outside, 'keep'), 'keep');
+    fs.symlinkSync(outside, path.join(root, 'parent', 'tree', 'link'));
+    fs.symlinkSync(outside, path.join(root, 'parent', 'link'));
+    const dir = openOrThrow(['parent']);
+    try {
+      fs.renameSync(path.join(root, 'parent'), path.join(root, 'moved'));
+      fs.symlinkSync(outside, path.join(root, 'parent'));
+      dir.remove('tree', true);
+      dir.remove('link', true);
+      dir.remove('missing', true);
+      expect(dir.entries()).toEqual([]);
+    } finally {
+      dir.close();
+    }
+    expect(fs.readdirSync(path.join(root, 'moved'))).toEqual([]);
+    expect(fs.readdirSync(outside)).toEqual(['keep']);
+    expect(fs.readFileSync(path.join(outside, 'keep'), 'utf-8')).toBe('keep');
+  });
+
+  it('removes children whose on-disk names carry odd or non-UTF8 bytes', () => {
+    // Filenames are raw bytes on Unix; the recursive walk must delete each one
+    // by its real name, not abort partway and strand the rest.
+    fs.mkdirSync(path.join(root, 'skill'));
+    fs.writeFileSync(path.join(root, 'skill', 'SKILL.md'), 'skill');
+    fs.writeFileSync(path.join(root, 'skill', 'report\\2026.md'), 'odd');
+    // A raw 0xff byte is a valid Linux filename but rejected on UTF-8-only
+    // filesystems (APFS) — exercise it where the platform allows, skip where not.
+    try {
+      fs.writeFileSync(Buffer.concat([Buffer.from(path.join(root, 'skill') + '/'), Buffer.from([0xff])]), 'raw');
+    } catch {
+      /* filesystem rejects non-UTF8 names */
+    }
+    const dir = openOrThrow([]);
+    try {
+      dir.remove('skill', true);
+      expect(dir.entries()).toEqual([]);
+    } finally {
+      dir.close();
+    }
+  });
+
+  it('removes a tree of 64 nested directories', () => {
+    nestDirs('tree', 64);
+    const dir = openOrThrow([]);
+    try {
+      dir.remove('tree', true);
+      expect(dir.entries()).toEqual([]);
+    } finally {
+      dir.close();
+    }
+  });
+
+  it('refuses a deeper tree before opening another level and closes every directory it pinned', () => {
+    nestDirs('tree', 65);
+    const fds = trackDescriptors();
+    const dir = openOrThrow([]);
+    try {
+      expect(() => dir.remove('tree', true)).toThrow(/too deep to remove safely/);
+      expect(dir.entries()).toEqual(['tree']);
+    } finally {
+      dir.close();
+    }
+    // The anchor plus the 64 allowed levels; the 65th is never opened.
+    expect(fds.opened()).toBe(1 + 64);
+    expect(fds.open.size).toBe(0);
+  });
+
+  it('stops a walk that a concurrent rename keeps sending back to the same two directories', () => {
+    // Before each listing after the first, the container swaps parent and child,
+    // so every level reopens one of the same two inodes and only the bound ends
+    // it. The swaps stop after 100 so an unbounded walk fails instead of hanging.
+    fs.mkdirSync(path.join(root, 'tree', 'c'), { recursive: true });
+    let outer = 'tree';
+    let inner = 'c';
+    let listings = 0;
+    const readdirSync = fs.readdirSync;
+    vi.spyOn(fs, 'readdirSync').mockImplementation(((dirPath: fs.PathLike, options?: unknown) => {
+      if (listings++ > 0 && listings <= 100) {
+        fs.renameSync(path.join(root, outer, inner), path.join(root, inner));
+        fs.renameSync(path.join(root, outer), path.join(root, inner, outer));
+        [outer, inner] = [inner, outer];
+      }
+      return readdirSync(dirPath, options as never);
+    }) as typeof fs.readdirSync);
+    const fds = trackDescriptors();
+    const dir = openOrThrow([]);
+    try {
+      expect(() => dir.remove('tree', true)).toThrow(/too deep to remove safely/);
+    } finally {
+      dir.close();
+    }
+    expect(listings).toBe(64);
+    expect(fds.open.size).toBe(0);
+  });
+
+  it('copies only the supplied file tree into the pinned directory and preserves executable permissions', () => {
+    fs.mkdirSync(path.join(root, 'src', 'scripts', 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src', 'SKILL.md'), 'skill');
+    fs.writeFileSync(path.join(root, 'src', 'scripts', 'run.sh'), '#!/bin/sh\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(root, 'src', 'scripts', 'nested', 'data'), 'data');
+    fs.writeFileSync(path.join(root, 'src', 'unlisted'), 'not selected');
+    const src = openOrThrow(['src']);
+    const dst = openOrThrow(['dst'], true);
+    try {
+      fs.renameSync(path.join(root, 'dst'), path.join(root, 'moved'));
+      fs.symlinkSync(outside, path.join(root, 'dst'));
+      dst.copyFiles(src, 'skill', ['SKILL.md', 'scripts/run.sh', 'scripts/nested/data']);
+    } finally {
+      src.close();
+      dst.close();
+    }
+    const copied = path.join(root, 'moved', 'skill');
+    expect(fs.readdirSync(copied)).toEqual(['SKILL.md', 'scripts']);
+    expect(fs.readFileSync(path.join(copied, 'SKILL.md'), 'utf-8')).toBe('skill');
+    expect(fs.readFileSync(path.join(copied, 'scripts', 'run.sh'), 'utf-8')).toBe('#!/bin/sh\n');
+    expect(fs.statSync(path.join(copied, 'scripts', 'run.sh')).mode & 0o777).toBe(0o755);
+    expect(fs.readFileSync(path.join(copied, 'scripts', 'nested', 'data'), 'utf-8')).toBe('data');
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  it.each(['file', 'directory', 'symlink'])('refuses a copy destination occupied by a %s', (kind) => {
+    const src = openOrThrow(['src'], true);
+    const dst = openOrThrow(['dst'], true);
+    const taken = path.join(root, 'dst', 'taken');
+    fs.writeFileSync(path.join(outside, 'keep'), 'keep');
+    if (kind === 'file') fs.writeFileSync(taken, 'keep');
+    if (kind === 'directory') fs.mkdirSync(taken);
+    if (kind === 'symlink') fs.symlinkSync(outside, taken);
+    try {
+      src.writeNewFile('file', Buffer.from('new'));
+      expect(() => dst.copyFiles(src, 'taken', ['file'])).toThrow(/EEXIST/);
+      if (kind === 'file') expect(fs.readFileSync(taken, 'utf-8')).toBe('keep');
+      if (kind === 'directory') expect(fs.readdirSync(taken)).toEqual([]);
+      if (kind === 'symlink') expect(fs.readlinkSync(taken)).toBe(outside);
+    } finally {
+      src.close();
+      dst.close();
+    }
+    expect(fs.readdirSync(outside)).toEqual(['keep']);
+    expect(fs.readFileSync(path.join(outside, 'keep'), 'utf-8')).toBe('keep');
+  });
+
+  it.each(['file', 'directory'])('refuses a %s name occupied while copying a tree', (kind) => {
+    fs.mkdirSync(path.join(root, 'src', 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src', 'scripts', 'run.sh'), 'new');
+    fs.writeFileSync(path.join(root, 'src', 'SKILL.md'), 'new');
+    const src = openOrThrow(['src']);
+    const dst = openOrThrow(['dst'], true);
+    const openDir = AnchoredDir.prototype.openDir;
+    vi.spyOn(AnchoredDir.prototype, 'openDir').mockImplementation(function (this: AnchoredDir, name, create) {
+      const dir = openDir.call(this, name, create);
+      if (name === 'copy' && dir) {
+        if (kind === 'file') dir.writeNewFile('SKILL.md', Buffer.from('keep'));
+        else dir.openDir('scripts', true)!.close();
+      }
+      return dir;
+    });
+    try {
+      expect(() => dst.copyFiles(src, 'copy', ['SKILL.md', 'scripts/run.sh'])).toThrow(/EEXIST/);
+    } finally {
+      src.close();
+      dst.close();
+    }
+    const copied = path.join(root, 'dst', 'copy');
+    if (kind === 'file') expect(fs.readFileSync(path.join(copied, 'SKILL.md'), 'utf-8')).toBe('keep');
+    else expect(fs.readdirSync(path.join(copied, 'scripts'))).toEqual([]);
   });
 });

@@ -21,7 +21,12 @@
  * exposing just user-roles/user-dms) is more churn than it's worth. Revisit
  * if either module becomes genuinely optional (see REFACTOR_PLAN open q #3).
  */
-import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
+import {
+  CardTooLongError,
+  cardQuestionTooLong,
+  normalizeOptions,
+  type RawOption,
+} from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { createPendingApproval, deletePendingApproval, getSession } from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
@@ -237,6 +242,13 @@ export interface RequestApprovalOptions {
 export async function requestApproval(opts: RequestApprovalOptions): Promise<void> {
   const { session, action, payload, title, question, agentName, approverUserId } = opts;
 
+  // The approver must see the whole request: refuse what a card can't show in full.
+  const tooLong = cardQuestionTooLong(title, question);
+  if (tooLong) {
+    await notifyAgent(session, `${action} failed: ${tooLong}. Shorten the request and try again.`);
+    return;
+  }
+
   const approvers = approverUserId ? [approverUserId] : await pickApprover(session.agent_group_id);
   if (approvers.length === 0) {
     await notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
@@ -295,7 +307,12 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
       // The single delivery target never saw the card — remove the row so it
       // can't linger as a pending approval nobody can act on.
       await deletePendingApproval(approvalId);
-      await notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
+      // A card the channel refused as too long says why, so the agent can shorten it.
+      const reason =
+        err instanceof CardTooLongError
+          ? `${err.message}. Shorten the request and try again.`
+          : `could not deliver approval request to ${target.userId}.`;
+      await notifyAgent(session, `${action} failed: ${reason}`);
       return;
     }
   }

@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
+import { getAgentGroupByFolder } from './db/agent-groups.js';
 
 /**
  * Aligned with the runtime label grammar (`labelValueLegal` in
@@ -24,13 +25,36 @@ export function isValidGroupFolder(folder: string): boolean {
   return true;
 }
 
-export function assertValidGroupFolder(folder: string): void {
-  if (!isValidGroupFolder(folder)) {
-    throw new Error(
-      `Invalid group folder "${folder}" — at most 63 characters of [A-Za-z0-9_-], ` +
-        `alphanumeric at both ends (the folder is carried verbatim as a runtime label)`,
-    );
+/** `base` is the folder before a clash suffix was added, so the error can say it was taken. */
+export function assertValidGroupFolder(folder: string, base = folder): void {
+  if (isValidGroupFolder(folder)) return;
+  // A folder derived from a name can only fail on these two; naming them tells the caller what to change.
+  let why =
+    'at most 63 characters of [A-Za-z0-9_-], alphanumeric at both ends (the folder is carried verbatim as a runtime label)';
+  if (RESERVED_FOLDERS.has(folder.toLowerCase())) why = 'reserved';
+  else if (folder.length > 63) {
+    why = `too long: ${folder.length} characters, at most 63${folder === base ? '' : ` ("${base}" is already taken)`}`;
   }
+  throw new Error(`Invalid group folder "${folder}" — ${why}`);
+}
+
+/**
+ * The folder for a new agent whose name normalizes to `base`: `base`, or the
+ * first free `base-2`, `base-3`… Throws, saying why, when it can't be a group
+ * folder. An invalid `base` is not deduped: "global" would otherwise become
+ * global-2 only where a v1 migration left groups/global.
+ */
+export async function newGroupFolder(base: string): Promise<string> {
+  let folder = base;
+  if (isValidGroupFolder(base)) {
+    // Disk-aware (A4): a folder with no claiming row is deleted-group residue, and
+    // adopting it would re-scope the old group's data under the new agent.
+    for (let n = 2; (await getAgentGroupByFolder(folder)) || groupFolderExistsOnDisk(folder); n++) {
+      folder = `${base}-${n}`;
+    }
+  }
+  assertValidGroupFolder(folder, base);
+  return folder;
 }
 
 function ensureWithinBase(baseDir: string, resolvedPath: string): void {

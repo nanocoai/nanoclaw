@@ -12,9 +12,6 @@
  * interpolated into the shell string, so hostile values cannot inject shell
  * syntax. cwd arrives absolute (resolved by plugin-mcp.ts), so `cd` cannot
  * misread it as a flag.
- *
- * Twin-patched at this same path on the providers registry branch (donor-
- * branch doctrine); keep the two copies byte-identical.
  */
 import type { McpServerConfig } from './types.js';
 

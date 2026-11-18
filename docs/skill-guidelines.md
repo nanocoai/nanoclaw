@@ -43,7 +43,7 @@ Together they define a maintainable skill: focused responsibility, a small integ
 
 A skill carries everything it needs:
 
-- **Code**: the files it adds. They live in the skill's own folder, or, for large registry-backed skills like channels and providers, on a registry branch the skill fetches from. Apply copies them in.
+- **Code**: the files it adds. They live in the skill's own folder (a provider's in `payload/`), or, for channels, on the `channels` registry branch the skill fetches from. Apply copies them in.
 - **Apply**: the steps in `SKILL.md`, written as prose an agent can run. Apply must be safe to re-run: upgrades re-run it, and a skill that half-applies twice is a bug.
 - **Remove**: a separate `REMOVE.md` that reverses *every* change apply made: barrel lines deleted (not commented out), every copied file removed including tests, dependencies uninstalled, Dockerfile edits reverted, env lines removed. **REMOVE.md is required exactly when apply leaves anything behind.** A pure instruction-only skill that copies nothing needs none, and an empty one is noise.
 - **Tests**: files that ship with the skill and are copied into the project's test tree on apply, so they run against the *composed* system.
@@ -96,7 +96,7 @@ A skill-only provider (`offered: 'false'`) must not copy a `setup/providers/<nam
 
 **Conformance test.** Every provider that declares a runtime contract proves it from its own `container/agent-runner/src/providers/<name>.conformance.test.ts`, calling `defineProviderConformance(name, contract, { probes? })` with the probe fixtures its resolves need — that knowledge is the provider's, so core runs no generic sweep over registered contracts, and Claude proves its own the same way. The file is part of the payload a provider skill copies; the install verifier (`scripts/provider-contract-verifier.ts`) runs it and fails when a declared provider ships none.
 
-**Merge order.** The provider payload branch must carry the files a provider skill copies (including the `provider-contracts/<name>.ts` declarations and the `<name>.conformance.test.ts`) before the trunk change that lists them lands, otherwise `/add-<name>` fails at its copy step; `scripts/test-registry-skills.ts --combined-providers` fails CI when trunk carries provider skills whose payload is not on the registry branch.
+**Payload completeness.** The skill's `payload/` must carry every file its `nc:copy` block lists (including the `provider-contracts/<name>.ts` declarations and the `<name>.conformance.test.ts`), so the payload and the SKILL.md that lists it land in the same PR; a missing file fails `/add-<name>` at its copy step, and the registry-skills CI jobs that apply the skill fail with it.
 
 ---
 
@@ -171,7 +171,7 @@ The test matches the kind of integration point:
 - **Config / container probe** (mounts, Dockerfile, a tool installed in the image): run the change where you can. Spin up a container to confirm a mount or binary. Checking that a line exists in a file is the last resort.
 - **Agentic run** (operational, instruction-only skills): run the workflow with a small model; did it complete?
 - **Patch behavior** (a patch skill that changes core logic): a behavior test of the changed behavior.
-- **Provider (multi-point)**: a non-default agent backend reaches into *two* barrels (host `src/providers/index.ts`; container `container/agent-runner/src/providers/index.ts`), plus Dockerfile edits and a CLI or SDK dependency. Each is a separate way to break, and each needs its own guard. Ship a **barrel-driven registration test per tree** that imports *only* the real barrel and asserts the registry contains the provider. **The trap:** a `*.factory.test.ts` that imports the provider module directly self-registers it and stays green when the barrel line is deleted; that's a unit test, not a registration guard. REMOVE.md must reverse both barrel lines, all copied files in both trees, the dependency, and the Dockerfile edits.
+- **Provider (multi-point)**: a non-default agent backend reaches into five barrels (host and container `providers/index.ts` and `provider-contracts/index.ts`, plus `setup/providers/index.ts`) and pins a CLI or SDK dependency (`container/cli-tools.json` or an agent-runner dependency). Each is a separate way to break, and each needs its own guard. Ship a **barrel-driven registration test per tree** that imports *only* the real barrel and asserts the registry contains the provider. **The trap:** a `*.factory.test.ts` that imports the provider module directly self-registers it and stays green when the barrel line is deleted; that's a unit test, not a registration guard. REMOVE.md must reverse every barrel line, all copied files in every tree, and the dependency or manifest pin.
 - **Content / instruction-only** (a reference wiki, a pure workflow): makes no functional reach-in, so it owes no integration test. Conformance is anatomy: idempotent apply, plus REMOVE.md iff apply leaves anything behind.
 
 ### Dependencies are integration points
@@ -221,4 +221,4 @@ In-tree exemplars for the code archetypes. (Two carry known smells, kept deliber
 - `add-slack`: Chat SDK channel registration; the template for the whole channel family.
 - `add-deltachat`: native channel registration.
 - `add-atomic-chat-tool`: MCP-tool wiring across both runtimes (container registration and host env-helper call).
-- `add-opencode` / `add-codex`: the provider multi-point archetype, with two barrels, Dockerfile pins, and per-tree registration tests.
+- `add-opencode` / `add-codex` / `add-cursor`: the provider multi-point archetype, with five barrels, manifest or dependency pins, and per-tree registration tests.

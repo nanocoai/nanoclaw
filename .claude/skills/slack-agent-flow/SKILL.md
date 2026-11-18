@@ -65,14 +65,15 @@ test -f src/channels/slack.ts && test -f src/channels/slack-lib.ts && test -f sr
 
 Everything this flow plugs into is standard trunk API — the adapter hot-start
 entry, the delivery batch preview, the mailbox delivery/session helpers, the
-create-agent notify option, the decline-and-notify overrides, the container
-tool-extension hook, and the setup wizard's channel registries. This is a
-trunk **version requirement, not an edit**: if the check below fails, the
-NanoClaw trunk is too old for this skill — bring the install up to date
-(`/update-nanoclaw`) instead of patching any of these files by hand:
+create-agent notify option and template-aware hold payload, the
+decline-and-notify overrides, the container tool-extension hook, and the setup
+wizard's channel registries. This is a trunk **version requirement, not an
+edit**: if the check below fails, the NanoClaw trunk is too old for this skill —
+bring the install up to date (`/update-nanoclaw`) instead of patching any of
+these files by hand:
 
 ```nc:run effect:check
-grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "session: Session) => Promise<void>" src/delivery.ts && grep -q "trigger?: boolean" src/session-manager.ts && grep -q "findCliResponse" container/agent-runner/src/db/messages-in.ts && grep -q "Promise<number>" container/agent-runner/src/db/messages-out.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "dedupeKey?: string" src/modules/permissions/sender-approval.ts && grep -q "declineText?: string" src/modules/permissions/sender-approval.ts && grep -q "fyiText?: string | null" src/modules/permissions/sender-approval.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/project-doc-compose.ts && grep -q "await action.decide" src/guard/guard.ts
+grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "session: Session) => Promise<void>" src/delivery.ts && grep -q "trigger?: boolean" src/session-manager.ts && grep -q "findCliResponse" container/agent-runner/src/db/messages-in.ts && grep -q "Promise<number>" container/agent-runner/src/db/messages-out.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "export function createAgentHoldPayload" src/modules/agent-to-agent/create-agent.ts && grep -q "dedupeKey?: string" src/modules/permissions/sender-approval.ts && grep -q "declineText?: string" src/modules/permissions/sender-approval.ts && grep -q "fyiText?: string | null" src/modules/permissions/sender-approval.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/project-doc-compose.ts && grep -q "await action.decide" src/guard/guard.ts
 ```
 
 The last term requires an async-capable guard seam: the flow's `create_agent`
@@ -162,6 +163,7 @@ src/modules/slack-agent-flow/provision.prefetch.test.ts
 src/modules/slack-agent-flow/orchestrate.test.ts
 src/modules/slack-agent-flow/room-actions.test.ts
 src/modules/slack-agent-flow/room-canvas.test.ts
+src/modules/slack-agent-flow/create-agent-resume.test.ts
 scripts/slack-agent-flow-finish.ts
 container/agent-runner/src/mcp-tools/rooms.ts
 container/agent-runner/src/mcp-tools/rooms.test.ts

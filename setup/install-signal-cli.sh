@@ -12,7 +12,9 @@
 
 set -euo pipefail
 
-VERSION="0.14.3"
+VERSION="0.14.9"
+# sha256 of signal-cli-${VERSION}-Linux-native.tar.gz; update with VERSION.
+SHA256="a8fab78b5e8053abf3db5725272957ad11d1745b9a16848ddb2ace4743dfa5d5"
 INSTALL_DIR="${HOME}/.local/bin"
 
 emit_status() {
@@ -50,10 +52,18 @@ fi
 URL="https://github.com/AsamK/signal-cli/releases/download/v${VERSION}/signal-cli-${VERSION}-Linux-native.tar.gz"
 TARBALL=$(mktemp -t signal-cli.XXXXXX.tar.gz)
 
-log "Downloading signal-cli v${VERSION} (~96MB)…"
+log "Downloading signal-cli v${VERSION} (~111MB)…"
 if ! curl -fLsS -o "${TARBALL}" "${URL}"; then
   rm -f "${TARBALL}"
   emit_status failed "download_failed"
+  exit 1
+fi
+
+log "Verifying checksum…"
+actual_sha=$(sha256sum < "${TARBALL}" 2>/dev/null | cut -d' ' -f1 || true)
+if [[ "${actual_sha}" != "${SHA256}" ]]; then
+  rm -f "${TARBALL}"
+  emit_status failed "checksum_mismatch"
   exit 1
 fi
 

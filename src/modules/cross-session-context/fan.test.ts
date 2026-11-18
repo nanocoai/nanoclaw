@@ -248,6 +248,7 @@ describe('fanInboundMessage', () => {
     expect(sibContent.text).toBe('private note');
     expect(sibContent.sender).toBe('Alex');
     expect(sibContent.senderId).toBe('slack:U1');
+    expect(sibContent.self).toBeUndefined();
     expect(sibContent.echo).toEqual({
       surface: ECHO_SIBLING_SURFACE,
       label: 'another conversation with Alex',
@@ -479,6 +480,7 @@ describe('fanOutboundMessage', () => {
     const sibContent = JSON.parse(sibRows[0].content as string);
     expect(sibContent.sender).toBe('Pixel');
     expect(sibContent.senderId).toBe(AG);
+    expect(sibContent.self).toBe(true);
     expect(sibContent.echo).toEqual({
       surface: ECHO_SIBLING_SURFACE,
       label: 'another conversation with Alex',

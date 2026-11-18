@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { normalizeOption, normalizeOptions } from './ask-question.js';
+import { cardQuestionTooLong, MAX_CARD_QUESTION_LENGTH, normalizeOption, normalizeOptions } from './ask-question.js';
 
 describe('normalizeOption — style whitelist', () => {
   // The style value flows straight into the Chat SDK Button() and from there
@@ -72,5 +72,21 @@ describe('normalizeOptions', () => {
     ]);
     expect(out.map((o) => o.label)).toEqual(['Skip', 'Approve', 'Deny', 'Later']);
     expect(out.map((o) => o.style)).toEqual([undefined, 'primary', 'danger', undefined]);
+  });
+});
+
+describe('cardQuestionTooLong', () => {
+  it('lets a title plus question up to the limit through', () => {
+    expect(cardQuestionTooLong('Title', 'x'.repeat(MAX_CARD_QUESTION_LENGTH - 5))).toBeUndefined();
+  });
+
+  it('counts the title, and says why one character over the limit is refused', () => {
+    expect(cardQuestionTooLong('Title', 'x'.repeat(MAX_CARD_QUESTION_LENGTH - 4))).toBe(
+      `the request is too long to show in full on a card (${MAX_CARD_QUESTION_LENGTH + 1} characters, limit ${MAX_CARD_QUESTION_LENGTH})`,
+    );
+  });
+
+  it('takes a lower limit', () => {
+    expect(cardQuestionTooLong('', 'x'.repeat(11), 10)).toMatch(/limit 10\)$/);
   });
 });

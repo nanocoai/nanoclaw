@@ -327,9 +327,8 @@ export async function offerCodexFailureAssist(ctx: AssistContext, projectRoot: s
 
 /**
  * Verify the codex provider payload is fully wired — the same pre-flight the
- * /add-codex skill checks. While codex ships in trunk these always pass; once
- * the payload moves to the providers branch, a failed check means the install
- * step should run (or the user finishes via /add-codex).
+ * /add-codex skill checks. A failed check means the install step should run
+ * (or the user finishes via /add-codex).
  */
 export function verifyCodexInstall(root = process.cwd()): { ok: boolean; problems: string[] } {
   const problems: string[] = [];

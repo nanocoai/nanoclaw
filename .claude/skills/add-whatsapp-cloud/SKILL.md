@@ -40,7 +40,7 @@ import './whatsapp-cloud.js';
 Pinned to an exact version — the supply-chain policy rejects ranges and `latest`:
 
 ```nc:dep
-@chat-adapter/whatsapp@4.29.0
+@chat-adapter/whatsapp@4.41.1
 ```
 
 ### 4. Build and validate
@@ -131,7 +131,11 @@ The Chat SDK bridge automatically starts a shared webhook server on port 3000
 publicly reachable for Meta to deliver events. Running locally, expose it with
 ngrok (`ngrok http 3000`), a Cloudflare Tunnel, or a reverse proxy on a VPS —
 the resulting public URL is the base for the webhook URL set under WhatsApp >
-Configuration above.
+Configuration above. Tell the user:
+
+```nc:operator
+NanoClaw's webhook server listens on 127.0.0.1 only, so a tunnel or proxy on this machine works as is. If yours runs on another machine or in Docker on Linux, add `WEBHOOK_HOST=0.0.0.0` to `.env`; it takes effect at the next restart.
+```
 
 ## Next Steps
 
@@ -157,3 +161,5 @@ Otherwise, run `/manage-channels` to wire this channel to an agent group.
 **Outbound messages are accepted but never delivered.** Two Meta-side gates: while the app is in development mode you can only message numbers added to the recipient allowlist in API Setup; and free-form replies are only allowed within 24 hours of the user's last inbound message — outside that window you need an approved template. Also confirm `WHATSAPP_PHONE_NUMBER_ID` is the Phone Number *ID*, not the phone number itself.
 
 **Adapter installed but nothing flows.** Run `pnpm exec vitest run src/channels/whatsapp-cloud-registration.test.ts` — red means the barrel import or the `@chat-adapter/whatsapp` install drifted, so re-run the Apply steps. If green, restart the service (see Next Steps) so the adapter and `.env` values are live.
+
+**A proxy or tunnel on another machine, or in Docker on Linux, gets connection refused or times out.** The webhook server listens on 127.0.0.1 only. Add `WEBHOOK_HOST=0.0.0.0` to `.env` and restart; `Webhook server started` in `logs/nanoclaw.log` shows the host it bound.

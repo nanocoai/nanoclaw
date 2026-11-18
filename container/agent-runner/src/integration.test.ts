@@ -8,6 +8,7 @@ import { getSessionRouting } from './db/session-routing.js';
 import { MockProvider } from './providers/mock.js';
 import type { ProviderExchange } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
+import { GENERIC_FAILURE_NOTICE } from './formatter.js';
 
 const MOCK_PROVIDER_CONTRACT = {
   textDelivery: 'mid-turn-complete',
@@ -474,7 +475,7 @@ describe('poll loop — provider error recovery', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(JSON.parse(out[0].content).text).toBe(GENERIC_FAILURE_NOTICE);
     expect(out[0].content).not.toContain('API rate limit exceeded');
 
     // Input message should be marked completed despite the error
@@ -503,7 +504,7 @@ describe('poll loop — stale session recovery', () => {
     // A safe notice reaches the user; the provider diagnostic stays private.
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(JSON.parse(out[0].content).text).toBe(GENERIC_FAILURE_NOTICE);
     expect(out[0].content).not.toContain('session not found');
 
     // Continuation was cleared (isSessionInvalid returned true)

@@ -10,7 +10,9 @@
 #
 #   NANOCLAW_AGENT_IMAGE_REF        What to acquire. Pin by digest so the bytes
 #                                   landing under the local tag are the ones you
-#                                   chose. Falls back to the `agent-image` pin in
+#                                   chose. Falls back to the image published for
+#                                   this checkout's release (release-image.sh),
+#                                   then to the `agent-image` pin in
 #                                   versions.json; refuses to guess without one.
 #   NANOCLAW_ALLOW_UNLABELED_IMAGE  Accept an image with no agent-runner lock
 #                                   label. Off by default — see the lock check.
@@ -123,12 +125,47 @@ lock_sha256() {
     fi
 }
 
+# A helper written by an older setup names one exact node in its first line and
+# stops starting when that node goes away. Setup re-installs it before it
+# pulls; an update or a skill gets here without setup, so ask the installer
+# from here too. Only the first line is read: this never runs or writes it.
+refresh_old_credential_helper() {
+    local helper dir
+    helper="$(command -v docker-credential-nanoclaw 2>/dev/null || true)"
+    if [ -z "$helper" ] || ! command -v pnpm >/dev/null 2>&1; then
+        return 0
+    fi
+    case "$(head -n 1 "$helper" 2>/dev/null)" in
+        '#!/bin/sh') return 0 ;;
+        '#!'*) ;;
+        *) return 0 ;;
+    esac
+    if ! grep -q 'nanoclaw-docker-credential-helper' "$helper" 2>/dev/null; then
+        return 0
+    fi
+    # Absolute, because the installer runs from the project root, not from here.
+    dir="$(cd "$(dirname "$helper")" 2>/dev/null && pwd)" || return 0
+    # No stdin: this script never prompts, and neither may anything it starts.
+    (cd "$PROJECT_ROOT" && pnpm exec tsx setup/install-cred-helper.ts \
+        --refresh-installed --bin-dir "$dir") </dev/null >/dev/null 2>&1 || true
+    if [ "$(head -n 1 "$helper" 2>/dev/null)" = '#!/bin/sh' ]; then
+        echo "Re-installed the credential helper: it was written by an older setup."
+    fi
+}
+
 HOST_ARCH="$(host_arch)"
 HOST_PLATFORM="linux/${HOST_ARCH}"
 
 REF="${NANOCLAW_AGENT_IMAGE_REF:-}"
 if [ -z "$REF" ]; then
     REF="$(read_env_setting NANOCLAW_AGENT_IMAGE_REF)"
+fi
+if [ -z "$REF" ]; then
+    LISTED="$(bash "$SCRIPT_DIR/release-image.sh" --fetch)"
+    if [ -n "$LISTED" ]; then
+        REF="${LISTED#* }"
+        echo "Using the image published for ${LISTED%% *}."
+    fi
 fi
 if [ -z "$REF" ]; then
     # A single reference covers a multi-arch index digest — docker resolves that
@@ -217,6 +254,8 @@ else
     else
         echo "Warning: couldn't create ${NONCE_DIR}; a gated pull will be refused by the credential helper." >&2
     fi
+
+    refresh_old_credential_helper
 
     if ! ${CONTAINER_RUNTIME} pull "$REF"; then
         echo "" >&2

@@ -74,9 +74,11 @@ async function applyCompanionSkills(
   const companions = getCompanionSkills(channel);
   let applied = false;
   let degraded = false;
+  const failures: string[] = [];
   for (const skill of companions) {
     if (!companionSkillPresent(skill, projectRoot)) {
       degraded = true;
+      failures.push(`${skill} is missing`);
       p.log.warn(
         `Companion skill ${skill} is missing from this checkout (.claude/skills/${skill}/SKILL.md). ` +
           `The ${channel} channel works, but the capability that skill adds is missing until you ` +
@@ -101,6 +103,7 @@ async function applyCompanionSkills(
       continue;
     }
     degraded = true;
+    failures.push([skill, firstReasonLine(res)].filter(Boolean).join(': '));
     // Degraded, not fatal: the main channel install still works. Name the
     // skill and the exact re-apply command so the warning is actionable.
     p.log.warn(
@@ -111,7 +114,9 @@ async function applyCompanionSkills(
   }
 
   if (degraded && overrides.requireCompanions)
-    throw new Error(`The ${channel} companion installation needs attention. Resume its setup step.`);
+    throw new Error(
+      `The ${channel} companion installation needs attention (${failures.join('; ')}). Resume its setup step.`,
+    );
   if (!applied) return;
   if (degraded) {
     // A half-applied companion may have copied files and appended barrel
@@ -135,6 +140,14 @@ async function applyCompanionSkills(
     if (overrides.requireCompanions)
       throw new Error('The Slack service restart needs attention. Resume the Slack setup step.');
   }
+}
+
+/** The first line of a bounce reason, for a caller with no terminal to read the warnings. */
+function firstReasonLine(res: Awaited<ReturnType<typeof runSkill>>): string | undefined {
+  return res.agentTasks[0]?.reason
+    .split('\n')
+    .map((l) => l.trim())
+    .find(Boolean);
 }
 
 interface WireArgs {
@@ -230,7 +243,7 @@ export interface ChannelSkillOverrides extends Partial<RunSkillOptions> {
   /** The first-prompt back gate; defaults to back-nav.ts `backGate`. Injectable for tests. */
   backGate?: (label: string) => Promise<'continue' | typeof BACK_TO_CHANNEL_SELECTION>;
   /** The abort path; defaults to runner.ts `fail` (which exits). Injectable for tests. */
-  fail?: (stepName: string, msg: string, hint?: string, rawLogPath?: string) => Promise<never>;
+  fail?: (stepName: string, msg: string, hint?: string, rawLogPath?: string, detail?: string) => Promise<never>;
 }
 
 export async function runChannelSkill(
@@ -248,7 +261,7 @@ export async function runChannelSkill(
   }
 
   const projectRoot = overrides.projectRoot ?? process.cwd();
-  const failWith = overrides.fail ?? fail;
+  const failWith: NonNullable<ChannelSkillOverrides['fail']> = overrides.fail ?? fail;
   // The agent name + role are wire inputs — in wireIfResolved mode, defer the
   // prompts past the skill run (only a fresh create resolves the wire inputs;
   // a drop-through re-run asks nothing).
@@ -308,11 +321,13 @@ export async function runChannelSkill(
     // instead of a generic "couldn't finish" message. Only a real bounce yields a
     // diagnosis; a purely-deferred run (a missing input) falls back to the generic.
     const diag = firstFailureHint(res);
+    const detail = firstReasonLine(res);
     await failWith(
       `${channel}-install`,
       diag?.headline ?? `Couldn't finish setting up ${channel}.`,
       diag?.hint ?? 'See logs/setup-steps/ for details, then retry setup.',
       rawLog,
+      detail,
     );
   }
 

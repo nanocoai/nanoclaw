@@ -8,7 +8,7 @@ The agent-runner has two layers:
 
 1. **Agent-runner core** — owns the poll loop, message formatting, DB reads/writes, MCP tool implementations, routing, status management, media handling. This is NanoClaw-specific and shared across all providers.
 
-2. **Agent provider** — owns the SDK interaction. Takes formatted prompts, pushes them to the SDK, yields events back. Trunk ships the `claude` provider; additional providers (OpenCode, Codex, etc.) are installed by `/add-<provider>` skills from the `providers` branch.
+2. **Agent provider** — owns the SDK interaction. Takes formatted prompts, pushes them to the SDK, yields events back. Trunk ships the `claude` provider; additional providers (OpenCode, Codex, etc.) are installed by `/add-<provider>` skills from the skill's own `payload/`.
 
 The boundary: the agent-runner decides **what** to send and **what to do** with results. The provider decides **how** to talk to the SDK.
 
@@ -139,7 +139,10 @@ What a provider declares:
 - `lifecycle` — `memorySessionHookRegistration` (runs when core registers the memory hook)
   and `beforeQuery` (runs before each query).
 - `history` — `afterExchange` (the factory wraps `onExchangeComplete` with it) and
-  `readTrace` (what `/upload-trace` uploads). Anything else a provider does with its own
+  `readTrace` (what `/upload-trace` uploads). A provider with no on-disk transcript can
+  implement `afterExchange` with `archiveProviderExchange` from
+  `provider-contracts/exchange-archive.ts`, which appends each exchange to one markdown
+  file per thread in `conversations/`. Anything else a provider does with its own
   transcript — Claude's pre-compact archive and continuation rotation, for example — is
   provider-internal code (`providers/claude-history.ts`), not a contract field.
 - `textDelivery`, `commands` — read by the poll-loop and formatter. The formatter's
@@ -254,7 +257,7 @@ SDK message (so the idle timer stays honest) and maps recognized messages to `Pr
 - **PreToolUse hook** records the current tool + its declared timeout to `container_state` (so the host sweep widens its stuck tolerance while a long Bash runs) and, as defense-in-depth, blocks any `SDK_DISALLOWED_TOOLS` call that slips through. It does **not** sanitize bash env vars — there is no such hook.
 - **PostToolUse / PostToolUseFailure** hooks clear the in-flight tool
 - **PreCompact** hook archives the transcript to `conversations/` before compaction
-- `maybeRotateContinuation` drops an oversized/aged transcript (default caps 12 MB / 14 days, both operator-overridable) so a cold container isn't killed reloading days of `.jsonl` before the host idle ceiling; `isSessionInvalid` clears a continuation whose transcript is gone
+- `maybeRotateContinuation` drops a continuation whose transcript is gone (Claude Code deletes transcripts after `cleanupPeriodDays`, 30 by default) or oversized/aged (default caps 12 MB / 14 days, both operator-overridable), so a cold container neither resumes into a deleted transcript nor is killed reloading days of `.jsonl` before the host idle ceiling; `isSessionInvalid` clears a continuation whose resume still fails
 - `additionalDirectories` for multi-directory access
 
 ### Codex Provider
@@ -767,7 +770,9 @@ admin approval, applied host-side):
 
 - **`install_packages`** — `{ apt?: string[], npm?: string[], reason?: string }`. Package
   names are validated at the tool boundary and re-validated on the host. On approval the
-  host rebuilds the per-agent image and restarts the container.
+  host rebuilds the per-agent image and restarts the container. When the shared agent image
+  changes later (an update or a manual rebuild), the host rebuilds the per-agent image on top
+  of it at the next start or spawn (`refreshStaleGroupImage`).
 - **`add_mcp_server`** — `{ name, command, args?, env? }`. Wires an existing third-party MCP
   server into the agent's `container.json`; on approval the host updates the config and
   restarts (no rebuild — Bun runs the TS directly).
@@ -840,9 +845,10 @@ The agent-runner tracks a single opaque `continuation` token per provider:
 
 Because it lives in the session folder's `outbound.db`, the continuation survives container
 teardown and restart — a fresh container reads it back and resumes. `/clear` deletes the row
-to start a clean session. Before resuming, `maybeRotateContinuation` may archive and drop an
-oversized/aged transcript (so a cold container isn't killed reloading it), and
-`isSessionInvalid` clears a continuation whose backing transcript has gone missing.
+to start a clean session. Before resuming, `maybeRotateContinuation` drops a continuation whose
+transcript is gone (so the turn starts fresh instead of failing with "No conversation found"),
+and may archive and drop an oversized/aged transcript (so a cold container isn't killed
+reloading it). `isSessionInvalid` clears a continuation whose resume still fails.
 
 ### Container Startup
 

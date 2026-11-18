@@ -23,7 +23,7 @@
  */
 import { isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
-import { withExistingMailboxSession } from '../../session-manager.js';
+import { withExistingMailboxSession, withMailboxSession } from '../../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
 import {
   ECHO_CHANNEL_TIMELINE_SURFACE,
@@ -44,11 +44,19 @@ interface BackfillRow {
   text: string;
   /** Row authored by the agent itself — rendered as "you" in the prelude. */
   self: boolean;
+  /** The platform's id for it, kept on the seeded row so a platform read can skip it. */
+  platformMessageId?: string;
 }
 
-function parseContent(raw: string): { text?: string; sender?: string; senderId?: string; echo?: unknown } {
+function parseContent(raw: string): {
+  id?: unknown;
+  text?: string;
+  sender?: string;
+  senderId?: string;
+  echo?: unknown;
+} {
   try {
-    return JSON.parse(raw) as { text?: string; sender?: string; senderId?: string; echo?: unknown };
+    return JSON.parse(raw) as { id?: unknown; text?: string; sender?: string; senderId?: string; echo?: unknown };
   } catch {
     return {};
   }
@@ -90,6 +98,8 @@ async function collectSiblingTopLevel(
         senderId: c.senderId ?? '',
         text: c.text,
         self: false,
+        // A held message carries the platform's id as `id` (the chat library's serialized message).
+        platformMessageId: typeof c.id === 'string' ? c.id : undefined,
       });
     }
   }
@@ -103,6 +113,7 @@ async function collectSiblingTopLevel(
       senderId: agentGroup.id,
       text: c.text,
       self: true,
+      platformMessageId: r.platformMessageId,
     });
   }
   return rows;
@@ -184,7 +195,8 @@ export async function backfillSession(
     const surface = isGroupSurface ? ECHO_CHANNEL_TIMELINE_SURFACE : ECHO_TIMELINE_SURFACE;
     // One batch id per wake keeps repeated catch-ups of the same session collision-free.
     const batch = new Date(now).toISOString();
-    await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
+    // A writer prepares: a just-born session's mailbox may not exist before its first write.
+    await withMailboxSession(agentGroup.id, session.id, async (mailbox) => {
       for (const [i, row] of newest.entries()) {
         // The most recent entry is what a short opener ("sure") is usually
         // answering — deliver it whole; earlier entries get the normal cap.
@@ -201,6 +213,7 @@ export async function backfillSession(
             sender: row.sender,
             senderId: row.senderId,
             ...(row.self ? { self: true } : {}),
+            platformMessageId: row.platformMessageId,
             echo: { surface, label },
           }),
           processAfter: null,

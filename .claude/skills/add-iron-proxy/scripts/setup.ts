@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { getInstallSlug } from '../../../../src/install-slug.js';
 import { GATEWAY_ROLE, LABELS } from '../../../../src/drivers/types.js';
@@ -417,7 +417,11 @@ export async function run(args: string[], projectRoot = process.cwd()): Promise<
   console.log(`Central Iron Proxy ${pins['iron-proxy-commit']} is ready.`);
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (
+  process.argv[1] &&
+  fs.existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href
+) {
   void installStep(() => run(process.argv.slice(2))).then((ok) => {
     if (!ok) process.exitCode = 1;
   });

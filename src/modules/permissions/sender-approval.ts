@@ -32,6 +32,7 @@
  * stamp reusing this table's UNIQUE key. See declineAndNotify at the bottom.
  */
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
+import { quoteForCard } from '../../card-text.js';
 import { getAllAgentGroups } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { getDeliveryAdapter } from '../../delivery.js';
@@ -108,8 +109,8 @@ export async function requestSenderApproval(input: RequestSenderApprovalInput): 
   }
 
   const approvalId = generateId();
-  const senderDisplay = senderName && senderName.length > 0 ? senderName : senderIdentity;
-  const originName = originMg?.name ?? `a ${originChannelType} channel`;
+  const senderDisplay = quoteForCard(senderName && senderName.length > 0 ? senderName : senderIdentity);
+  const originName = originMg?.name ? quoteForCard(originMg.name) : `a ${originChannelType} channel`;
 
   const title = '👤 New sender';
   const question = `${senderDisplay} wants to talk to your agent in ${originName}. ${AGENT_ACCESS_SCOPE_WARNING} Allow?`;
@@ -292,9 +293,12 @@ export async function declineAndNotify(input: DeclineAndNotifyInput): Promise<vo
     return;
   }
 
-  const senderDisplay = senderName && senderName.length > 0 ? senderName : (senderIdentity ?? 'An unknown sender');
-  const who =
-    senderIdentity && senderDisplay !== senderIdentity ? `${senderDisplay} (${senderIdentity})` : senderDisplay;
+  const senderDisplay = senderName && senderName.length > 0 ? senderName : senderIdentity;
+  const who = !senderDisplay
+    ? 'An unknown sender'
+    : senderIdentity && senderDisplay !== senderIdentity
+      ? `${quoteForCard(senderDisplay)} (${quoteForCard(senderIdentity)})`
+      : quoteForCard(senderDisplay);
   const fyiText =
     input.fyiText ??
     `FYI: ${who} DMed your agent on ${event.channelType} — I sent a polite decline. Allow them any time with \`ncl members add\`.`;

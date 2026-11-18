@@ -32,6 +32,7 @@ import {
   getMessagingGroupByPlatform,
 } from '../src/db/messaging-groups.js';
 import { runMigrations } from '../src/db/migrations/index.js';
+import { assertValidGroupFolder } from '../src/group-folder.js';
 import { normalizeName } from '../src/modules/agent-to-agent/db/agent-destinations.js';
 import { upsertUser } from '../src/modules/permissions/db/users.js';
 import { initGroupFilesystem } from '../src/group-init.js';
@@ -91,23 +92,12 @@ async function main(): Promise<void> {
 
   const now = new Date().toISOString();
 
-  // 1. Synthetic CLI user + owner grant if none exists.
-  await upsertUser({
-    id: CLI_SYNTHETIC_USER_ID,
-    kind: CLI_CHANNEL,
-    display_name: args.displayName,
-    created_at: now,
-  });
-
-  // Owner grant deferred to init-first-agent when the real channel user is
-  // wired — cli:local is a scratch identity, not the operator.
-  const promotedToOwner = false;
-
-  // 2. Agent group + filesystem.
+  // 1. Agent group + filesystem, first, so a refused folder leaves nothing behind.
   const folder = args.folder || `cli-with-${normalizeName(args.displayName)}`;
   const pickedProvider = process.env.NANOCLAW_PICKED_PROVIDER?.trim().toLowerCase();
   let ag: AgentGroup | undefined = await getAgentGroupByFolder(folder);
   if (!ag) {
+    assertValidGroupFolder(folder);
     const agId = generateId('ag');
     await createAgentGroup({
       id: agId,
@@ -131,6 +121,18 @@ async function main(): Promise<void> {
     // stamps it onto the fresh config row.
     provider: pickedProvider,
   });
+
+  // 2. Synthetic CLI user + owner grant if none exists.
+  await upsertUser({
+    id: CLI_SYNTHETIC_USER_ID,
+    kind: CLI_CHANNEL,
+    display_name: args.displayName,
+    created_at: now,
+  });
+
+  // Owner grant deferred to init-first-agent when the real channel user is
+  // wired — cli:local is a scratch identity, not the operator.
+  const promotedToOwner = false;
 
   // 3. CLI messaging group + wiring.
   let cliMg: MessagingGroup | undefined = await getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);
@@ -182,6 +184,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(err);
+  console.error(err instanceof Error ? err.message : err);
   process.exit(1);
 });

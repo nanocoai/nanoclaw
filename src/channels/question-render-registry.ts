@@ -13,12 +13,19 @@ import type { NormalizedOption } from './ask-question.js';
 export interface QuestionRender {
   title: string;
   question?: string;
+  /** The question is the agent's own markup, sent unescaped, so the resolved card keeps it unescaped too. */
+  fromAgent?: boolean;
   options: NormalizedOption[];
-  /** Optional channel presentation. Decision authorization always remains in core. */
+  /**
+   * Optional channel presentation. Decision authorization always remains in core.
+   * It must show the whole request: the bridge does not length-check it.
+   */
   renderMessage?: (questionId: string) => Parameters<Adapter['postMessage']>[1];
   renderTerminal?: (resolution: string) => Parameters<Adapter['postMessage']>[1];
   /** The coordinator updates the card only after it authorizes and records the decision. */
   deferResolution?: boolean;
+  /** The chat the card was sent to, where its row records one. */
+  platformId?: string;
 }
 
 export type QuestionRenderResolver = (

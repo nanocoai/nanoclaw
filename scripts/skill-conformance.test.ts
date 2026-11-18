@@ -186,7 +186,6 @@ describe('retired mechanisms', () => {
     const offenders = SKILL_DOCS.filter((d) => d.text.includes('data/env')).map((d) => d.doc);
     expect(offenders).toEqual([]);
   });
-
 });
 
 describe('add-dial ↔ add-dial-tool agent-scope duplication', () => {
@@ -209,6 +208,11 @@ describe('add-dial ↔ add-dial-tool agent-scope duplication', () => {
     expect(cp).toBeDefined();
     for (const attr of ['validate', 'flags', 'normalize'] as const) expect(pp!.attrs[attr]).toBe(cp!.attrs[attr]);
     expect(pp!.body).toEqual(cp!.body);
+  });
+
+  it('with no agents yet, the parent installs the tool with nobody holding the key (new groups never get Dial by default)', () => {
+    const step = parent.find((d) => d.kind === 'run' && d.attrs.effect === 'step' && d.attrs.when === 'has_agents=no');
+    expect(step?.body.join('\n')).toContain("--input 'dial_agents=none'");
   });
 
   it('the consent warning matches', () => {
@@ -341,13 +345,14 @@ describe.each(SKILLS)('%s', (name) => {
   // A `pnpm pkg set 'pnpm.…'` changes how pnpm resolves the skill's deps. Set
   // after a dep, it misses that install; missing from REMOVE.md, it outlives
   // the skill. Only guards on the same var with different values never co-run.
+  const exclusive = (a: Directive, b: Directive) =>
+    isString(a.attrs.when) &&
+    isString(b.attrs.when) &&
+    a.attrs.when !== b.attrs.when &&
+    a.attrs.when.split('=')[0] === b.attrs.when.split('=')[0];
+
   it('pnpm settings precede the deps they shape and REMOVE.md deletes them', () => {
     const removeMd = existsSync(join(dir, 'REMOVE.md')) ? readFileSync(join(dir, 'REMOVE.md'), 'utf8') : '';
-    const exclusive = (a: Directive, b: Directive) =>
-      isString(a.attrs.when) &&
-      isString(b.attrs.when) &&
-      a.attrs.when !== b.attrs.when &&
-      a.attrs.when.split('=')[0] === b.attrs.when.split('=')[0];
     directives.forEach((d, i) => {
       if (d.kind !== 'run') return;
       for (const cmd of d.body) {
@@ -362,6 +367,24 @@ describe.each(SKILLS)('%s', (name) => {
         });
       }
     });
+  });
+
+  // nc:dep skips an installed package, so on a re-run a new pnpm setting is never
+  // applied. The run that sets it must reinstall; a patch must `pnpm add` its version.
+  it('pnpm settings reinstall, so a re-run applies them to a dep already present', () => {
+    for (const d of directives) {
+      if (d.kind !== 'run') continue;
+      const at = d.body.findIndex((cmd) => /\bpnpm pkg set ["']?pnpm\./.test(cmd));
+      if (at < 0 || !directives.some((dep) => dep.kind === 'dep' && !exclusive(d, dep))) continue;
+      const patched = d.body[at].match(/pnpm\.patchedDependencies\[([^\]]+)\]/)?.[1];
+      const later = d.body.slice(at + 1);
+      expect(
+        patched
+          ? later.some((cmd) => cmd.includes(`pnpm add ${patched}`))
+          : later.some((cmd) => /\bpnpm (install|add)\b/.test(cmd)),
+        `nc:run at line ${d.line} sets a pnpm setting but never ${patched ? `runs pnpm add ${patched}` : 'reinstalls'}`,
+      ).toBe(true);
+    }
   });
 
   // A restart-shaped command on a bare `nc:run` (no effect:) would silently
