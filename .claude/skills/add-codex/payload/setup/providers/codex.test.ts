@@ -352,7 +352,7 @@ describe('runCodexLoginAuth', () => {
 // instead of asking for a global install, which fails for users without
 // write access to the npm prefix.
 describe('runCodexLoginAuth without a host Codex CLI', () => {
-  const DLX = ['--package=@openai/codex@0.169.0', 'dlx', 'codex'];
+  const DLX = ['--config.ignore-scripts=true', '--package=@openai/codex@0.169.0', 'dlx', 'codex'];
   const PINNED_INSTALL = [
     'curl -fsSL https://chatgpt.com/codex/install.sh | sh -s -- --release 0.169.0',
     'npm install -g @openai/codex@0.169.0',
@@ -510,7 +510,7 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
 
   // pnpm prints its own fetch error to the terminal, above this message.
   it.each([
-    ['pnpm exits non-zero', () => playLogin(1)],
+    ['pnpm exits non-zero', () => playLogin(1), { EXIT_CODE: '1' }],
     [
       'pnpm cannot start',
       () =>
@@ -519,8 +519,10 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
           setImmediate(() => child.emit('error', Object.assign(new Error('spawn pnpm ENOENT'), { code: 'ENOENT' })));
           return child;
         }),
+      // It never ran, so it has no exit code; its error is printed instead.
+      { ERROR: 'codex_spawn_failed', MESSAGE: 'spawn pnpm ENOENT' },
     ],
-  ])('when %s, names the installer, a new terminal and the API key option', async (_label, play) => {
+  ])('when %s, names the installer, a new terminal and the API key option', async (_label, play, logged) => {
     writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
     play();
     const exit = stopOnExit();
@@ -535,10 +537,11 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     const printed = printedBy(log, stdout);
     expect(printed).toMatch(/pinned Codex CLI 0\.169\.0.*re-run setup in a new terminal.*API key/s);
     for (const command of PINNED_INSTALL) expect(printed).toContain(command);
+    if ('MESSAGE' in logged) expect(printed).toContain(logged.MESSAGE);
     expect(setupLog.step).toHaveBeenCalledWith('auth', 'failed', expect.any(Number), {
       PROVIDER: 'codex',
       METHOD: 'device',
-      EXIT_CODE: '1',
+      ...logged,
       CLI: 'pnpm dlx @openai/codex@0.169.0',
     });
     expect(fs.readdirSync(path.join(root, 'data', 'codex-login'))).toEqual([]);
@@ -632,10 +635,11 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
     const runnerOwn = process.listeners('SIGINT');
     const log = vi.spyOn(console, 'log');
+    const stdout = vi.spyOn(process.stdout, 'write');
     // The re-raised signal ends setup there, so what counts is what was printed by then.
     let printedAtKill: string | undefined;
     const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
-      printedAtKill = printedBy(log);
+      printedAtKill = printedBy(log, stdout);
       return true;
     });
     stopOnExit();

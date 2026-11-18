@@ -198,7 +198,14 @@ export function resolveCodexCli(root: string, home: string): CodexCli {
       install: codexInstallCommands(),
     };
   }
-  return { ok: true, command: 'pnpm', prefix: [`--package=@openai/codex@${version}`, 'dlx', 'codex'], pinned: version };
+  // pnpm runs the named package's own install scripts; the image install runs
+  // none of Codex's, so neither does this.
+  return {
+    ok: true,
+    command: 'pnpm',
+    prefix: ['--config.ignore-scripts=true', `--package=@openai/codex@${version}`, 'dlx', 'codex'],
+    pinned: version,
+  };
 }
 
 export async function runCodexLoginAuth(
@@ -324,7 +331,10 @@ async function signIn(
 
   const args = method === 'device' ? ['login', '--device-auth'] : ['login'];
   const start = Date.now();
-  const code = await runInherit(cli.command, [...cli.prefix, ...args], { env: { CODEX_HOME: loginHome }, onSpawn });
+  const { code, error } = await runInherit(cli.command, [...cli.prefix, ...args], {
+    env: { CODEX_HOME: loginHome },
+    onSpawn,
+  });
   const durationMs = Date.now() - start;
   console.log();
 
@@ -332,9 +342,10 @@ async function signIn(
     setupLog.step('auth', 'failed', durationMs, {
       PROVIDER: 'codex',
       METHOD: method,
-      EXIT_CODE: String(code),
+      ...(error ? { ERROR: 'codex_spawn_failed', MESSAGE: error.message } : { EXIT_CODE: String(code) }),
       ...(cli.pinned ? { CLI: `pnpm dlx @openai/codex@${cli.pinned}` } : {}),
     });
+    if (error) console.log(k.dim(`   ${error.message}`));
     if (!cli.pinned) {
       p.log.error(
         brandBody(
@@ -345,7 +356,7 @@ async function signIn(
     }
     p.log.error(
       brandBody(
-        `Couldn't complete the Codex sign-in with the pinned Codex CLI ${cli.pinned}. If pnpm couldn't fetch it (see above), check that this machine can reach the npm registry, or install the Codex CLI (below), then re-run setup in a new terminal — or choose the API key option instead.`,
+        `Couldn't complete the Codex sign-in with the pinned Codex CLI ${cli.pinned}. If pnpm couldn't start or fetch it (see above), check that this machine can reach the npm registry, or install the Codex CLI (below), then re-run setup in a new terminal — or choose the API key option instead.`,
       ),
     );
     printInstallCommands(codexInstallCommands(cli.pinned));
@@ -395,15 +406,15 @@ function runInherit(
   cmd: string,
   args: string[],
   opts: { env?: Record<string, string>; onSpawn?: (child: ChildProcess) => void } = {},
-): Promise<number> {
+): Promise<{ code: number; error?: Error }> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       stdio: 'inherit',
       env: opts.env ? { ...process.env, ...opts.env } : process.env,
     });
     opts.onSpawn?.(child);
-    child.on('close', (code) => resolve(code ?? 1));
-    child.on('error', () => resolve(1));
+    child.on('close', (code) => resolve({ code: code ?? 1 }));
+    child.on('error', (error) => resolve({ code: 1, error }));
   });
 }
 
