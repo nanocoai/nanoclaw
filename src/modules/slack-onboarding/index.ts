@@ -107,6 +107,9 @@ async function offerWelcomePrompts(msg: OutboundMessage): Promise<void> {
     if (tidParts.length >= 3 && tidParts[tidParts.length - 1] !== '') return; // threaded → not the welcome
     const mg = await getMessagingGroupByPlatform(channelType, platformId);
     if (!mg || mg.is_group !== 0) return;
+    // A welcome that lands after the first conversation started would bring
+    // back the prompts the session-created hook just cleared.
+    if (await dmHasConversation(mg.id)) return;
     void setSuggestedPrompts(mg.instance ?? channelType, platformId, WELCOME_PROMPTS, 'Get started')
       .then(() => log.info('Welcome prompts set', { platformId }))
       .catch((err) => log.warn('Welcome prompts failed', { platformId, err }));
