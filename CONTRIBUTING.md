@@ -13,6 +13,10 @@
 
 3. **One thing per PR.** Each PR should do one thing — one bug fix, one skill, one simplification. Don't mix unrelated changes in a single PR.
 
+## Brand assets
+
+For NanoClaw logos, icons, and visual guidance, use the [NanoClaw OSS brand kit](https://github.com/nanocoai/nanoclaw-brand-kit).
+
 ## Issues
 
 Open issues through the issue forms. Each form asks only for what maintainers need to act, and it applies the starting labels for you.
