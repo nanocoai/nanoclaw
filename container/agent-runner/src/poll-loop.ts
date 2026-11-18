@@ -712,6 +712,8 @@ export async function processQuery(
             // push, so the notice is the only word their senders get. A failed
             // write is logged and the rest still go, as on the stream-failure path.
             for (const target of absorbedRoutes) {
+              // A stopped run sends nothing more, as the stream-failure path.
+              if (endedForCommand || signal?.aborted) break;
               if (!sendsFailureNotice(target) || noticed.some((prior) => sameNoticeRoute(prior, target))) continue;
               try {
                 await deliverErrorResult(target, notice);
