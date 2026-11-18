@@ -5,10 +5,14 @@ import { sudoNonInteractive } from './sudo-noninteractive.js';
 
 const COMMAND_TIMEOUT_MS = 5_000;
 
+const reason = (err: unknown): string => (err as { stderr?: Buffer | string }).stderr?.toString().trim() || String(err);
+
 /** Enables linger for this user without a polkit prompt; true only once loginctl reports it on. */
 export function ensureUserLinger(uid: number): boolean {
   const user = String(uid);
+  let readError = '';
   const isEnabled = (): boolean => {
+    readError = '';
     try {
       return (
         execFileSync('loginctl', ['show-user', user, '--property=Linger', '--value'], {
@@ -17,7 +21,8 @@ export function ensureUserLinger(uid: number): boolean {
           timeout: COMMAND_TIMEOUT_MS,
         }).trim() === 'yes'
       );
-    } catch {
+    } catch (err) {
+      readError = reason(err);
       return false;
     }
   };
@@ -27,19 +32,21 @@ export function ensureUserLinger(uid: number): boolean {
 
   // With a controlling terminal, loginctl forks pkttyagent onto it even when
   // stdin is ignored (systemd 257); without polkit that prints an exec error.
-  const enableArgs = ['--no-ask-password', 'enable-linger', user];
   let loginctlError = '';
   try {
-    execFileSync('loginctl', enableArgs, { stdio: ['ignore', 'pipe', 'pipe'], timeout: COMMAND_TIMEOUT_MS });
+    execFileSync('loginctl', ['--no-ask-password', 'enable-linger', user], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: COMMAND_TIMEOUT_MS,
+    });
   } catch (err) {
-    const stderr = (err as { stderr?: Buffer }).stderr?.toString().trim();
-    loginctlError = stderr || String(err);
+    loginctlError = reason(err);
   }
-  // Exit statuses don't decide; the state reads do. Without polkit only root
-  // may set linger, so try sudo next, which fails rather than prompts.
+  // Exit statuses don't decide; the state reads do. Without polkit only root may
+  // set linger. Root's loginctl starts no agent, so sudo runs the hint's exact
+  // command, which a narrow sudoers rule can allow.
   let enabled = isEnabled();
   if (!enabled) {
-    sudoNonInteractive(['loginctl', ...enableArgs], COMMAND_TIMEOUT_MS);
+    sudoNonInteractive(['loginctl', 'enable-linger', user], COMMAND_TIMEOUT_MS);
     enabled = isEnabled();
   }
   if (enabled) {
@@ -48,7 +55,8 @@ export function ensureUserLinger(uid: number): boolean {
   }
 
   log.warn('Systemd linger could not be verified — service may stop on logout', {
-    loginctl: loginctlError || 'exited 0, Linger still off',
+    loginctl: loginctlError || 'exited 0',
+    linger: readError || 'off',
     hint: `Run sudo loginctl enable-linger ${user}, then check loginctl show-user ${user} --property=Linger`,
   });
   return false;

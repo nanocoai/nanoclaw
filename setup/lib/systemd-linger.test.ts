@@ -56,9 +56,9 @@ afterEach(() => {
     expect(options.stdio, call).toEqual(['ignore', 'pipe', 'pipe']);
     if (args[0] === 'show-user') continue;
     // A minimal system: enabling must neither spawn pkttyagent nor prompt for a sudo password.
-    expect(args, call).toContain('--no-ask-password');
-    expect(args.at(-1), call).toBe('1000');
-    if (command === 'sudo') expect(args.slice(0, 2), call).toEqual(['-n', 'loginctl']);
+    // Root's loginctl starts no agent, so sudo runs exactly the command the hint prints.
+    if (command === 'sudo') expect(args, call).toEqual(['-n', 'loginctl', 'enable-linger', '1000']);
+    else expect(args, call).toEqual(['--no-ask-password', 'enable-linger', '1000']);
   }
 });
 
@@ -87,11 +87,12 @@ describe('verified systemd user linger', () => {
   it('reports failure with recovery guidance when neither path is permitted', () => {
     expect(ensureUserLinger(1000)).toBe(false);
     expect(log.warn).toHaveBeenCalledWith('sudo command failed', {
-      command: 'loginctl --no-ask-password enable-linger 1000',
+      command: 'loginctl enable-linger 1000',
       stderr: 'sudo: a password is required',
     });
     expect(log.warn).toHaveBeenLastCalledWith(expect.stringContaining('may stop on logout'), {
       loginctl: 'Could not enable linger: Access denied',
+      linger: 'off',
       hint: expect.stringContaining('sudo loginctl enable-linger 1000'),
     });
   });
@@ -102,8 +103,15 @@ describe('verified systemd user linger', () => {
     expect(log.warn).toHaveBeenCalledOnce();
     expect(log.warn).toHaveBeenCalledWith(
       expect.stringContaining('may stop on logout'),
-      expect.objectContaining({ loginctl: 'exited 0, Linger still off' }),
+      expect.objectContaining({ loginctl: 'exited 0', linger: 'off' }),
     );
+  });
+
+  it('still tries sudo when enable-linger exits zero without enabling linger', () => {
+    succeedsWithoutEnabling = true;
+    sudoCanEnable = true;
+    expect(ensureUserLinger(1000)).toBe(true);
+    expect(calls.filter(({ command }) => command === 'sudo')).toHaveLength(1);
   });
 
   it('does not claim persistence if the final user state cannot be read', () => {
@@ -112,5 +120,9 @@ describe('verified systemd user linger', () => {
     sudoCanEnable = true;
     expect(ensureUserLinger(1000)).toBe(false);
     expect(log.warn).toHaveBeenCalledOnce();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining('may stop on logout'),
+      expect.objectContaining({ loginctl: 'exited 0', linger: 'Error: user state unavailable' }),
+    );
   });
 });
