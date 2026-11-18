@@ -206,7 +206,7 @@ async function shutdown(signal: string): Promise<void> {
   // Stamp the durable stop before the DB closes below.
   await stopHostInstanceLease();
   stopDeliveryPolls();
-  stopHostSweep();
+  await stopHostSweep();
   await stopCliServer();
   try {
     await teardownChannelAdapters();
