@@ -233,7 +233,15 @@ describe('release checkout switch', () => {
 function entrypointClone() {
   const seed = temp('entry-seed-');
   git(seed, ['init', '-q', '-b', 'main']);
-  for (const file of ['nanoclaw.sh', 'setup/lib/release-checkout.sh', 'setup/lib/diagnostics.sh']) {
+  const files = [
+    'nanoclaw.sh',
+    'setup/lib/release-checkout.sh',
+    'setup/lib/diagnostics.sh',
+    'setup/lib/sudo-preflight.sh',
+    'setup/lib/node-version.sh',
+    'setup/lib/jq.sh',
+  ];
+  for (const file of files) {
     fs.mkdirSync(path.dirname(path.join(seed, file)), { recursive: true });
     fs.copyFileSync(path.join(process.cwd(), file), path.join(seed, file));
   }
@@ -253,6 +261,8 @@ function entrypointClone() {
     '#!/bin/sh\necho "HANDOFF args=[$*] channel=[${NANOCLAW_UPDATE_CHANNEL:-}]"\n',
     { mode: 0o755 },
   );
+  // nanoclaw.sh stops on a Node below its minimum; the runner's own Node must not decide these tests.
+  fs.writeFileSync(path.join(bin, 'node'), '#!/bin/sh\necho v26.12.1\n', { mode: 0o755 });
   const run = (args: string[], env: Record<string, string> = {}) => {
     try {
       const stdout = execFileSync('bash', ['nanoclaw.sh', ...args], {
