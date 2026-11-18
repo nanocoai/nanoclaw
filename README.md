@@ -35,7 +35,7 @@ Spawn teammates from chat: every one gets its own bot identity, container, and m
 
 [OpenClaw](https://github.com/openclaw/openclaw) is an impressive project, but I wouldn't have been able to sleep if I had given complex software I didn't understand full access to my life. OpenClaw has nearly half a million lines of code, 53 config files, and 70+ dependencies. Its security is at the application level (allowlists, pairing codes) rather than true OS-level isolation. Everything runs in one Node process with shared memory.
 
-NanoClaw provides that same core functionality, but in a codebase small enough to understand: one process and a handful of files. Agents run in their own Linux containers with filesystem isolation, not merely behind permission checks.
+NanoClaw provides that same core functionality, but in a codebase small enough to understand: one host process, no microservices. Agents run in their own Linux containers with filesystem isolation, not merely behind permission checks.
 
 ## Quick Start
 
@@ -72,9 +72,9 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 ## Philosophy
 
-**Small enough to understand.** One process, a few source files and no microservices. If you want to understand the full NanoClaw codebase, just ask Claude Code to walk you through it.
+**Small enough to understand.** One host process and no microservices. If you want to understand the full NanoClaw codebase, just ask Claude Code to walk you through it.
 
-**Secure by isolation.** Agents run in Linux containers and they can only see what's explicitly mounted. Bash access is safe because commands run inside the container, not on your host.
+**Secure by isolation.** Agents run in Linux containers and they can only see what's explicitly mounted. Bash commands run inside the container, not on your host.
 
 **Built for the individual user.** NanoClaw isn't a monolithic framework; it's software that fits each user's exact needs. Instead of becoming bloatware, NanoClaw is designed to be bespoke. You make your own fork and have Claude Code modify it to match your needs.
 
@@ -88,20 +88,27 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 ## What It Supports
 
-- **Multi-channel messaging** — WhatsApp, Telegram, Discord, Slack, Microsoft Teams, iMessage, Matrix, Google Chat, Webex, Linear, GitHub, WeChat, and email via Resend. Installed on demand with `/add-<channel>` skills. Run one or many at the same time.
+- **Multi-channel messaging** — WhatsApp (personal or Business Cloud API), Telegram, Discord, Slack, Microsoft Teams, iMessage, Signal, Matrix, Mattermost, Google Chat, Webex, Linear, GitHub, WeChat, DeltaChat, Emacs, phone and SMS via Dial, and email via Resend. Installed on demand with `/add-<channel>` skills. Run one or many at the same time.
 - **Flexible isolation** — connect each channel to its own agent for full privacy, share one agent across many channels for unified memory with separate conversations, or fold multiple channels into a single shared session so one conversation spans many surfaces. Pick per channel via `/manage-channels`. See [docs/isolation-model.md](docs/isolation-model.md).
 - **Per-agent workspace** — each agent group has its own `CLAUDE.md`, its own memory, its own container, and only the mounts you allow. Nothing crosses the boundary unless you wire it to.
 - **Scheduled tasks**: recurring jobs executed by the agent, with optional [script gates](docs/scheduled-tasks.md) that avoid waking it when there is no work
 - **Web access** — search and fetch content from the web
 - **Container isolation** — agents are sandboxed in Docker containers (macOS/Linux/WSL2)
-- **Credential security** — agents never hold raw API keys. Outbound requests route through a credential gateway that injects credentials at request time and enforces per-agent policies and rate limits. Which gateway is yours to pick: setup installs one (currently [OneCLI's Agent Vault](https://github.com/onecli/onecli)) behind a provider seam.
+- **Credential security** — agents never hold raw API keys. Outbound requests route through a credential gateway that injects credentials at request time and can enforce per-agent policies and rate limits. Which gateway is yours to pick: setup installs one behind a provider seam ([OneCLI's Agent Vault](https://github.com/onecli/onecli) by default, Iron Proxy as the alternative).
 - **Agent templates**: stamp a ready-to-run agent (instructions + MCP tools + skills, no secrets) from a reusable bundle via `ncl groups create --template <ref>`. Templates load from the local `templates/` folder; populate it by hand or by copying from the [public library](https://github.com/nanocoai/nanoclaw-templates). See [docs/templates.md](docs/templates.md).
 
 ## Accounts and what leaves your machine
 
-NanoClaw has no user accounts. The only thing it reports is anonymous setup diagnostics, and
-`NANOCLAW_NO_DIAGNOSTICS=1` turns those off. Your agents, messages, files and keys never leave
-your machine.
+NanoClaw has no user accounts. The only thing it reports to us is setup diagnostics: which
+install steps ran, how long they took, whether they worked (with the error message when setup
+stops), and basic platform details like OS and Node version. They go to PostHog tagged with a
+random per-install id (`data/install-id`), not your name or email. `NANOCLAW_NO_DIAGNOSTICS=1`
+turns them off.
+
+NanoClaw itself sends nothing else about your agents, messages, files or keys anywhere. They do
+go where you point them: your model provider sees what your agents read and write, and each
+channel you connect sees the messages sent through it. This README on GitHub also loads a
+[Scarf](https://scarf.sh) pixel that counts page views.
 
 One opt-in exception: you can [fetch a prebuilt agent image](docs/hardened-image.md) instead of
 building it locally. Fetching ours needs a free account, so we see your email address and when
@@ -148,12 +155,11 @@ From a channel you own or administer, you can manage groups and tasks:
 ```
 @Andy list all scheduled tasks across groups
 @Andy pause the Monday briefing task
-@Andy join the Family Chat group
 ```
 
 ## Customizing
 
-NanoClaw doesn't use configuration files. To make changes, just tell Claude Code what you want:
+NanoClaw avoids configuration sprawl. To make changes, just tell Claude Code what you want:
 
 - "Change the trigger word to @Bob"
 - "Remember in the future to make responses shorter and more direct"
@@ -202,12 +208,12 @@ Key files:
 - `src/delivery.ts` — polls `outbound.db`, delivers via adapter, handles system actions
 - `src/host-sweep.ts` — 60s sweep: stale detection, due-message wake, recurrence
 - `src/session-manager.ts` — resolves sessions, opens `inbound.db` / `outbound.db`
-- `src/container-runner.ts` — spawns per-agent-group containers, leases the session's gateway contribution
+- `src/container-runner.ts` — spawns one container per session, leases the session's gateway contribution
 - `src/db/` — central DB (users, roles, agent groups, messaging groups, wiring, migrations)
 - `src/channels/` — channel adapter infra (adapters installed via `/add-<channel>` skills)
 - `src/providers/` — host-side provider config (`claude` baked in; others via skills)
 - `container/agent-runner/` — Bun agent-runner: poll loop, MCP tools, provider abstraction
-- `groups/<folder>/` — per-agent-group filesystem (`CLAUDE.md`, skills, container config)
+- `groups/<folder>/` — per-agent-group folder (standing instructions, memory, and the generated `CLAUDE.md` and container config)
 
 ## FAQ
 
@@ -221,9 +227,11 @@ Yes. Docker is the default runtime and works on macOS, Linux, and Windows (via W
 
 **Is this secure?**
 
-Agents run in containers, not behind application-level permission checks. They can only access explicitly mounted directories. Credentials never enter the container — outbound API requests route through the installed credential gateway, which injects authentication at the proxy level and supports rate limits and access policies. You should still review what you're running, but the codebase is small enough that you actually can. See the [security documentation](https://docs.nanoclaw.dev/concepts/security) for the full security model.
+Agents run in containers, not behind application-level permission checks. They can only access explicitly mounted directories. Agents never hold raw API keys — outbound API requests route through the installed credential gateway, which injects authentication at the proxy level and supports rate limits and access policies. Forcing all container traffic through the gateway (egress lockdown) is opt-in: set `NANOCLAW_EGRESS_LOCKDOWN=true`. You should still review what you're running, and you can ask Claude Code to walk you through any part of it. See the [security documentation](https://docs.nanoclaw.dev/concepts/security) for the full security model.
 
-**Why no configuration files?**
+Found a vulnerability? Please don't open a public issue. [SECURITY.md](SECURITY.md) explains how to report it privately.
+
+**Why so little configuration?**
 
 We don't want configuration sprawl. Every user should customize NanoClaw so that the code does exactly what they want, rather than configuring a generic system. If you prefer having config files, you can tell Claude to add them.
 
