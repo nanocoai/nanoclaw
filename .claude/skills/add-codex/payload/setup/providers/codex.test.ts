@@ -688,6 +688,13 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     expect(resolveCodexCli(root, scratch)).toMatchObject({ ok: false, error: 'codex_npx_failed' });
   });
 
+  it('signs in when npx succeeds, whatever its stderr says', () => {
+    writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
+    hostWithoutCodex({ status: 0, stderr: npmStopped('SIGTERM') });
+
+    expect(resolveCodexCli(root, scratch)).toEqual({ ok: true, command: BIN });
+  });
+
   it('on Ctrl-C during the npx fetch, removes the home and re-raises the signal, with no error', async () => {
     writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
     hostWithoutCodex({ status: 1, stderr: npmStopped('SIGINT') });

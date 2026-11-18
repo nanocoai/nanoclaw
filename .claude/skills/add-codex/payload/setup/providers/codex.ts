@@ -342,10 +342,11 @@ const STALE_LOGIN_MS = 60 * 60 * 1000;
 /**
  * The stop signal that ended a probe, if one did. npm dies of it early on but
  * exits 1 naming it mid-install (after its configurable heading). A kill by
- * Node itself, on a buffer overflow, comes with an error and isn't a stop.
+ * Node itself, on a buffer overflow, comes with an error and isn't a stop;
+ * neither is anything a probe that succeeded printed.
  */
 function stopSignalOf(probed: SpawnSyncReturns<string>): (typeof LOGIN_SIGNALS)[number] | undefined {
-  if (probed.error) return undefined;
+  if (probed.error || probed.status === 0) return undefined;
   const signal = probed.signal ?? / (?:error|ERR!) signal (SIG[A-Z]+)$/m.exec(String(probed.stderr ?? ''))?.[1];
   return LOGIN_SIGNALS.find((stop) => stop === signal);
 }
