@@ -216,13 +216,15 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
   // npx names the binary it fetched for the pin, and the login runs that binary
   // directly, so a stop signal reaches Codex instead of ending at npm.
   // --ignore-scripts matches the image install (codex ships none); --loglevel
-  // keeps npm's notices, such as its update nag, off the sign-in screen.
+  // keeps npm's notices, such as its update nag, off the sign-in screen;
+  // --color=false keeps its error lines plain even when color is forced.
   const fetched = probe(
     'npx',
     [
       '--yes',
       '--ignore-scripts',
       '--loglevel=error',
+      '--color=false',
       '--package',
       `@openai/codex@${version}`,
       '-c',

@@ -356,6 +356,7 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     '--yes',
     '--ignore-scripts',
     '--loglevel=error',
+    '--color=false',
     '--package',
     '@openai/codex@0.169.0',
     '-c',
