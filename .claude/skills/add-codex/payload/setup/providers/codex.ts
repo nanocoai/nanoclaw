@@ -233,7 +233,7 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
     ],
     npxDir,
   );
-  stoppedBy = stopSignalOf(fetched);
+  stoppedBy = stopSignalOf(fetched, { npm: true });
   if (stoppedBy) return { ok: false, stoppedBy };
   if ((fetched.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
     return {
@@ -341,13 +341,17 @@ const STALE_LOGIN_MS = 60 * 60 * 1000;
 
 /**
  * The stop signal that ended a probe, if one did. npm dies of it early on but
- * exits 1 naming it mid-install (after its configurable heading). A kill by
- * Node itself, on a buffer overflow, comes with an error and isn't a stop;
- * neither is anything a probe that succeeded printed.
+ * exits 1 naming it mid-install (after its configurable heading), so for npx
+ * that line counts too. Node's own kill on a buffer overflow comes with an
+ * error and isn't a stop; neither is anything a probe that succeeded printed.
  */
-function stopSignalOf(probed: SpawnSyncReturns<string>): (typeof LOGIN_SIGNALS)[number] | undefined {
+function stopSignalOf(
+  probed: SpawnSyncReturns<string>,
+  { npm = false } = {},
+): (typeof LOGIN_SIGNALS)[number] | undefined {
   if (probed.error || probed.status === 0) return undefined;
-  const signal = probed.signal ?? / (?:error|ERR!) signal (SIG[A-Z]+)$/m.exec(String(probed.stderr ?? ''))?.[1];
+  const named = npm ? / (?:error|ERR!) signal (SIG[A-Z]+)$/m.exec(String(probed.stderr ?? ''))?.[1] : undefined;
+  const signal = probed.signal ?? named;
   return LOGIN_SIGNALS.find((stop) => stop === signal);
 }
 
