@@ -662,7 +662,7 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     if (where === 'host') mockSpawnSync.mockReturnValue({ status: null, signal, stdout: '', stderr: '' });
     else if (where === 'npm') hostWithoutCodex({ status: 1, stderr: npmStopped(signal) });
     else if (where === 'npm-heading')
-      hostWithoutCodex({ status: 1, stderr: npmStopped(signal).replaceAll('npm error', 'acme error') });
+      hostWithoutCodex({ status: 1, stderr: npmStopped(signal).replaceAll('npm error', 'Acme Build error') });
     else hostWithoutCodex(where === 'npx' ? { status: null, signal } : { status: 0, binSignal: signal });
 
     expect(resolveCodexCli(root, scratch)).toEqual({ ok: false, stoppedBy: signal });

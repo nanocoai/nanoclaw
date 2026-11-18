@@ -346,7 +346,7 @@ const STALE_LOGIN_MS = 60 * 60 * 1000;
  */
 function stopSignalOf(probed: SpawnSyncReturns<string>): (typeof LOGIN_SIGNALS)[number] | undefined {
   if (probed.error) return undefined;
-  const signal = probed.signal ?? /^\S+ (?:error|ERR!) signal (SIG[A-Z]+)$/m.exec(String(probed.stderr ?? ''))?.[1];
+  const signal = probed.signal ?? / (?:error|ERR!) signal (SIG[A-Z]+)$/m.exec(String(probed.stderr ?? ''))?.[1];
   return LOGIN_SIGNALS.find((stop) => stop === signal);
 }
 
