@@ -184,6 +184,41 @@ describe('CodexProvider active turns', () => {
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'Sent it.' }]);
   });
 
+  it('keeps a save-only image unsent: the note defers to the request and the provider delivers nothing', async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({}, fake.runtime);
+    // Like an isolated task that must not notify anyone unless it asks to.
+    const query = provider.query({
+      prompt: 'Save a logo to /workspace/agent/logo.png. Do not send it to anyone.',
+      cwd: '/workspace/agent',
+    });
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    const savedPath = '/home/node/.codex/generated_images/thread-1/ig_logo.png';
+    fake.notify('item/completed', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: { type: 'imageGeneration', status: 'completed', savedPath },
+    });
+    await waitFor(() => fake.steerCalls.length === 1);
+
+    query.end();
+    fake.completeTurn('Saved.');
+    await collect;
+
+    // Exact text: any edit that makes sending unconditional must change this test.
+    expect(fake.steerCalls.map((call) => call.inputText)).toEqual([
+      `<system>Your image generation tool saved ${savedPath}. Nobody has seen it: it is not shown automatically. ` +
+        "Follow the original request's delivery instructions. If whoever asked expects to see the image, send it with send_file. " +
+        'If the request only asked to save it, said not to send it, or is a task that did not ask you to notify anyone, do not send it.</system>',
+    ]);
+    // Only the agent's own send_file delivers; the provider emits no file.
+    expect(events.map((event) => event.type)).not.toContain('file');
+    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'Saved.' }]);
+  });
+
   it('drops an image note it cannot steer instead of starting a turn the runner never asked for', async () => {
     const fake = createFakeCodexRuntime({ rejectSteer: true });
     const provider = createCodexProvider({}, fake.runtime);

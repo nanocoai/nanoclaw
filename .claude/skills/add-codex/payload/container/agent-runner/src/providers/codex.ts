@@ -445,15 +445,16 @@ async function* runOneTurn(
 }
 
 /**
- * Codex's native clients show a generated image to the user, so the model
- * believes it was delivered and never sends it. Steered into the same turn,
- * this note gives the agent the saved path; the agent sends the file with
- * send_file to whoever asked, like any other file.
+ * Codex tells the model a generated image is already on screen, so it never
+ * sends it. Steered into the same turn, this note corrects that and leaves
+ * delivery to the original request: a chat ask gets the file, while a
+ * save-only ask or a task that did not ask to notify anyone does not.
  */
 export function codexImageSavedNote(savedPath: string): string {
   return (
-    `<system>Your image generation tool saved ${savedPath}. ` +
-    'The user has not seen it: send it with send_file to whoever asked for it.</system>'
+    `<system>Your image generation tool saved ${savedPath}. Nobody has seen it: it is not shown automatically. ` +
+    "Follow the original request's delivery instructions. If whoever asked expects to see the image, send it with send_file. " +
+    'If the request only asked to save it, said not to send it, or is a task that did not ask you to notify anyone, do not send it.</system>'
   );
 }
 
