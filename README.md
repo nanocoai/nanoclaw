@@ -84,7 +84,7 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 **Skills over features.** Trunk ships the registry and infrastructure, not specific channel adapters or alternative agent providers. Channels (Discord, Slack, Telegram, WhatsApp, …) live on a long-lived `channels` branch; alternative providers (OpenCode, Codex, Cursor) ship inside their own skill's `payload/` folder. You run `/add-telegram`, `/add-opencode`, etc. and the skill copies exactly the module(s) you need into your fork. No feature you didn't ask for.
 
-**Your pick of harness and model.** Each agent group runs on the provider you choose: Claude Code via Anthropic's Claude Agent SDK (the built-in default), OpenAI's Codex (ChatGPT subscription or API key), Cursor's local Agent SDK (Cursor account or API key), OpenCode for OpenRouter, Google, DeepSeek and more, or local open-weight models through Ollama. Setup asks which one to start with; `/add-codex`, `/add-cursor`, `/add-opencode` and `/add-ollama-provider` add the others later. Provider is configurable per agent group, so different agents can run on different backends in the same install.
+**Your pick of harness and model.** Each agent group runs on the provider you choose: Claude Code via Anthropic's Claude Agent SDK (the built-in default), OpenAI's Codex (ChatGPT subscription or API key), Cursor's local Agent SDK (Cursor account or API key), OpenCode for OpenRouter, Google, DeepSeek and more (including any local OpenAI-compatible endpoint), or local open-weight models through Ollama. Setup asks which one to start with; `/add-codex`, `/add-cursor`, `/add-opencode` and `/add-ollama-provider` add the others later. Provider is configurable per agent group, so different agents can run on different backends in the same install.
 
 ## What It Supports
 
@@ -238,6 +238,8 @@ We don't want configuration sprawl. Every user should customize NanoClaw so that
 **Can I use third-party or open-source models?**
 
 Yes. Pick a provider at setup or add one later: `/add-codex` (OpenAI), `/add-cursor`, `/add-opencode` (OpenRouter, OpenAI, Google, DeepSeek, and more via OpenCode config) or `/add-ollama-provider` (local open-weight models via Ollama). All are configurable per agent group, so different agents can run on different backends in the same install.
+
+For local models there are two routes: `/add-opencode` pointed at a local OpenAI-compatible endpoint (any server on your machine or network that speaks the OpenAI API), or `/add-ollama-provider`, which keeps the Claude harness and points it at Ollama.
 
 For one-off experiments with the Claude provider, any Anthropic API-compatible endpoint also works via `.env`:
 
