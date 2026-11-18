@@ -655,11 +655,14 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
     ['the npx fetch', 'SIGINT', 'npx', ['codex', 'npx']],
     ['the npx fetch', 'SIGTERM', 'npx', ['codex', 'npx']],
     ["npm's install, which exits 1 naming it,", 'SIGINT', 'npm', ['codex', 'npx']],
+    ['npm under a custom log heading', 'SIGTERM', 'npm-heading', ['codex', 'npx']],
     ['the pinned CLI check', 'SIGHUP', 'bin', ['codex', 'npx', BIN]],
   ] as const)('reports a stop, not a failure, when %s ends on %s', (_label, signal, where, probed) => {
     writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
     if (where === 'host') mockSpawnSync.mockReturnValue({ status: null, signal, stdout: '', stderr: '' });
     else if (where === 'npm') hostWithoutCodex({ status: 1, stderr: npmStopped(signal) });
+    else if (where === 'npm-heading')
+      hostWithoutCodex({ status: 1, stderr: npmStopped(signal).replaceAll('npm error', 'acme error') });
     else hostWithoutCodex(where === 'npx' ? { status: null, signal } : { status: 0, binSignal: signal });
 
     expect(resolveCodexCli(root, scratch)).toEqual({ ok: false, stoppedBy: signal });
@@ -667,9 +670,18 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
   });
 
   it.each([
-    ['npx', { status: null, signal: 'SIGKILL' as const }],
-    ['npm', { status: 1, stderr: npmStopped('SIGKILL') }],
-  ])('still reports a failure when %s names any other signal', (_label, npx) => {
+    ['npx dies of any other signal', { status: null, signal: 'SIGKILL' as const }],
+    ['npm names any other signal', { status: 1, stderr: npmStopped('SIGKILL') }],
+    // spawnSync kills a child that overflows its buffer, and says so.
+    [
+      'Node kills an overflowing npx',
+      {
+        status: null,
+        signal: 'SIGTERM' as const,
+        error: Object.assign(new Error('spawnSync npx ENOBUFS'), { code: 'ENOBUFS' }),
+      },
+    ],
+  ])('still reports a failure when %s', (_label, npx) => {
     writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
     hostWithoutCodex(npx);
 

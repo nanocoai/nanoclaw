@@ -4,7 +4,7 @@
  * ~/.codex/auth.json is copied: rotating one session from two consumers
  * would invalidate it. Both setup entry points use this provider hook.
  */
-import { type ChildProcess, spawn, spawnSync } from 'child_process';
+import { type ChildProcess, spawn, spawnSync, type SpawnSyncReturns } from 'child_process';
 import { getCredentialStore, type ProviderCredentialStore } from '../gateways/credential-store.js';
 import fs from 'fs';
 import os from 'os';
@@ -192,7 +192,8 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
     });
   const host = probe('codex', ['--version']);
   if (host.status === 0) return { ok: true, command: 'codex' };
-  if (isStopSignal(host.signal)) return { ok: false, stoppedBy: host.signal };
+  let stoppedBy = stopSignalOf(host);
+  if (stoppedBy) return { ok: false, stoppedBy };
 
   const version = readPinnedCodexVersion(root);
   if (!version) {
@@ -232,9 +233,8 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
     ],
     npxDir,
   );
-  // npm dies of the signal early on, but exits 1 naming it mid-install.
-  const npxStop = fetched.signal ?? /^npm (?:error|ERR!) signal (SIG[A-Z]+)$/m.exec(String(fetched.stderr ?? ''))?.[1];
-  if (isStopSignal(npxStop)) return { ok: false, stoppedBy: npxStop };
+  stoppedBy = stopSignalOf(fetched);
+  if (stoppedBy) return { ok: false, stoppedBy };
   if ((fetched.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
     return {
       ok: false,
@@ -262,7 +262,8 @@ export function resolveCodexCli(root: string, scratch: string): CodexCli {
       .split('\n')
       .pop() ?? '';
   const ran = path.isAbsolute(bin) ? probe(bin, ['--version']) : undefined;
-  if (ran && isStopSignal(ran.signal)) return { ok: false, stoppedBy: ran.signal };
+  stoppedBy = ran && stopSignalOf(ran);
+  if (stoppedBy) return { ok: false, stoppedBy };
   if (
     ran?.status !== 0 ||
     !String(ran.stdout ?? '')
@@ -338,8 +339,15 @@ export async function runCodexLoginAuth(
 const LOGIN_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
 const STALE_LOGIN_MS = 60 * 60 * 1000;
 
-function isStopSignal(signal: string | null | undefined): signal is (typeof LOGIN_SIGNALS)[number] {
-  return (LOGIN_SIGNALS as readonly string[]).includes(signal ?? '');
+/**
+ * The stop signal that ended a probe, if one did. npm dies of it early on but
+ * exits 1 naming it mid-install (after its configurable heading). A kill by
+ * Node itself, on a buffer overflow, comes with an error and isn't a stop.
+ */
+function stopSignalOf(probed: SpawnSyncReturns<string>): (typeof LOGIN_SIGNALS)[number] | undefined {
+  if (probed.error) return undefined;
+  const signal = probed.signal ?? /^\S+ (?:error|ERR!) signal (SIG[A-Z]+)$/m.exec(String(probed.stderr ?? ''))?.[1];
+  return LOGIN_SIGNALS.find((stop) => stop === signal);
 }
 
 /**
