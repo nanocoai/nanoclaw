@@ -142,27 +142,38 @@ fi
 if [ "$RELEASE_ACTION" = offer ]; then
   # shellcheck disable=SC2086 # two tags, split on purpose
   release_checkout_menu $RELEASE_REST
-  read -r -p "  Choose [1/2/3]: " RELEASE_ANS </dev/tty
+  RELEASE_CHANNEL=
+  while [ -z "$RELEASE_CHANNEL" ]; do
+    read -r -p "  Choose [1/2/3]: " RELEASE_ANS </dev/tty
+    RELEASE_CHANNEL=$(release_checkout_answer "$RELEASE_ANS")
+    [ -n "$RELEASE_CHANNEL" ] || echo "  Type 1, 2 or 3."
+  done
   echo ""
-  RELEASE_CHANNEL=$(release_checkout_answer "${RELEASE_ANS:-}")
-  # Saved now, so the choice holds even if the release predates this setting
-  # or setup stops before its first step.
-  release_checkout_save_channel "$PROJECT_ROOT" "$RELEASE_CHANNEL"
   export NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL
   read -r RELEASE_ACTION RELEASE_REST <<<"$(release_checkout_decide "$PROJECT_ROOT" "$RELEASE_CHANNEL" 1)"
+  if [ "$RELEASE_ACTION" != switch ] && ! release_checkout_save_channel "$PROJECT_ROOT" "$RELEASE_CHANNEL"; then
+    echo "error: couldn't save NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL to .env. Nothing was installed."
+    exit 1
+  fi
 fi
 
 if [ "$RELEASE_ACTION" = switch ]; then
   read -r RELEASE_CHANNEL RELEASE_TAG <<<"$RELEASE_REST"
-  if release_checkout_switch "$PROJECT_ROOT" "$RELEASE_CHANNEL" "$RELEASE_TAG"; then
-    release_checkout_save_channel "$PROJECT_ROOT" "$RELEASE_CHANNEL"
-    echo "  Installing $RELEASE_TAG (branch: $RELEASE_CHANNEL)."
-    # The release may predate --update-channel; .env and the env var carry the choice.
-    export NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL
-    exec bash "$PROJECT_ROOT/nanoclaw.sh" ${_release_args[@]+"${_release_args[@]}"}
+  # Saved before the checkout, and either failing stops here: the release may
+  # predate this setting, and its code must never run with another channel saved.
+  if ! release_checkout_save_channel "$PROJECT_ROOT" "$RELEASE_CHANNEL"; then
+    echo "error: couldn't save NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL to .env. Nothing was installed."
+    exit 1
   fi
-  echo "  Couldn't switch to $RELEASE_TAG; continuing with main."
-  RELEASE_ACTION=notice
+  if ! release_checkout_switch "$PROJECT_ROOT" "$RELEASE_CHANNEL" "$RELEASE_TAG"; then
+    echo "error: couldn't check out $RELEASE_TAG; git says why above. Nothing was installed."
+    echo "  Fix that and run bash nanoclaw.sh again, or pass --update-channel edge to install main."
+    exit 1
+  fi
+  echo "  Installing $RELEASE_TAG (branch: $RELEASE_CHANNEL)."
+  # The release may predate --update-channel; .env and the env var carry the choice.
+  export NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL
+  exec bash "$PROJECT_ROOT/nanoclaw.sh" ${_release_args[@]+"${_release_args[@]}"}
 fi
 
 if [ "$RELEASE_ACTION" = notice ]; then

@@ -92,18 +92,19 @@ describe('release checkout decision', () => {
     expect(decide(freshClone().install)).toBe('offer v2.4.0 v2.5.0-rc.1');
   });
 
-  it("installs the given channel's release without asking, and only on a terminal", () => {
+  it("installs the given channel's release without asking, with or without a terminal", () => {
     const { install } = freshClone();
     expect(decide(install, ' Stable ')).toBe('switch stable v2.4.0');
     expect(decide(install, 'beta')).toBe('switch beta v2.5.0-rc.1');
-    expect(decide(install, 'stable', '0')).toBe('notice stable v2.4.0');
-    expect(decide(install, 'beta', '0')).toBe('notice beta v2.5.0-rc.1');
+    expect(decide(install, 'stable', '0')).toBe('switch stable v2.4.0');
+    expect(decide(install, 'beta', '0')).toBe('switch beta v2.5.0-rc.1');
   });
 
   it('installs a channel saved in .env without asking; a request overrides it', () => {
     const { install } = freshClone();
     fs.writeFileSync(path.join(install, '.env'), 'NANOCLAW_UPDATE_CHANNEL=beta\n');
     expect(decide(install)).toBe('switch beta v2.5.0-rc.1');
+    expect(decide(install, '', '0')).toBe('switch beta v2.5.0-rc.1');
     fs.writeFileSync(path.join(install, '.env'), 'NANOCLAW_UPDATE_CHANNEL=edge\n');
     expect(decide(install, 'stable')).toBe('switch stable v2.4.0');
   });
@@ -112,6 +113,7 @@ describe('release checkout decision', () => {
     const { install } = freshClone({ official: false });
     expect(decide(install)).toBe('notice stable v2.4.0');
     expect(decide(install, 'stable')).toBe('notice stable v2.4.0');
+    expect(decide(install, 'beta')).toBe('notice beta v2.5.0-rc.1');
 
     const lookalike = freshClone({ official: false }).install;
     git(lookalike, ['config', 'remote.origin.url', 'https://github.com/notnanocoai/nanoclaw.git']);
@@ -120,6 +122,19 @@ describe('release checkout decision', () => {
 
   it('never asks without a terminal', () => {
     expect(decide(freshClone().install, '', '0')).toBe('notice stable v2.4.0');
+  });
+
+  it('counts only tags on the official branches, never one fetched from elsewhere', () => {
+    const { install } = freshClone();
+    const other = temp('release-other-');
+    git(other, ['init', '-q', '-b', 'main']);
+    commit(other, 'not official');
+    git(other, ['tag', '-a', 'v3.0.0', '-m', 'v3.0.0']);
+    git(other, ['tag', '-a', 'v3.1.0-rc.1', '-m', 'rc']);
+    git(install, ['fetch', '-q', other, 'refs/tags/*:refs/tags/*']);
+    expect(decide(install)).toBe('offer v2.4.0 v2.5.0-rc.1');
+    expect(decide(install, 'stable')).toBe('switch stable v2.4.0');
+    expect(decide(install, 'beta')).toBe('switch beta v2.5.0-rc.1');
   });
 
   it('asks even when main is on the release, and stays put once the channel is known', () => {
@@ -192,12 +207,19 @@ describe('release checkout decision', () => {
     expect(decide(committed)).toBe('none');
   });
 
-  it('does nothing without a stable release or a Git checkout', () => {
-    const untagged = temp('release-untagged-');
-    git(untagged, ['init', '-q', '-b', 'main']);
-    commit(untagged, 'first');
-    git(untagged, ['tag', '-a', 'v2.5.0-rc.1', '-m', 'rc']);
-    expect(decide(untagged)).toBe('none');
+  it("does nothing without the channel's release or a Git checkout", () => {
+    const seed = temp('release-seed-');
+    git(seed, ['init', '-q', '-b', 'main']);
+    commit(seed, 'first');
+    git(seed, ['tag', '-a', 'v2.5.0-rc.1', '-m', 'rc']);
+    commit(seed, 'main tip');
+    const install = path.join(temp('release-install-'), 'nanoclaw');
+    git(path.dirname(install), ['clone', '-q', seed, install]);
+    markOfficial(install, seed);
+    expect(decide(install)).toBe('none');
+    expect(decide(install, 'stable')).toBe('none');
+    // Like the updater, beta needs no stable release.
+    expect(decide(install, 'beta')).toBe('switch beta v2.5.0-rc.1');
     expect(decide(temp('release-plain-'))).toBe('none');
   });
 
@@ -258,8 +280,9 @@ describe('release checkout question', () => {
     ['3', 'edge'],
     ['Beta', 'beta'],
     ['edge', 'edge'],
-    ['22', 'stable'],
-  ])('takes %j as %s', (answer, channel) => {
+    ['22', ''],
+    ['x', ''],
+  ])('takes %j as %j', (answer, channel) => {
     expect(helper('release_checkout_answer', answer).stdout).toBe(channel);
   });
 });
@@ -279,19 +302,37 @@ describe('release checkout save', () => {
     '',
     'OTHER=1',
     'OTHER=1\n',
-    'A=1\nNANOCLAW_UPDATE_CHANNEL=edge\nB=2\n  NANOCLAW_UPDATE_CHANNEL = "stable"\r\n# NANOCLAW_UPDATE_CHANNEL=edge\n',
-  ])('writes %j as setup writes it, keeping the file mode', (before) => {
-    const shell = temp('release-save-');
-    const setup = temp('release-save-');
-    for (const root of [shell, setup]) {
-      fs.writeFileSync(env(root), before);
-      fs.chmodSync(env(root), 0o640);
-    }
-    expect(helper('release_checkout_save_channel', shell, 'beta').status).toBe(0);
-    upsertEnvVar('NANOCLAW_UPDATE_CHANNEL', 'beta', setup);
-    expect(fs.readFileSync(env(shell), 'utf8')).toBe(fs.readFileSync(env(setup), 'utf8'));
-    expect(fs.statSync(env(shell)).mode & 0o777).toBe(0o640);
-    expect(readChannelSetting(shell)).toBe('beta');
+    'A=1\nNANOCLAW_UPDATE_CHANNEL=edge\nB=2\n',
+    // JavaScript's trim() takes a no-break space; the shell's [[:space:]] may not.
+    ' NANOCLAW_UPDATE_CHANNEL=edge\nNANOCLAW_UPDATE_CHANNEL=stable\n',
+  ])('adds to %j without touching what is there, and every reader sees it', (before) => {
+    const root = temp('release-save-');
+    fs.writeFileSync(env(root), before);
+    fs.chmodSync(env(root), 0o640);
+    expect(helper('release_checkout_save_channel', root, 'beta').status).toBe(0);
+    expect(fs.readFileSync(env(root), 'utf8').startsWith(before)).toBe(true);
+    expect(fs.statSync(env(root)).mode & 0o777).toBe(0o640);
+    expect(readChannelSetting(root)).toBe('beta');
+    expect(helper('release_checkout_saved_channel', root).stdout).toBe('beta');
+    // What setup writes next folds the lines into one, still beta.
+    upsertEnvVar('NANOCLAW_UPDATE_CHANNEL', 'beta', root);
+    expect(fs.readFileSync(env(root), 'utf8').match(/NANOCLAW_UPDATE_CHANNEL/g)).toHaveLength(1);
+    expect(readChannelSetting(root)).toBe('beta');
+  });
+
+  it('writes nothing when the channel is already saved', () => {
+    const root = temp('release-save-');
+    fs.writeFileSync(env(root), 'A=1\nNANOCLAW_UPDATE_CHANNEL="beta"\n');
+    expect(helper('release_checkout_save_channel', root, 'beta').status).toBe(0);
+    expect(fs.readFileSync(env(root), 'utf8')).toBe('A=1\nNANOCLAW_UPDATE_CHANNEL="beta"\n');
+  });
+
+  it.skipIf(process.getuid?.() === 0)('fails, and leaves .env alone, when it cannot write', () => {
+    const root = temp('release-save-');
+    fs.writeFileSync(env(root), 'NANOCLAW_UPDATE_CHANNEL=edge\n');
+    fs.chmodSync(env(root), 0o444);
+    expect(helper('release_checkout_save_channel', root, 'beta').status).not.toBe(0);
+    expect(fs.readFileSync(env(root), 'utf8')).toBe('NANOCLAW_UPDATE_CHANNEL=edge\n');
   });
 });
 
@@ -408,12 +449,15 @@ function entrypointClone() {
       return { status: failure.status, stdout: failure.stdout };
     }
   };
-  /** On a real terminal (util-linux or BSD `script`), typing `answer` at the channel question. */
-  const runOnTerminal = (args: string[], answer: string) =>
-    new Promise<string>((resolve, reject) => {
+  /**
+   * On a real terminal (util-linux or BSD `script`), typing answers[i] at the i-th channel question.
+   * Resolves with the output and nanoclaw.sh's exit status.
+   */
+  const runOnTerminal = (args: string[], answers: string[]) =>
+    new Promise<{ status: number; stdout: string }>((resolve, reject) => {
       const end = 'TERMINAL-RUN-ENDED';
       const quoted = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
-      const command = `${['bash', 'nanoclaw.sh', ...args].map(quoted).join(' ')}; echo ${end}`;
+      const command = `${['bash', 'nanoclaw.sh', ...args].map(quoted).join(' ')}; echo "${end} $?"`;
       const terminal =
         process.platform === 'darwin'
           ? `script -q /dev/null bash -c ${quoted(command)}`
@@ -423,21 +467,21 @@ function entrypointClone() {
       const child = spawn('sh', ['-c', `cat | ${terminal}`], { cwd: install, env, stdio: ['pipe', 'pipe', 'pipe'] });
       const timer = setTimeout(() => child.kill('SIGKILL'), 25_000);
       let stdout = '';
-      let answered = false;
+      let typed = 0;
       child.stdin.on('error', () => {});
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', (chunk: string) => {
         stdout += chunk;
-        if (!answered && stdout.includes('Choose [1/2/3]')) {
-          answered = true;
-          child.stdin.write(answer);
-        }
+        const asked = stdout.split('Choose [1/2/3]').length - 1;
+        while (typed < Math.min(asked, answers.length)) child.stdin.write(answers[typed++]);
         if (stdout.includes(end)) child.stdin.end();
       });
       child.on('error', reject);
       child.on('close', () => {
         clearTimeout(timer);
-        resolve(stdout.replace(/\r/g, ''));
+        const clean = stdout.replace(/\r/g, '');
+        const status = Number(new RegExp(`${end} (\\d+)`).exec(clean)?.[1] ?? -1);
+        resolve({ status, stdout: clean });
       });
     });
   const tagCommit = (tag: string) => git(install, ['rev-parse', `refs/tags/${tag}^{commit}`]);
@@ -466,11 +510,34 @@ describe.skipIf(process.getuid?.() === 0)('nanoclaw.sh without a terminal', () =
     onMain(install, head);
   });
 
-  it('does not switch for an explicit channel either, and forwards the flag', () => {
+  it("installs a given channel's release without a terminal too", () => {
+    const { install, run, tagCommit } = entrypointClone();
+    const result = run(['--update-channel', 'beta', '--template-path', 'sales/sdr']);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('RELEASE v2.5.0-rc.1 args=[--template-path sales/sdr] channel=[beta]');
+    expect(git(install, ['symbolic-ref', '--short', 'HEAD'])).toBe('beta');
+    expect(git(install, ['rev-parse', 'HEAD'])).toBe(tagCommit('v2.5.0-rc.1'));
+    expect(savedChannel(install)).toBe('NANOCLAW_UPDATE_CHANNEL=beta\n');
+  });
+
+  it('stops before installing anything when the channel cannot be saved', () => {
     const { install, run, head } = entrypointClone();
+    fs.writeFileSync(path.join(install, '.env'), 'NANOCLAW_UPDATE_CHANNEL=edge\n');
+    fs.chmodSync(path.join(install, '.env'), 0o444);
     const result = run(['--update-channel', 'beta']);
-    expect(result.stdout).toContain('newer than the latest beta release (v2.5.0-rc.1)');
-    expect(result.stdout).toContain('HANDOFF args=[--silent run setup:auto --update-channel beta] channel=[]');
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("couldn't save NANOCLAW_UPDATE_CHANNEL=beta to .env. Nothing was installed.");
+    expect(fs.existsSync(path.join(install, 'bootstrap-ran'))).toBe(false);
+    onMain(install, head);
+  });
+
+  it('stops before installing anything when the release cannot be checked out', () => {
+    const { install, run, head } = entrypointClone();
+    git(install, ['branch', 'beta']);
+    const result = run(['--update-channel', 'beta']);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("couldn't check out v2.5.0-rc.1; git says why above. Nothing was installed.");
+    expect(fs.existsSync(path.join(install, 'bootstrap-ran'))).toBe(false);
     onMain(install, head);
   });
 
@@ -507,7 +574,8 @@ describe.runIf(['linux', 'darwin'].includes(process.platform) && process.getuid?
       ['2\n', 'beta', 'v2.5.0-rc.1'],
     ])('answer %j installs the %s release %s, saved before it starts', async (answer, channel, tag) => {
       const { install, runOnTerminal, tagCommit } = entrypointClone();
-      const stdout = await runOnTerminal(['--template-path', 'sales/sdr'], answer);
+      const { status, stdout } = await runOnTerminal(['--template-path', 'sales/sdr'], [answer]);
+      expect(status).toBe(0);
       expect(stdout).toContain('Which updates should this install follow?');
       expect(stdout).toContain(`Installing ${tag} (branch: ${channel}).`);
       // The release's own nanoclaw.sh, which knows nothing about channels, got the rest.
@@ -520,7 +588,8 @@ describe.runIf(['linux', 'darwin'].includes(process.platform) && process.getuid?
 
     it('answer 3 keeps main and saves edge', async () => {
       const { install, runOnTerminal, head } = entrypointClone();
-      const stdout = await runOnTerminal([], '3\n');
+      const { status, stdout } = await runOnTerminal([], ['3\n']);
+      expect(status).toBe(0);
       expect(stdout).toContain('Which updates should this install follow?');
       expect(stdout).not.toContain('newer than');
       expect(stdout).toContain('HANDOFF args=[--silent run setup:auto] channel=[edge]');
@@ -529,9 +598,19 @@ describe.runIf(['linux', 'darwin'].includes(process.platform) && process.getuid?
       expect(savedChannel(install)).toBe('NANOCLAW_UPDATE_CHANNEL=edge\n');
     });
 
+    it('asks again after an answer it does not know', async () => {
+      const { install, runOnTerminal } = entrypointClone();
+      const { status, stdout } = await runOnTerminal([], ['22\n', '3\n']);
+      expect(status).toBe(0);
+      expect(stdout).toContain('Type 1, 2 or 3.');
+      expect(stdout.split('Choose [1/2/3]')).toHaveLength(3);
+      expect(savedChannel(install)).toBe('NANOCLAW_UPDATE_CHANNEL=edge\n');
+    });
+
     it('takes the channel from the flag without asking', async () => {
       const { install, runOnTerminal, tagCommit } = entrypointClone();
-      const stdout = await runOnTerminal(['--update-channel', 'beta', '--template-path', 'sales/sdr'], '');
+      const { status, stdout } = await runOnTerminal(['--update-channel', 'beta', '--template-path', 'sales/sdr'], []);
+      expect(status).toBe(0);
       expect(stdout).not.toContain('Which updates');
       expect(stdout).toContain('RELEASE v2.5.0-rc.1 args=[--template-path sales/sdr] channel=[beta]');
       expect(git(install, ['rev-parse', 'HEAD'])).toBe(tagCommit('v2.5.0-rc.1'));

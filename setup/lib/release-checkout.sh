@@ -21,37 +21,48 @@ release_checkout_saved_channel() {
     | tr 'A-Z' 'a-z' | { grep -v '^$' || true; } | tail -1
 }
 
-# release_checkout_official_head <root> — true when HEAD is on a branch of the
-# official repository (same URL rule as channels-remote.sh).
-release_checkout_official_head() {
+# release_checkout_official_remote <root> — the remote of the official repository
+# that has HEAD on one of its branches (same URL rule as channels-remote.sh), if any.
+release_checkout_official_remote() {
   local root=$1 remote url
   for remote in $(git -C "$root" remote 2>/dev/null); do
     url=$(git -C "$root" config --get "remote.$remote.url" 2>/dev/null || true)
     case "${url%.git}" in
       *[:/]qwibitai/nanoclaw|*[:/]nanocoai/nanoclaw)
         if [ -n "$(git -C "$root" for-each-ref --count=1 --contains HEAD "refs/remotes/$remote" 2>/dev/null)" ]; then
+          echo "$remote"
           return 0
         fi
         ;;
     esac
   done
-  return 1
 }
 
-# release_checkout_newest_tag <root> <stable|beta> — the tag the updater picks for
-# that channel (scripts/update/channel.ts): annotated vX.Y.Z tags for stable; for
-# beta also -beta.N and -rc.N, where a release sorts after its own pre-releases.
+# release_checkout_newest_tag <root> <stable|beta> [<remote>] — the tag the updater
+# picks for that channel (scripts/update/channel.ts): annotated vX.Y.Z tags for
+# stable; for beta also -beta.N and -rc.N, where a release sorts after its own
+# pre-releases. With <remote>, only tags on that remote's branches count, so a
+# tag fetched from anywhere else never decides what is installed.
 release_checkout_newest_tag() {
-  { git -C "$1" for-each-ref --format='%(objecttype) %(refname:strip=2)' refs/tags 2>/dev/null || true; } \
-    | awk -v channel="$2" '
-        $1 != "tag" || $2 !~ /^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+|-beta\.[1-9][0-9]*)?$/ { next }
-        {
-          split(substr($2, 2), f, /[.-]/)
-          stage = f[4] == "beta" ? 0 : f[4] == "rc" ? 1 : 2
-          if (channel == "stable" && stage != 2) next
-          print f[1] + 0, f[2] + 0, f[3] + 0, stage, f[5] + 0, $2
-        }' \
-    | sort -k1,1n -k2,2n -k3,3n -k4,4n -k5,5n | tail -1 | cut -d' ' -f6
+  local root=$1 channel=$2 remote=${3:-} tag
+  for tag in $(
+    { git -C "$root" for-each-ref --format='%(objecttype) %(refname:strip=2)' refs/tags 2>/dev/null || true; } \
+      | awk -v channel="$channel" '
+          $1 != "tag" || $2 !~ /^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+|-beta\.[1-9][0-9]*)?$/ { next }
+          {
+            split(substr($2, 2), f, /[.-]/)
+            stage = f[4] == "beta" ? 0 : f[4] == "rc" ? 1 : 2
+            if (channel == "stable" && stage != 2) next
+            print f[1] + 0, f[2] + 0, f[3] + 0, stage, f[5] + 0, $2
+          }' \
+      | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr -k5,5nr | cut -d' ' -f6
+  ); do
+    if [ -z "$remote" ] \
+      || [ -n "$(git -C "$root" for-each-ref --count=1 --contains "refs/tags/$tag^{commit}" "refs/remotes/$remote" 2>/dev/null)" ]; then
+      echo "$tag"
+      return 0
+    fi
+  done
 }
 
 # release_checkout_decide <root> <requested-channel> <tty: 1|0>
@@ -59,12 +70,12 @@ release_checkout_newest_tag() {
 # Prints one line:
 #   none                      leave the checkout alone and say nothing
 #   offer <stable> <beta>     ask which channel; the newest tag of each
-#   switch <channel> <tag>    the channel is known: install its release
-#   notice <channel> <tag>    no terminal or a fork, and main is past the release:
-#                             keep the checkout, print a hint
+#   switch <channel> <tag>    the channel is known (flag, env or .env): install its release
+#   notice <channel> <tag>    no channel and no terminal, or a fork, and main is past
+#                             the release: keep the checkout, print a hint
 #   invalid <raw>             the requested channel is not stable, beta or edge
 release_checkout_decide() {
-  local root=$1 requested tty=${3:-0} channel stable beta tag
+  local root=$1 requested tty=${3:-0} channel remote stable beta tag
   requested=$(printf '%s' "${2:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr 'A-Z' 'a-z')
 
   case "$requested" in
@@ -88,15 +99,17 @@ release_checkout_decide() {
   [ -z "$(git -C "$root" status --porcelain --untracked-files=no 2>/dev/null)" ] || { echo none; return 0; }
   [ -n "$(git -C "$root" for-each-ref --count=1 --contains HEAD refs/remotes 2>/dev/null)" ] || { echo none; return 0; }
 
-  stable=$(release_checkout_newest_tag "$root" stable)
-  [ -n "$stable" ] || { echo none; return 0; }
-  beta=$(release_checkout_newest_tag "$root" beta)
+  remote=$(release_checkout_official_remote "$root")
+  stable=$(release_checkout_newest_tag "$root" stable "$remote")
+  beta=$(release_checkout_newest_tag "$root" beta "$remote")
   tag=$stable
   if [ "$channel" = beta ]; then tag=$beta; fi
+  [ -n "$tag" ] || { echo none; return 0; }
 
-  # Without a terminal, or on a fork whose main may carry its owner's changes,
-  # nothing moves; say so only when the first update would stop.
-  if [ "$tty" != 1 ] || ! release_checkout_official_head "$root"; then
+  # A fork's main may carry its owner's changes, which a release would drop; with
+  # no channel and no terminal there is no one to ask. Either way nothing moves,
+  # and the hint shows only when the first update would stop.
+  if [ -z "$remote" ] || { [ -z "$channel" ] && [ "$tty" != 1 ]; }; then
     if git -C "$root" merge-base --is-ancestor HEAD "refs/tags/$tag^{commit}" 2>/dev/null; then
       echo none
     else
@@ -124,31 +137,33 @@ release_checkout_menu() {
   echo ""
 }
 
-# release_checkout_answer <answer> — the channel for a number or name; anything else is stable.
+# release_checkout_answer <answer> — the channel for a number or name, stable for
+# an empty answer, nothing for anything else (the caller asks again).
 release_checkout_answer() {
   case "$(printf '%s' "${1:-}" | tr -d '[:space:]' | tr 'A-Z' 'a-z')" in
+    ''|1|stable) echo stable ;;
     2|beta) echo beta ;;
     3|edge) echo edge ;;
-    *) echo stable ;;
   esac
 }
 
-# release_checkout_save_channel <root> <channel> — NANOCLAW_UPDATE_CHANNEL into .env,
-# as setup/set-env.ts writes it: the first assignment replaced, later ones dropped.
-# The shell saves it because the release it switches to may predate this setting.
+# release_checkout_save_channel <root> <channel> — make <channel> the saved
+# NANOCLAW_UPDATE_CHANNEL; fails if .env cannot be written. The shell saves it
+# because the release it switches to may predate this setting. Appended, never
+# rewritten: every reader takes the last assignment, the rest of .env is never at
+# risk, and setup's own writer later folds the lines into one.
 release_checkout_save_channel() {
-  local env="$1/.env" next
-  if [ ! -f "$env" ]; then
+  local env="$1/.env"
+  if [ "$(release_checkout_saved_channel "$1")" = "$2" ]; then return 0; fi
+  if [ ! -e "$env" ]; then
     # Private, like set-env.ts: later writes keep the mode, and setup stores secrets here.
     (umask 077 && printf 'NANOCLAW_UPDATE_CHANNEL=%s\n' "$2" > "$env")
-    return 0
+    return
   fi
-  next=$(awk -v line="NANOCLAW_UPDATE_CHANNEL=$2" '
-    /^[[:space:]]*NANOCLAW_UPDATE_CHANNEL[[:space:]]*=/ { if (!done) print line; done = 1; next }
-    { print }
-    END { if (!done) print line }' "$env")
-  # Redirect, not rename: keeps the file's mode and an operator's symlink.
-  printf '%s\n' "$next" > "$env"
+  {
+    if [ -s "$env" ] && [ -n "$(tail -c 1 "$env")" ]; then echo; fi
+    printf 'NANOCLAW_UPDATE_CHANNEL=%s\n' "$2"
+  } >> "$env"
 }
 
 # release_checkout_switch <root> <channel> <tag> — put the install on a branch named
