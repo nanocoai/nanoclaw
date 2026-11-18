@@ -62,6 +62,7 @@ function insertMessage(id: string, text: string, from?: { agent?: string; thread
 }
 
 type Push = { prompt: string; inputId?: string };
+const SCRIPTED_FAILURE = 'scripted stream failure';
 type Script = (ctx: {
   pushes: Push[];
   /** Insert a message and wait until the poll-loop has pushed it; returns its input id. */
@@ -98,8 +99,9 @@ async function run(
   };
   try {
     await processQuery(query, routing, [first], 'claude', (e) => exchanges.push(e), 'prompt-1', undefined, true);
-  } catch {
-    // A script that throws tests the failure path; its notices are in the rows.
+  } catch (err) {
+    // Only the failure a script throws on purpose; anything else fails the test.
+    if (!(err instanceof Error && err.message === SCRIPTED_FAILURE)) throw err;
   }
   const rows = getUndeliveredMessages().map((r) => ({
     text: JSON.parse(r.content).text as string,
@@ -235,18 +237,36 @@ describe('inputs answered together in one turn (#4033)', () => {
   });
 
   it('a stream failure after absorbing still sends a notice to the absorbed input’s thread', async () => {
-    const { rows } = await run(
+    const { rows, exchanges } = await run(
       async function* ({ arrive }) {
         yield { type: 'init', continuation: 's1' };
         const b = await arrive('m2', 'question in another thread', { thread: 't2' });
         yield { type: 'consumed', ids: [b!] };
-        throw new Error('stream broke');
+        throw new Error(SCRIPTED_FAILURE);
       },
       { ...CHANNEL, threadId: 't1' },
     );
     expect(rows.map((r) => [r.threadId, r.inReplyTo]).sort()).toEqual([
       ['t1', 'm1'],
       ['t2', 'm2'],
+    ]);
+    // Absorbed, not still queued: its prompt failed with the running turn.
+    expect(exchanges.at(-1)?.prompt).toContain('question in another thread');
+  });
+
+  it('an error result after absorbing sends a notice to the absorbed input’s thread', async () => {
+    const { rows } = await run(
+      async function* ({ arrive }) {
+        yield { type: 'init', continuation: 's1' };
+        const b = await arrive('m2', 'question in another thread', { thread: 't2' });
+        yield { type: 'consumed', ids: [b!] };
+        yield { type: 'result', text: null, isError: true, error: 'Provider unavailable.' };
+      },
+      { ...CHANNEL, threadId: 't1' },
+    );
+    expect(rows.map((r) => [r.threadId, r.inReplyTo, r.text]).sort()).toEqual([
+      ['t1', 'm1', 'Provider unavailable.'],
+      ['t2', 'm2', 'Provider unavailable.'],
     ]);
   });
 

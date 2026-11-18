@@ -703,6 +703,14 @@ export async function processQuery(
             // Keep the reason in the runner log, since the skipped notice may
             // be the only place it would have been recorded.
             else log(`Error result — notice not sent on this route: ${notice}`);
+            // Inputs this turn absorbed failed with it. They were acked at
+            // push, so the notice is the only word their senders get.
+            const noticed = [routing];
+            for (const target of absorbedRoutes) {
+              if (!sendsFailureNotice(target) || noticed.some((prior) => sameNoticeRoute(prior, target))) continue;
+              noticed.push(target);
+              await deliverErrorResult(target, notice);
+            }
           }
           // An unwrapped final text only warrants the wrap-nudge when no
           // <message> block was delivered this turn. If a reply already went
@@ -797,16 +805,7 @@ export async function processQuery(
       const noticed: RoutingContext[] = [];
       for (const target of failedRoutes) {
         if (!sendsFailureNotice(target)) continue;
-        if (
-          noticed.some(
-            (prior) =>
-              prior.platformId === target.platformId &&
-              prior.channelType === target.channelType &&
-              prior.threadId === target.threadId &&
-              (target.channelType !== 'agent' || prior.inReplyTo === target.inReplyTo),
-          )
-        )
-          continue;
+        if (noticed.some((prior) => sameNoticeRoute(prior, target))) continue;
         noticed.push(target);
         try {
           await deliverErrorResult(target, GENERIC_FAILURE_NOTICE);
@@ -866,6 +865,20 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  */
 function sendsFailureNotice(routing: RoutingContext): boolean {
   return !routing.taskRun && !!routing.platformId && !!routing.channelType && !routing.failureNoticeWake;
+}
+
+/**
+ * One failure notice covers both routes: same conversation and thread. The
+ * host picks an a2a reply's session by in_reply_to, so agent routes also
+ * compare it.
+ */
+function sameNoticeRoute(a: RoutingContext, b: RoutingContext): boolean {
+  return (
+    a.platformId === b.platformId &&
+    a.channelType === b.channelType &&
+    a.threadId === b.threadId &&
+    (b.channelType !== 'agent' || a.inReplyTo === b.inReplyTo)
+  );
 }
 
 /** Send the dedicated provider error or a generic failure notice. */
