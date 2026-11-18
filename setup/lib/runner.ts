@@ -11,7 +11,7 @@
  *
  * See docs/setup-flow.md for the three-level output contract.
  */
-import { spawn, spawnSync } from 'child_process';
+import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import fs from 'fs';
 
 import * as p from '@clack/prompts';
@@ -181,19 +181,56 @@ function lineFeed(onLine?: (line: string) => void): (chunk: string) => void {
   };
 }
 
+/** How long a stopped child's process group gets to exit before SIGKILL. */
+export const STOP_GRACE_MS = 5_000;
+
+/**
+ * On `stop`, send its reason (a signal name) to the child's whole process
+ * group, then SIGKILL what is left after STOP_GRACE_MS. Returns the cleanup
+ * to run once the child has closed.
+ */
+function stopGroupOnAbort(child: ChildProcess, stop: AbortSignal): () => void {
+  let grace: NodeJS.Timeout | undefined;
+  const killGroup = (signal: NodeJS.Signals): void => {
+    try {
+      if (child.pid) process.kill(-child.pid, signal);
+    } catch {
+      // The group has already exited.
+    }
+  };
+  const onStop = (): void => {
+    killGroup(typeof stop.reason === 'string' ? (stop.reason as NodeJS.Signals) : 'SIGTERM');
+    grace = setTimeout(() => killGroup('SIGKILL'), STOP_GRACE_MS);
+  };
+  if (stop.aborted) onStop();
+  else stop.addEventListener('abort', onStop, { once: true });
+  return () => {
+    stop.removeEventListener('abort', onStop);
+    clearTimeout(grace);
+  };
+}
+
+/**
+ * `opts.stop` puts the child in its own process group (and session) so that
+ * aborting it stops every process the command started; the promise still
+ * resolves only once they have all closed the output pipes. Such a child no
+ * longer gets the terminal's Ctrl-C or hangup: the caller forwards them.
+ */
 export function spawnQuiet(
   cmd: string,
   args: string[],
   rawLogPath: string,
   envOverride?: NodeJS.ProcessEnv,
-  opts?: { cwd?: string; onLine?: (line: string) => void },
+  opts?: { cwd?: string; onLine?: (line: string) => void; stop?: AbortSignal },
 ): Promise<QuietChildResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       cwd: opts?.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: envOverride ? { ...process.env, ...envOverride } : process.env,
+      detached: opts?.stop !== undefined,
     });
+    const stopCleanup = opts?.stop ? stopGroupOnAbort(child, opts.stop) : undefined;
     let transcript = '';
     let spawnError: Error | undefined;
     const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
@@ -220,6 +257,7 @@ export function spawnQuiet(
       spawnError = err;
     });
     child.on('close', (code, signal) => {
+      stopCleanup?.();
       raw.end();
       const terminal = [...blocks].reverse().find((b) => b.fields.STATUS) ?? null;
       resolve({

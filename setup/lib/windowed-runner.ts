@@ -30,6 +30,8 @@ const SPINNER_FRAMES = ['◒', '◐', '◓', '◑'];
 const HIDE_CURSOR = '\x1b[?25l';
 const SHOW_CURSOR = '\x1b[?25h';
 const STALL_THRESHOLD_MS = 60_000;
+// SIGHUP too: a child in its own process group misses the terminal's hangup.
+const FORWARDED_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
 
 /**
  * Run a step with a 3-line rolling tail + stall detector. Same signature
@@ -75,8 +77,13 @@ export async function runWindowedChild(
   const start = Date.now();
   phEmit('step_started', { step: logName });
 
-  const result = await runUnderWindow(logName, labels, rawLog, (onLine) =>
-    spawnQuiet(cmd, args, rawLog, undefined, { cwd: opts?.cwd, onLine }),
+  const stop = new AbortController();
+  const result = await runUnderWindow(
+    logName,
+    labels,
+    rawLog,
+    (onLine) => spawnQuiet(cmd, args, rawLog, undefined, { cwd: opts?.cwd, onLine, stop: stop.signal }),
+    stop,
   );
 
   const durationMs = Date.now() - start;
@@ -99,12 +106,18 @@ function outcomeStatus(result: { ok: boolean; terminal: StepResult['terminal'] }
  * The core render + spawn loop. Kept separate from `runWindowedStep` so
  * the logging bookkeeping (writeStepEntry, phEmit) lives with the
  * public-facing wrapper and this function stays focused on terminal IO.
+ *
+ * `stopChild` stops the child's process group (see spawnQuiet's `stop`).
+ * With it, Ctrl-C, Esc or a signal stops the child and waits for it before
+ * setup exits. Without it (the first build, whose step may need the
+ * terminal for sudo), the child shares the terminal's Ctrl-C as before.
  */
 async function runUnderWindow<T extends { ok: boolean; transcript: string; terminal: StepResult['terminal'] }>(
   stepName: string,
   labels: SpinnerLabels,
   rawLog: string,
   spawnChild: (onLine: (line: string) => void) => Promise<T>,
+  stopChild?: AbortController,
 ): Promise<T> {
   const out = process.stdout;
   const start = Date.now();
@@ -151,20 +164,26 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
   for (let i = 0; i < WINDOW_SIZE + 1; i++) out.write('\n');
   redraw();
 
+  // A process.exit elsewhere (e.g. a prompt inside the Claude look) must not
+  // leave a stoppable child running; there is no waiting on 'exit'.
   const restoreCursorOnExit = (): void => {
+    stopChild?.abort('SIGTERM');
     out.write(SHOW_CURSOR);
   };
   process.once('exit', restoreCursorOnExit);
   // A signal kills Node without an 'exit' event: show the cursor, then
   // re-raise so the process still dies the default way. Node's own handler
   // would also leave raw mode (the stall prompt's); the re-raise skips it.
+  // A stoppable child gets the signal first and the re-raise waits for it.
+  let reraise: NodeJS.Signals | undefined;
   const restoreCursorOnSignal = (signal: NodeJS.Signals): void => {
+    stopChild?.abort(signal);
     out.write(SHOW_CURSOR);
     if (process.stdin.isTTY && process.stdin.isRaw) process.stdin.setRawMode(false);
-    process.kill(process.pid, signal);
+    if (stopChild) reraise = signal;
+    else process.kill(process.pid, signal);
   };
-  process.once('SIGINT', restoreCursorOnSignal);
-  process.once('SIGTERM', restoreCursorOnSignal);
+  for (const signal of FORWARDED_SIGNALS) process.once(signal, restoreCursorOnSignal);
 
   const frameTick = setInterval(() => {
     frameIdx++;
@@ -172,7 +191,7 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
   }, 250);
 
   const stallCheck = setInterval(() => {
-    if (handledStall || stallPromptActive) return;
+    if (handledStall || stallPromptActive || reraise) return;
     if (Date.now() - lastLineAt < STALL_THRESHOLD_MS) return;
     handledStall = true;
     stall = handleStall(stepName, rawLog, closeStallPrompt.signal, {
@@ -192,6 +211,11 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
         lastLineAt = Date.now();
         redraw();
       },
+      stopChild: async () => {
+        if (!stopChild) return;
+        stopChild.abort('SIGINT');
+        await child;
+      },
     });
   }, 5_000);
 
@@ -205,7 +229,8 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
     redraw();
   };
 
-  const result = await spawnChild(onLine);
+  const child = spawnChild(onLine);
+  const result = await child;
 
   finished = true;
   clearInterval(frameTick);
@@ -217,8 +242,9 @@ async function runUnderWindow<T extends { ok: boolean; transcript: string; termi
   if (windowShown) clearBlock();
   out.write(SHOW_CURSOR);
   process.off('exit', restoreCursorOnExit);
-  process.off('SIGINT', restoreCursorOnSignal);
-  process.off('SIGTERM', restoreCursorOnSignal);
+  for (const signal of FORWARDED_SIGNALS) process.off(signal, restoreCursorOnSignal);
+  // The child has exited; no listener is left, so this dies the default way.
+  if (reraise) process.kill(process.pid, reraise);
 
   const suffix = ` (${fmtDuration(Date.now() - start)})`;
   if (result.ok) {
@@ -237,7 +263,7 @@ async function handleStall(
   stepName: string,
   rawLog: string,
   stepEnded: AbortSignal,
-  render: { pauseRender: () => void; resumeRender: () => void },
+  render: { pauseRender: () => void; resumeRender: () => void; stopChild: () => Promise<void> },
 ): Promise<void> {
   render.pauseRender();
   p.log.warn(brandBody(`This looks stuck — no output from the ${stepName} step for the last 60 seconds.`));
@@ -265,6 +291,9 @@ async function handleStall(
   });
   // Closed because the step ended, not by the user: nothing left to decide.
   if (stepEnded.aborted) return;
+  // Ctrl-C or Esc here is a prompt cancel, not a signal: stop the child
+  // and wait for it before ensureAnswer exits setup.
+  if (p.isCancel(answer)) await render.stopChild();
   const choice = ensureAnswer(answer);
 
   if (choice === 'help') {

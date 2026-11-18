@@ -1,3 +1,4 @@
+import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -11,6 +12,7 @@ const fixture = vi.hoisted(() => ({
   logSuccess: vi.fn(),
   logError: vi.fn(),
   brightSelect: vi.fn(),
+  cancel: vi.fn(),
 }));
 vi.mock('../logs.js', () => ({ stepRawLog: () => fixture.rawLog, step: fixture.step }));
 vi.mock('./diagnostics.js', () => ({ emit: fixture.emit }));
@@ -19,9 +21,10 @@ vi.mock('./bright-select.js', () => ({ brightSelect: fixture.brightSelect }));
 vi.mock('@clack/prompts', () => ({
   log: { success: fixture.logSuccess, error: fixture.logError, warn: vi.fn() },
   isCancel: (value: unknown) => typeof value === 'symbol',
-  cancel: vi.fn(),
+  cancel: fixture.cancel,
 }));
 
+import { spawnQuiet, STOP_GRACE_MS } from './runner.js';
 import { runWindowedChild } from './windowed-runner.js';
 
 const LABELS = { running: 'Rebuilding…', done: 'Rebuilt.', failed: 'Rebuild failed.' };
@@ -41,6 +44,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  killTrees();
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.clearAllMocks();
@@ -51,6 +55,59 @@ afterEach(() => {
 function noisyChild(count: number, exit = 0): [string, string[]] {
   const script = `for (let i = 1; i <= ${count}; i++) console.error('build line ' + i); process.exit(${exit});`;
   return [process.execPath, ['-e', script]];
+}
+
+/**
+ * A silent child that starts a grandchild, like build.sh starting docker, and
+ * writes both pids to a file. The grandchild holds the output pipes. Both give
+ * up after 20 s so a failing run leaves nothing behind.
+ */
+function buildTree(): { script: string; pids: () => number[] } {
+  const pidFile = path.join(dir, 'tree.pids');
+  const script =
+    `const g = require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'inherit' });` +
+    `require('fs').writeFileSync(${JSON.stringify(pidFile)}, process.pid + ' ' + g.pid);` +
+    `setTimeout(() => process.exit(1), 20000);`;
+  const pids = (): number[] =>
+    fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf-8').trim().split(' ').map(Number) : [];
+  trees.push(pids);
+  return { script, pids };
+}
+const trees: Array<() => number[]> = [];
+
+/** Running, not a zombie waiting to be reaped. */
+function isRunning(pid: number): boolean {
+  const stat = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf-8' }).stdout.trim();
+  return stat !== '' && !stat.startsWith('Z');
+}
+
+async function until(check: () => boolean): Promise<void> {
+  for (let i = 0; i < 500 && !check(); i++) await new Promise((r) => setTimeout(r, 10));
+  expect(check()).toBe(true);
+}
+
+/** Records re-raises at setup itself (and whether the tree still ran); other kills go through. */
+function spyOnSelfKill(tree: { pids: () => number[] }): Array<{ signal: unknown; treeRunning: boolean }> {
+  const realKill = process.kill.bind(process);
+  const calls: Array<{ signal: unknown; treeRunning: boolean }> = [];
+  vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+    if (pid !== process.pid) return realKill(pid, signal);
+    calls.push({ signal, treeRunning: tree.pids().some(isRunning) });
+    return true;
+  });
+  return calls;
+}
+
+function killTrees(): void {
+  for (const pids of trees.splice(0)) {
+    for (const pid of pids()) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+  }
 }
 
 describe('runWindowedChild', () => {
@@ -111,31 +168,64 @@ describe('runWindowedChild', () => {
     expect(fixture.logError).toHaveBeenCalledWith(expect.stringContaining('Rebuild failed.'));
   });
 
-  it('restores the cursor on Ctrl-C only while the window is up', async () => {
-    const [int, term] = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
+  it('listens for signals only while the window is up', async () => {
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+    const before = signals.map((s) => process.listenerCount(s));
     const run = runWindowedChild('container-rebuild', process.execPath, ['-e', 'setTimeout(() => {}, 200)'], LABELS);
-    expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual([int + 1, term + 1]);
+    expect(signals.map((s) => process.listenerCount(s))).toEqual(before.map((n) => n + 1));
     await run;
-    expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual([int, term]);
+    expect(signals.map((s) => process.listenerCount(s))).toEqual(before);
   });
 
-  it('on a signal, shows the cursor and leaves raw mode before re-raising it', async () => {
-    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+  it('on a signal, stops the whole build tree, then re-raises the signal', async () => {
+    const tree = buildTree();
+    const reraised = spyOnSelfKill(tree);
     const stdin = process.stdin as unknown as Record<string, unknown>;
     const saved = { isTTY: stdin.isTTY, isRaw: stdin.isRaw, setRawMode: stdin.setRawMode };
     const setRawMode = vi.fn();
     Object.assign(stdin, { isTTY: true, isRaw: true, setRawMode });
     try {
-      const run = runWindowedChild('container-rebuild', process.execPath, ['-e', 'setTimeout(() => {}, 200)'], LABELS);
+      const run = runWindowedChild('container-rebuild', process.execPath, ['-e', tree.script], LABELS);
+      await until(() => tree.pids().length === 2);
       terminal = '';
       process.emit('SIGTERM', 'SIGTERM');
       expect(terminal).toBe('\x1b[?25h');
       expect(setRawMode).toHaveBeenCalledWith(false);
-      expect(kill).toHaveBeenCalledWith(process.pid, 'SIGTERM');
-      await run;
+      expect(reraised).toEqual([]);
+      const res = await run;
+      expect(res.signal).toBe('SIGTERM');
+      expect(reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false }]);
     } finally {
       Object.assign(stdin, saved);
     }
+  });
+
+  // At the stall prompt stdin is in raw mode, so Ctrl-C arrives as a key and
+  // cancels the prompt; no signal reaches the build. Esc cancels the same way.
+  it.each([
+    ['Ctrl-C', '\x03'],
+    ['Esc', '\x1b'],
+  ])('%s at the stall prompt stops the whole build tree before setup exits', async (_key, bytes) => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    const actual = await vi.importActual<typeof import('./bright-select.js')>('./bright-select.js');
+    fixture.brightSelect.mockImplementation(actual.brightSelect);
+    const tree = buildTree();
+    const exits: boolean[] = [];
+    vi.spyOn(process, 'exit').mockImplementation((() => {
+      exits.push(tree.pids().some(isRunning));
+    }) as typeof process.exit);
+
+    const run = runWindowedChild('container-rebuild', process.execPath, ['-e', tree.script], LABELS);
+    await until(() => tree.pids().length === 2);
+    await vi.advanceTimersByTimeAsync(65_000);
+    await until(() => terminal.includes('What now?'));
+    expect(tree.pids().every(isRunning)).toBe(true);
+    process.stdin.emit('data', Buffer.from(bytes));
+    const res = await run;
+
+    expect(exits).toEqual([false]);
+    expect(fixture.cancel).toHaveBeenCalledWith('Setup cancelled.');
+    expect(res).toMatchObject({ ok: false, signal: 'SIGINT' });
   });
 
   // The stall prompt reads stdin. Left open after the step ends, it would
@@ -172,5 +262,28 @@ describe('runWindowedChild', () => {
     expect(fixture.logSuccess).toHaveBeenCalledWith(expect.stringContaining('Rebuilt.'));
     // Nothing hides the cursor or redraws the window after the final cursor restore.
     expect(terminal.slice(terminal.lastIndexOf('\x1b[?25h'))).toBe('\x1b[?25h');
+  });
+});
+
+describe('spawnQuiet stop', () => {
+  it('SIGKILLs a process group that ignores the stop signal once the grace period ends', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const stop = new AbortController();
+    let ignored!: () => void;
+    const sawIgnore = new Promise<void>((resolve) => (ignored = resolve));
+    const script =
+      `process.on('SIGINT', () => console.log('ignored SIGINT'));` +
+      `console.log('ready'); setInterval(() => {}, 1000); setTimeout(() => process.exit(1), 20000);`;
+    const run = spawnQuiet(process.execPath, ['-e', script], fixture.rawLog, undefined, {
+      stop: stop.signal,
+      onLine: (line) => {
+        if (line === 'ready') stop.abort('SIGINT');
+        if (line === 'ignored SIGINT') ignored();
+      },
+    });
+
+    await sawIgnore;
+    await vi.advanceTimersByTimeAsync(STOP_GRACE_MS);
+    expect(await run).toMatchObject({ ok: false, signal: 'SIGKILL' });
   });
 });
