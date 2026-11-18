@@ -302,6 +302,21 @@ describe('inputs answered together in one turn (#4033)', () => {
     expect(rows.map((r) => [r.threadId, r.inReplyTo, r.text])).toEqual([['t1', 'm2', 'Provider unavailable.']]);
   });
 
+  it('a new message absorbed into a retry turn may still be nudged once', async () => {
+    const { pushes } = await run(async function* ({ arrive }) {
+      yield { type: 'init', continuation: 's1' };
+      // m1's turn ends unwrapped: a wrap-nudge retry is pushed and becomes the running turn.
+      yield { type: 'result', text: 'unwrapped answer to m1' };
+      const b = await arrive('m2', 'second question');
+      yield { type: 'consumed', ids: [b!] };
+      // The retry turn, now also answering m2, ends unwrapped again: one more nudge.
+      yield { type: 'result', text: 'unwrapped answer to m1 and m2' };
+      // That nudge's own turn is guarded: no third nudge.
+      yield { type: 'result', text: 'still unwrapped' };
+    });
+    expect(pushes.filter((p) => p.prompt.includes('not delivered'))).toHaveLength(2);
+  });
+
   describe('an absorbed wrap-nudge retry’s echo window', () => {
     // Turn A (thread t1) sends "Done" with a tool, then ends unwrapped, so a
     // wrap-nudge retry is queued behind follow-up B, and B's turn absorbs it.
