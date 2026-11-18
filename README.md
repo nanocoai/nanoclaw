@@ -40,7 +40,7 @@ NanoClaw provides that same core functionality, but in a codebase small enough t
 
 ## The Always-On Agent You Own
 
-Always-on assistants are a product category now. The big labs will run one for you: on their cloud, on their model, holding your credentials, behind code you can't read. NanoClaw is the same idea, turned around.
+Always-on assistants are a product category now. The big labs will run one for you: on their cloud, on their model, holding your credentials, behind code you can't read. NanoClaw has been doing this since January 2026, before the category had a name, and it does it the other way around.
 
 - **It runs on your machine or your server.** One host process, plus a container per agent session. Nothing to sign up for.
 - **You can read it and change it.** MIT-licensed, and small enough that a coding agent can walk you through all of it. Your fork is your product.
