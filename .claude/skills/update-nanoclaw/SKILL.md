@@ -168,8 +168,11 @@ and provider, and of the selected gateway when gateway core or that gateway's
 own skill changed. On a skill-only change, a gateway it cannot resolve is
 skipped and named in the validation checks. It commits refreshed payloads in
 the staging branch, installs frozen dependencies, runs the host build and full
-host tests, and runs the container dependency/typecheck leg when Bun is
-available. A provider skill that declares
+host tests, and, when `container/agent-runner` changed, installs its
+dependencies and typechecks it. That leg uses host Bun, or else the exact Bun
+version pinned by `container/Dockerfile` through pnpm. If neither can run, the
+update is not blocked, but the validation checks say the agent-runner source
+was NOT typechecked and why; tell the user. A provider skill that declares
 Bun dependencies does not require Bun on the host: refresh runs the exact Bun
 version pinned by `container/Dockerfile` through pnpm. Any selected skill
 refresh or validation failure blocks cutover and the completion stamp.
