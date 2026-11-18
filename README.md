@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/nanoclaw-logo-dark.svg">
-    <img src="assets/nanoclaw-logo-light.svg" alt="NanoClaw" width="440">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/nanocoai/nanoclaw-brand-kit/v1.3.1/assets/logo/nanoclaw-logo-dark.svg">
+    <img src="https://raw.githubusercontent.com/nanocoai/nanoclaw-brand-kit/v1.3.1/assets/logo/nanoclaw-logo-light.svg" alt="NanoClaw" width="440">
   </picture>
 </p>
 
