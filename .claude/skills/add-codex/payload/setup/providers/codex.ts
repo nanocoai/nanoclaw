@@ -4,7 +4,7 @@
  * ~/.codex/auth.json is copied: rotating one session from two consumers
  * would invalidate it. Both setup entry points use this provider hook.
  */
-import { type ChildProcess, spawn, spawnSync } from 'child_process';
+import { type ChildProcess, execFile, spawn, spawnSync } from 'child_process';
 import { getCredentialStore, type ProviderCredentialStore } from '../gateways/credential-store.js';
 import fs from 'fs';
 import os from 'os';
@@ -224,12 +224,35 @@ export async function runCodexLoginAuth(
   // `finally` for returns and throws, the exit hook for process.exit (which
   // skips finally), and the signal hook for Ctrl-C, SIGTERM and a hangup.
   const removeLoginHome = (): void => fs.rmSync(loginHome, { recursive: true, force: true });
+  // The login runs in a session of its own (see runInherit). These are its
+  // process groups while setup owns it; a stop first finds all of them.
+  let groups: number[] = [];
   let login: ChildProcess | undefined;
-  let stopping = false;
+  let closed = false;
+  let stopping: Promise<void> | undefined;
+  let killNow = false;
   let finished = false;
   let timer: NodeJS.Timeout | undefined;
+  const signalGroups = (signal: NodeJS.Signals | 0): boolean => {
+    let alive = false;
+    for (const group of groups) {
+      try {
+        process.kill(-group, signal);
+        alive = true;
+      } catch (err) {
+        // A member setup may not signal still holds its group.
+        if ((err as NodeJS.ErrnoException).code === 'EPERM') alive = true;
+      }
+    }
+    return alive;
+  };
+  // Nothing can wait during 'exit', so what is left of the login is killed outright.
+  const onExit = (): void => {
+    signalGroups('SIGKILL');
+    removeLoginHome();
+  };
   const detach = (): void => {
-    process.off('exit', removeLoginHome);
+    process.off('exit', onExit);
     for (const signal of LOGIN_SIGNALS) process.off(signal, onSignal);
   };
   const finish = (signal: NodeJS.Signals): void => {
@@ -240,36 +263,81 @@ export async function runCodexLoginAuth(
     removeLoginHome();
     process.kill(process.pid, signal);
   };
-  // A signal sent to setup alone never reaches the login, so stop it first
-  // (pnpm passes the stop on to Codex): the home goes once it has exited, or
-  // once it is killed after 3s or on a second signal. The hooks stay attached
-  // until then.
-  function onSignal(signal: NodeJS.Signals): void {
-    const child = login;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return finish(signal);
-    if (stopping) {
-      child.kill('SIGKILL');
-      return finish(signal);
+  // No signal reaches the login but this stop. Every group of its tree gets
+  // SIGTERM, then SIGKILL after 3s or on a second signal, and the home goes
+  // only once all of them are gone. The hooks stay attached until then.
+  async function stopLogin(leader: number, signal: NodeJS.Signals): Promise<void> {
+    // Before any signal: a member orphaned by its parent's exit can't be traced back.
+    groups = await loginGroups(leader);
+    signalGroups(killNow ? 'SIGKILL' : 'SIGTERM');
+    timer = setTimeout(() => signalGroups('SIGKILL'), STOP_GRACE_MS);
+    // Bounded, in case a member is never reaped.
+    for (const end = Date.now() + STOP_GRACE_MS + 1000; signalGroups(0) && Date.now() < end;) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    stopping = true;
-    child.once('close', () => finish(signal));
-    child.kill('SIGTERM');
-    timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      finish(signal);
-    }, 3000);
+    finish(signal);
   }
-  process.on('exit', removeLoginHome);
+  function onSignal(signal: NodeJS.Signals): void {
+    if (stopping) {
+      killNow = true;
+      signalGroups('SIGKILL');
+      return;
+    }
+    if (!login?.pid || closed) return finish(signal);
+    stopping = stopLogin(login.pid, signal);
+  }
+  const onSpawn = (child: ChildProcess): void => {
+    login = child;
+    if (child.pid) groups = [child.pid];
+    child.once('close', () => {
+      closed = true;
+      // Ended by itself: anything it leaves running (a browser it opened) isn't setup's to stop.
+      if (!stopping) groups = [];
+    });
+  };
+  process.on('exit', onExit);
   for (const signal of LOGIN_SIGNALS) process.on(signal, onSignal);
   try {
-    await signIn(method, store, root, loginHome, (child) => (login = child), onSignal);
+    await signIn(method, store, root, loginHome, { onSpawn, stop: onSignal, stopping: () => stopping });
   } finally {
     detach();
     removeLoginHome();
   }
 }
 
+/**
+ * The process groups in the login's tree: its own, plus any a member moved to
+ * (pnpm 12 runs Codex in a group of its own). Read from `ps`; without it, the
+ * login's own group.
+ */
+function loginGroups(leader: number): Promise<number[]> {
+  return new Promise((resolve) => {
+    execFile('ps', ['-A', '-o', 'pid=,ppid=,pgid='], { timeout: 2000 }, (error, stdout) => {
+      const rows = error
+        ? []
+        : String(stdout)
+            .trim()
+            .split('\n')
+            .map((row) => row.trim().split(/\s+/).map(Number));
+      const own = rows.find(([pid]) => pid === process.pid)?.[2];
+      const tree = new Set([leader]);
+      const found = new Set([leader]);
+      for (let grew = true; grew;) {
+        grew = false;
+        for (const [pid, ppid, pgid] of rows) {
+          if (tree.has(pid) || !tree.has(ppid)) continue;
+          tree.add(pid);
+          if (pgid > 1 && pgid !== own) found.add(pgid);
+          grew = true;
+        }
+      }
+      resolve([...found]);
+    });
+  });
+}
+
 const LOGIN_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+const STOP_GRACE_MS = 3000;
 const STALE_LOGIN_MS = 60 * 60 * 1000;
 
 /**
@@ -299,14 +367,17 @@ async function signIn(
   store: ProviderCredentialStore,
   root: string,
   loginHome: string,
-  onSpawn: (child: ChildProcess) => void,
-  stop: (signal: NodeJS.Signals) => void,
+  login: {
+    onSpawn: (child: ChildProcess) => void;
+    stop: (signal: NodeJS.Signals) => void;
+    stopping: () => Promise<void> | undefined;
+  },
 ): Promise<void> {
   const cli = resolveCodexCli(root, loginHome);
   if (!cli.ok && 'stoppedBy' in cli) {
     // Stop as the queued signal would, with no error. The exit is a backstop
     // in case the re-raised signal doesn't end setup.
-    stop(cli.stoppedBy);
+    login.stop(cli.stoppedBy);
     process.exit(1);
   }
   if (!cli.ok) {
@@ -333,8 +404,15 @@ async function signIn(
   const start = Date.now();
   const { code, error } = await runInherit(cli.command, [...cli.prefix, ...args], {
     env: { CODEX_HOME: loginHome },
-    onSpawn,
+    onSpawn: login.onSpawn,
   });
+  // A stop under way ends setup once the login's tree is gone, with nothing
+  // printed. The exit backs up the re-raised signal.
+  const stopped = login.stopping();
+  if (stopped) {
+    await stopped;
+    process.exit(1);
+  }
   const durationMs = Date.now() - start;
   console.log();
 
@@ -408,9 +486,13 @@ function runInherit(
   opts: { env?: Record<string, string>; onSpawn?: (child: ChildProcess) => void } = {},
 ): Promise<{ code: number; error?: Error }> {
   return new Promise((resolve) => {
+    // Its own session, so the login's tree stays apart from setup's process
+    // group and can be stopped as a whole. The terminal's Ctrl-C and hangup
+    // then reach setup alone, which stops the login.
     const child = spawn(cmd, args, {
       stdio: 'inherit',
       env: opts.env ? { ...process.env, ...opts.env } : process.env,
+      detached: true,
     });
     opts.onSpawn?.(child);
     child.on('close', (code) => resolve({ code: code ?? 1 }));

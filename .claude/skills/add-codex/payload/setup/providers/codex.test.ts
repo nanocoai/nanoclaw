@@ -11,10 +11,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mockSpawn = vi.fn();
 const mockSpawnSync = vi.fn();
 const mockExecFileSync = vi.fn();
-vi.mock('child_process', () => ({
+vi.mock('child_process', async (importOriginal) => ({
   spawn: (...args: unknown[]) => mockSpawn(...args),
   spawnSync: (...args: unknown[]) => mockSpawnSync(...args),
   execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
+  // A stop reads the login's process tree from the real `ps`.
+  execFile: (await importOriginal<typeof import('child_process')>()).execFile,
 }));
 
 // Keep the auth flow's structured logging out of logs/setup.log.
@@ -146,6 +148,108 @@ describe('offerCodexFailureAssist', () => {
 // must never be the user's personal ~/.codex session — sharing one OAuth
 // session across two consumers gets the whole family invalidated server-side
 // when refresh tokens rotate (see the header of codex.ts).
+// ─── real login trees ────────────────────────────────────────────────────
+
+const { spawn: realSpawn, spawnSync: realSpawnSync } =
+  await vi.importActual<typeof import('child_process')>('child_process');
+
+/** Running, not a zombie waiting to be reaped. */
+function isRunning(pid: number): boolean {
+  const stat = realSpawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf-8' }).stdout.trim();
+  return stat !== '' && !stat.startsWith('Z');
+}
+
+async function until(check: () => boolean): Promise<void> {
+  for (let i = 0; i < 500 && !check(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(check()).toBe(true);
+}
+
+const treeDirs: string[] = [];
+afterEach(() => {
+  for (const dir of treeDirs.splice(0)) {
+    for (const file of ['wrapper.pid', 'login.pid'].map((name) => path.join(dir, name))) {
+      try {
+        process.kill(Number(fs.readFileSync(file, 'utf-8')), 'SIGKILL');
+      } catch {
+        // Never started, or gone already.
+      }
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Plays the login with a real process tree: a wrapper in pnpm's place that
+ * exits at once on SIGTERM, and a grandchild in Codex's place that runs
+ * `onTerm` on SIGTERM. `ownGroup` starts the grandchild in a group of its own,
+ * as pnpm 12 runs Codex. Both give up after 20 s, so a failing run leaves nothing.
+ */
+function playTree(
+  onTerm: string,
+  ownGroup: boolean,
+): { pids: () => number[]; running: () => boolean; home: () => string | undefined } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-login-tree-'));
+  treeDirs.push(dir);
+  const [wrapperFile, loginFile] = ['wrapper.pid', 'login.pid'].map((name) => path.join(dir, name));
+  const login =
+    `process.on('SIGTERM', () => { ${onTerm} });` +
+    `require('fs').writeFileSync(${JSON.stringify(loginFile)}, String(process.pid));` +
+    `setTimeout(() => {}, 20000);`;
+  const wrapper =
+    `require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(login)}], { stdio: 'ignore', detached: ${ownGroup} });` +
+    `require('fs').writeFileSync(${JSON.stringify(wrapperFile)}, String(process.pid));` +
+    `process.on('SIGTERM', () => process.exit(143));` +
+    `setTimeout(() => process.exit(1), 20000);`;
+  let home: string | undefined;
+  mockSpawn.mockImplementation((...args: unknown[]) => {
+    const opts = args[2] as { env: NodeJS.ProcessEnv };
+    home = opts.env.CODEX_HOME;
+    return realSpawn(process.execPath, ['-e', wrapper], opts);
+  });
+  const pids = (): number[] =>
+    [wrapperFile, loginFile]
+      .filter((file) => fs.existsSync(file))
+      .map((file) => Number(fs.readFileSync(file, 'utf-8')));
+  return { pids, running: () => pids().some(isRunning), home: () => home };
+}
+
+/**
+ * Records setup re-raising a signal at itself and removing a login home, with
+ * whether the tree still ran at that moment. Other kills (the stop's) are real.
+ */
+function watchStop(tree: ReturnType<typeof playTree>): {
+  reraised: Array<{ signal: unknown; treeRunning: boolean; home: boolean }>;
+  removed: Array<{ treeRunning: boolean }>;
+} {
+  const realKill = process.kill.bind(process);
+  const reraised: Array<{ signal: unknown; treeRunning: boolean; home: boolean }> = [];
+  vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+    if (pid !== process.pid) return realKill(pid, signal);
+    reraised.push({ signal, treeRunning: tree.running(), home: fs.existsSync(tree.home()!) });
+    return true;
+  });
+  const removed: Array<{ treeRunning: boolean }> = [];
+  const realRm = fs.rmSync.bind(fs);
+  vi.spyOn(fs, 'rmSync').mockImplementation((target, opts) => {
+    if (target === tree.home() && fs.existsSync(target)) removed.push({ treeRunning: tree.running() });
+    realRm(target, opts);
+  });
+  vi.spyOn(process, 'exit').mockImplementation((() => {
+    throw new Error('setup stopped');
+  }) as typeof process.exit);
+  return { reraised, removed };
+}
+
+const LOGIN_EVENTS = ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+
+/** Delivers `signal` to the sign-in's own handlers, not the test runner's. */
+function signalSignIn(runnerOwn: unknown[], signal: (typeof LOGIN_EVENTS)[number]): void {
+  process
+    .listeners(signal as NodeJS.Signals)
+    .filter((listener) => !runnerOwn.includes(listener))
+    .forEach((listener) => (listener as (s: NodeJS.Signals) => void)(signal as NodeJS.Signals));
+}
+
 describe('runCodexLoginAuth', () => {
   let root: string;
   beforeEach(() => {
@@ -230,121 +334,102 @@ describe('runCodexLoginAuth', () => {
     expect(fs.readdirSync(base)).toEqual(['login-recent']);
   });
 
-  /**
-   * Starts a sign-in whose login child obeys `onKill`, and delivers `signal`
-   * to the sign-in's own handler (not the test runner's) once it has spawned.
-   */
-  function signInUntilSignal(
-    signal: NodeJS.Signals,
-    onKill: (child: EventEmitter, sent: NodeJS.Signals) => void,
-  ): {
-    done: Promise<void>;
-    child: EventEmitter & { kill: ReturnType<typeof vi.fn> };
-    home: () => string | undefined;
-    raise: () => void;
-    spawned: Promise<void>;
-  } {
-    vi.spyOn(process, 'exit').mockImplementation((() => {
-      throw new Error('setup stopped');
-    }) as typeof process.exit);
-    const runnerOwn = process.listeners(signal);
-    let home: string | undefined;
-    let spawnedResolve!: () => void;
-    const spawned = new Promise<void>((resolve) => (spawnedResolve = resolve));
-    const child = Object.assign(new EventEmitter(), {
-      exitCode: null,
-      signalCode: null,
-      kill: vi.fn((sent: NodeJS.Signals) => {
-        onKill(child, sent);
-        return true;
-      }),
-    });
-    mockSpawn.mockImplementation((...args: unknown[]) => {
-      home = (args[2] as { env?: NodeJS.ProcessEnv }).env!.CODEX_HOME;
-      setImmediate(spawnedResolve);
-      return child;
-    });
-    const raise = (): void =>
-      process
-        .listeners(signal)
-        .filter((listener) => !runnerOwn.includes(listener))
-        .forEach((listener) => (listener as (s: NodeJS.Signals) => void)(signal));
+  const listeners = () => LOGIN_EVENTS.map((event) => process.listeners(event as NodeJS.Signals));
+
+  /** Starts a sign-in on `tree`; `ready` resolves once both of its processes run. */
+  function signInOn(tree: ReturnType<typeof playTree>): { done: Promise<void>; ready: Promise<void> } {
     const done = runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
-    // It may settle while a test is still advancing timers; the test awaits it later.
+    // It settles while a test is still checking the stop; the test awaits it later.
     done.catch(() => {});
-    return { done, child, home: () => home, raise, spawned };
+    return { done, ready: until(() => tree.pids().length === 2 && tree.running()) };
   }
 
-  const listeners = () => ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP'].map((event) => process.listeners(event));
-
-  // Ctrl-C and a hangup reach the whole terminal job; a signal sent to setup
-  // alone reaches only setup, which stops the login before removing its home.
-  it.each(['SIGTERM', 'SIGHUP'] as const)(
-    'on %s stops the login, then removes the home and re-raises the signal',
+  // The login has a session of its own, so a signal reaches it only through
+  // setup, and setup waits for its whole tree, not just the first process.
+  it.each(['SIGINT', 'SIGTERM', 'SIGHUP'] as const)(
+    'on %s, stops a login that outlives its wrapper, then removes the home and re-raises',
     async (signal) => {
-      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
       const before = listeners();
-      let homeWhileStopping: boolean | undefined;
-      const run = signInUntilSignal(signal, (child) =>
-        // Still there while the login shuts down, until it closes.
-        setImmediate(() => {
-          homeWhileStopping = fs.existsSync(run.home()!);
-          child.emit('close', null);
-        }),
-      );
-      await run.spawned;
-      run.raise();
+      const tree = playTree('setTimeout(() => process.exit(0), 300)', true);
+      const stop = watchStop(tree);
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      const { done, ready } = signInOn(tree);
+      await ready;
+      const start = Date.now();
+      signalSignIn(before[LOGIN_EVENTS.indexOf(signal)], signal);
 
-      await expect(run.done).rejects.toThrow('setup stopped');
-      expect(run.child.kill.mock.calls).toEqual([['SIGTERM']]);
-      expect(homeWhileStopping).toBe(true);
-      expect(kill).toHaveBeenCalledWith(process.pid, signal);
-      expect(fs.existsSync(run.home()!)).toBe(false);
+      await expect(done).rejects.toThrow('setup stopped');
+      expect(mockSpawn.mock.calls[0][2]).toMatchObject({ detached: true, stdio: 'inherit' });
+      expect(stop.removed).toEqual([{ treeRunning: false }]);
+      expect(stop.reraised).toEqual([{ signal, treeRunning: false, home: false }]);
+      // The grandchild in its own group got the SIGTERM; nothing waited for the 3 s kill.
+      expect(Date.now() - start).toBeLessThan(2500);
       expect(listeners()).toEqual(before);
     },
   );
 
-  it('kills a login that ignores the stop on a second signal, then cleans up', async () => {
-    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+  it('keeps the home while a login that ignores SIGTERM lives, then kills its group after 3 seconds', async () => {
     const before = listeners();
-    const run = signInUntilSignal('SIGTERM', (child, sent) => {
-      if (sent === 'SIGKILL') setImmediate(() => child.emit('close', null));
-    });
-    await run.spawned;
-    run.raise();
-    // The first stop leaves the home and the hooks in place.
-    expect(fs.existsSync(run.home()!)).toBe(true);
-    expect(listeners()).not.toEqual(before);
-    run.raise();
+    const tree = playTree('', false);
+    const stop = watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { done, ready } = signInOn(tree);
+    await ready;
+    const [wrapper, login] = tree.pids();
+    const start = Date.now();
+    signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
+    await until(() => !isRunning(wrapper));
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(isRunning(login)).toBe(true);
+    expect(fs.existsSync(tree.home()!)).toBe(true);
+    expect(stop.reraised).toEqual([]);
 
-    await expect(run.done).rejects.toThrow('setup stopped');
-    expect(run.child.kill.mock.calls).toEqual([['SIGTERM'], ['SIGKILL']]);
-    expect(kill).toHaveBeenCalledWith(process.pid, 'SIGTERM');
-    expect(fs.existsSync(run.home()!)).toBe(false);
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(Date.now() - start).toBeGreaterThanOrEqual(2900);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+    expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false, home: false }]);
+    expect(listeners()).toEqual(before);
+  }, 10_000);
+
+  it('kills the whole login tree on a second signal, then cleans up', async () => {
+    const before = listeners();
+    const tree = playTree('', false);
+    const stop = watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { done, ready } = signInOn(tree);
+    await ready;
+    const [wrapper, login] = tree.pids();
+    const sigterms = before[LOGIN_EVENTS.indexOf('SIGTERM')];
+    signalSignIn(sigterms, 'SIGTERM');
+    await until(() => !isRunning(wrapper));
+    // The first stop leaves the home and the hooks in place.
+    expect(isRunning(login)).toBe(true);
+    expect(fs.existsSync(tree.home()!)).toBe(true);
+    expect(listeners()).not.toEqual(before);
+    const start = Date.now();
+    signalSignIn(sigterms, 'SIGTERM');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(Date.now() - start).toBeLessThan(1500);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+    expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false, home: false }]);
     expect(listeners()).toEqual(before);
   });
 
-  it('kills a login that ignores the stop after 3 seconds, then cleans up', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    try {
-      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
-      const run = signInUntilSignal('SIGTERM', (child, sent) => {
-        if (sent === 'SIGKILL') setImmediate(() => child.emit('close', null));
-      });
-      await run.spawned;
-      run.raise();
-      await vi.advanceTimersByTimeAsync(2999);
-      expect(run.child.kill.mock.calls).toEqual([['SIGTERM']]);
-      expect(fs.existsSync(run.home()!)).toBe(true);
-      await vi.advanceTimersByTimeAsync(1);
+  it('kills the login tree outright when setup exits mid-sign-in', async () => {
+    const before = listeners();
+    const tree = playTree('', false);
+    watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const { done, ready } = signInOn(tree);
+    await ready;
+    signalSignIn(before[0], 'exit');
+    expect(fs.existsSync(tree.home()!)).toBe(false);
+    await until(() => !tree.running());
 
-      await expect(run.done).rejects.toThrow('setup stopped');
-      expect(run.child.kill.mock.calls).toEqual([['SIGTERM'], ['SIGKILL']]);
-      expect(kill).toHaveBeenCalledWith(process.pid, 'SIGTERM');
-      expect(fs.existsSync(run.home()!)).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(listeners()).toEqual(before);
   });
 });
 
@@ -444,7 +529,7 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
 
       // pnpm fetches the exact pin and runs its `codex` as the login itself.
       expect(mockSpawn.mock.calls).toEqual([
-        ['pnpm', [...DLX, ...loginArgs], expect.objectContaining({ stdio: 'inherit' })],
+        ['pnpm', [...DLX, ...loginArgs], expect.objectContaining({ stdio: 'inherit', detached: true })],
       ]);
       // Even `codex --version` creates its CODEX_HOME: the probe uses the
       // throwaway one, so ~/.codex is never touched.
@@ -630,55 +715,27 @@ describe('runCodexLoginAuth without a host Codex CLI', () => {
   });
 
   // The fetch runs inside the login spawn, so setup's own handler is live:
-  // Ctrl-C mid-fetch stops pnpm like any login, with no error.
-  it('on Ctrl-C while pnpm fetches, stops pnpm, then removes the home and re-raises the signal', async () => {
+  // Ctrl-C mid-fetch stops pnpm's whole tree like any login, with no error.
+  it('on Ctrl-C while pnpm fetches, stops its tree, then removes the home and re-raises the signal', async () => {
     writeManifest([{ name: '@openai/codex', version: '0.169.0' }]);
     const runnerOwn = process.listeners('SIGINT');
-    const log = vi.spyOn(console, 'log');
+    const tree = playTree('setTimeout(() => process.exit(0), 300)', true);
+    const stop = watchStop(tree);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const stdout = vi.spyOn(process.stdout, 'write');
-    // The re-raised signal ends setup there, so what counts is what was printed by then.
-    let printedAtKill: string | undefined;
-    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
-      printedAtKill = printedBy(log, stdout);
-      return true;
-    });
-    stopOnExit();
-    let home: string | undefined;
-    let homeWhileStopping: boolean | undefined;
-    const child = Object.assign(new EventEmitter(), {
-      exitCode: null,
-      signalCode: null,
-      kill: vi.fn(() => {
-        setImmediate(() => {
-          homeWhileStopping = fs.existsSync(home!);
-          child.emit('close', null);
-        });
-        return true;
-      }),
-    });
-    mockSpawn.mockImplementation((...args: unknown[]) => {
-      home = (args[2] as { env?: NodeJS.ProcessEnv }).env!.CODEX_HOME;
-      setImmediate(() =>
-        process
-          .listeners('SIGINT')
-          .filter((listener) => !runnerOwn.includes(listener))
-          .forEach((listener) => (listener as (s: NodeJS.Signals) => void)('SIGINT')),
-      );
-      return child;
-    });
+    const done = runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
+    done.catch(() => {});
+    await until(() => tree.pids().length === 2 && tree.running());
+    signalSignIn(runnerOwn, 'SIGINT');
 
-    await expect(runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root)).rejects.toThrow(
-      'setup stopped',
-    );
-
-    expect(mockSpawn.mock.calls[0][0]).toBe('pnpm');
-    expect(child.kill.mock.calls).toEqual([['SIGTERM']]);
-    expect(homeWhileStopping).toBe(true);
-    expect(kill).toHaveBeenCalledWith(process.pid, 'SIGINT');
-    expect(fs.existsSync(home!)).toBe(false);
-    expect(printedAtKill).toContain('pnpm fetches it once');
-    expect(printedAtKill).not.toContain("Couldn't");
-    expect(printedAtKill).not.toContain(PINNED_INSTALL[0]);
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(mockSpawn.mock.calls[0].slice(0, 2)).toEqual(['pnpm', [...DLX, 'login', '--device-auth']]);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+    expect(stop.reraised).toEqual([{ signal: 'SIGINT', treeRunning: false, home: false }]);
+    const printed = printedBy(log, stdout);
+    expect(printed).toContain('pnpm fetches it once');
+    expect(printed).not.toContain("Couldn't");
+    expect(printed).not.toContain(PINNED_INSTALL[0]);
   });
 });
 
