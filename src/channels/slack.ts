@@ -17,6 +17,7 @@
 import { createSlackAdapter, type SlackAdapter } from '@chat-adapter/slack';
 
 import { readEnvFile } from '../env.js';
+import { log } from '../log.js';
 import type { ChannelAdapter, ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -186,6 +187,53 @@ export function escapeCardTitles(adapter: Pick<SlackAdapter, 'webClient'>): void
   chat.update = (args) => update(safeNotification(args));
 }
 
+/** Slack's answer for an app without the assistant scope (a plain, non-agent-view app). */
+function isMissingAssistantScope(err: unknown): boolean {
+  const data = (err as { data?: { error?: string; needed?: string } } | null)?.data;
+  return data?.error === 'missing_scope' && (data.needed ?? '').split(',').includes('assistant:write');
+}
+
+/**
+ * Agent-DM decoration: pinned suggested prompts and per-thread titles. Ids go
+ * through the SDK's own codec (`slack:<channel>[:<ts>]`), as delivery does.
+ * Slack errors reject so callers can log or retry (titles fail until the
+ * assistant thread exists).
+ */
+export function slackAgentDmDecorations(
+  slackAdapter: Pick<SlackAdapter, 'decodeThreadId' | 'setSuggestedPrompts' | 'setAssistantTitle'>,
+  instance = 'slack',
+): Required<Pick<ChannelAdapter, 'setSuggestedPrompts' | 'setThreadTitle'>> {
+  // Nothing records whether an app was provisioned with agent_view, so the
+  // bot's first missing_scope answer decides: decoration is then off for
+  // this bot, with one info line instead of a warn per welcome and thread.
+  let assistantScope = true;
+  const assistantCall = async (call: () => Promise<void>): Promise<void> => {
+    if (!assistantScope) return;
+    try {
+      await call();
+    } catch (err) {
+      if (!isMissingAssistantScope(err)) throw err;
+      if (!assistantScope) return;
+      assistantScope = false;
+      log.info('Slack app has no assistant:write; agent DM prompts and thread titles are off', { instance });
+    }
+  };
+  return {
+    async setSuggestedPrompts(platformId, prompts, title) {
+      const { channel } = slackAdapter.decodeThreadId(platformId);
+      // No thread_ts: under agent_view the prompts pin to the top of the DM.
+      await assistantCall(() => slackAdapter.setSuggestedPrompts(channel, undefined, prompts, title));
+    },
+    async setThreadTitle(_platformId, threadId, title) {
+      const { channel, threadTs } = slackAdapter.decodeThreadId(threadId);
+      // A DM-level id (the welcome session's) has no thread to title; skip it
+      // like the SDK's startTyping does, instead of a warn on every install.
+      if (!threadTs) return;
+      await assistantCall(() => slackAdapter.setAssistantTitle(channel, threadTs, title));
+    },
+  };
+}
+
 /** Construction knobs for one Slack bot identity. */
 export interface SlackBridgeOptions {
   /**
@@ -260,6 +308,7 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
   // rides on the returned object until the core seam lands.
   return Object.assign(bridge, {
     resolveConversation: (platformId: string) => resolveSlackConversation(slackAdapter, platformId),
+    ...slackAgentDmDecorations(slackAdapter, options.instanceKey),
   });
 }
 

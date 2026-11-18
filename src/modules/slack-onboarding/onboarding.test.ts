@@ -124,10 +124,15 @@ async function doLoad() {
     getActiveSessions: ReturnType<typeof vi.fn>;
   };
   const { log } = (await import('../../log.js')) as unknown as { log: { warn: ReturnType<typeof vi.fn> } };
+  const router = (await import('../../router.js')) as unknown as {
+    __sessionCreatedHooks: Array<(event: unknown) => void | Promise<void>>;
+  };
   expect(delivery.__postDeliveryHooks).toHaveLength(1);
   expect(bridge.__dmOpened.handler).not.toBeNull();
+  expect(router.__sessionCreatedHooks).toHaveLength(1);
   return {
     postDelivery: delivery.__postDeliveryHooks[0],
+    sessionCreated: router.__sessionCreatedHooks[0],
     dmOpened: bridge.__dmOpened.handler!,
     registry,
     getMessagingGroupByPlatform,
@@ -241,6 +246,77 @@ describe('welcome prompts on first delivery (post-delivery hook)', () => {
       'Welcome prompts failed',
       expect.objectContaining({ platformId: 'slack:D1' }),
     );
+  });
+});
+
+describe('welcome vs first conversation, through both hooks', () => {
+  const conversationSession = { messaging_group_id: 'mg-dm', thread_id: 'slack:D1:171' };
+  // Empty text: no auto-title timer, so only the prompt calls are in play.
+  const conversationStarted = {
+    session: { id: 'sess-2' },
+    mg: dmMg(),
+    platformId: 'slack:D1',
+    threadId: 'slack:D1:171',
+    sessionMode: 'per-thread',
+    message: { id: 'in-1', kind: 'chat', content: JSON.stringify({ text: '' }), timestamp: '2026-11-18T00:00:00Z' },
+  };
+
+  it('a welcome delivered after the first conversation started does not bring the prompts back', async () => {
+    const { postDelivery, sessionCreated, registry, getMessagingGroupByPlatform, getActiveSessions } =
+      await loadModule();
+    getMessagingGroupByPlatform.mockReturnValue(dmMg());
+    getActiveSessions.mockReturnValue([conversationSession]);
+
+    await sessionCreated(conversationStarted);
+    postDelivery(welcomeMsg(), { id: 'sess-1' }, { firstDelivery: true });
+
+    await flush();
+    expect(registry.setSuggestedPrompts.mock.calls).toEqual([['slack', 'slack:D1', []]]);
+  });
+
+  it('a conversation that starts while the welcome set is in flight still ends cleared', async () => {
+    const { postDelivery, sessionCreated, registry, getMessagingGroupByPlatform, getActiveSessions } =
+      await loadModule();
+    getMessagingGroupByPlatform.mockReturnValue(dmMg());
+    getActiveSessions.mockReturnValue([]);
+    let finishSet!: () => void;
+    const pendingSet = new Promise<void>((resolve) => {
+      finishSet = resolve;
+    });
+    registry.setSuggestedPrompts.mockReturnValueOnce(pendingSet);
+
+    postDelivery(welcomeMsg(), { id: 'sess-1' }, { firstDelivery: true });
+    await flush();
+    getActiveSessions.mockReturnValue([conversationSession]);
+    await sessionCreated(conversationStarted); // its clear lands before the welcome set
+    await flush();
+    expect(registry.setSuggestedPrompts).toHaveBeenCalledTimes(2);
+
+    finishSet();
+    await flush();
+    expect(registry.setSuggestedPrompts.mock.calls).toEqual([
+      ['slack', 'slack:D1', EXPECTED_PROMPTS, 'Get started'],
+      ['slack', 'slack:D1', []],
+      ['slack', 'slack:D1', []],
+    ]);
+  });
+
+  it('the usual order still sets, then clears', async () => {
+    const { postDelivery, sessionCreated, registry, getMessagingGroupByPlatform, getActiveSessions } =
+      await loadModule();
+    getMessagingGroupByPlatform.mockReturnValue(dmMg());
+    getActiveSessions.mockReturnValue([]);
+
+    postDelivery(welcomeMsg(), { id: 'sess-1' }, { firstDelivery: true });
+    await flush();
+    getActiveSessions.mockReturnValue([conversationSession]);
+    await sessionCreated(conversationStarted);
+
+    await flush();
+    expect(registry.setSuggestedPrompts.mock.calls).toEqual([
+      ['slack', 'slack:D1', EXPECTED_PROMPTS, 'Get started'],
+      ['slack', 'slack:D1', []],
+    ]);
   });
 });
 

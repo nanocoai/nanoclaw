@@ -81,6 +81,13 @@ export function clearWelcomePrompts(instanceKey: string, platformId: string): vo
     .catch(() => {});
 }
 
+/** Pin the get-started prompts. A conversation that started while the set
+ *  was in flight may have had its clear land first, so clear again then. */
+async function pinWelcomePrompts(instanceKey: string, platformId: string, mgId: string): Promise<void> {
+  await setSuggestedPrompts(instanceKey, platformId, WELCOME_PROMPTS, 'Get started');
+  if (await dmHasConversation(mgId)) clearWelcomePrompts(instanceKey, platformId);
+}
+
 // (Re)assert or retire the onboarding prompts when the user OPENS the agent
 // DM — prompt sets made before the DM was ever opened may not render
 // (live-hit), and stale get-started buttons should retire once a real
@@ -93,7 +100,7 @@ setAgentDmOpenedHandler(async ({ channelId }) => {
     clearWelcomePrompts(mg.instance ?? mg.channel_type, platformId);
     return;
   }
-  void setSuggestedPrompts(mg.instance ?? mg.channel_type, platformId, WELCOME_PROMPTS, 'Get started')
+  void pinWelcomePrompts(mg.instance ?? mg.channel_type, platformId, mg.id)
     .then(() => log.info('Welcome prompts re-asserted on DM open', { platformId }))
     .catch(() => {});
 });
@@ -107,7 +114,10 @@ async function offerWelcomePrompts(msg: OutboundMessage): Promise<void> {
     if (tidParts.length >= 3 && tidParts[tidParts.length - 1] !== '') return; // threaded → not the welcome
     const mg = await getMessagingGroupByPlatform(channelType, platformId);
     if (!mg || mg.is_group !== 0) return;
-    void setSuggestedPrompts(mg.instance ?? channelType, platformId, WELCOME_PROMPTS, 'Get started')
+    // A welcome that lands after the first conversation started would bring
+    // back the prompts the session-created hook just cleared.
+    if (await dmHasConversation(mg.id)) return;
+    void pinWelcomePrompts(mg.instance ?? channelType, platformId, mg.id)
       .then(() => log.info('Welcome prompts set', { platformId }))
       .catch((err) => log.warn('Welcome prompts failed', { platformId, err }));
   } catch {
