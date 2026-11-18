@@ -40,7 +40,6 @@ import {
   antigravityCredentialConnection,
   gatewayFailure,
   geminiKeyProblem,
-  looksLikeGoogleApiKey,
   runAntigravityAuthStep,
   runAntigravityInstallCheck,
   verifyAntigravityInstall,
@@ -160,13 +159,6 @@ describe('Antigravity gateway credential', () => {
 });
 
 describe('Gemini API key checks', () => {
-  it('recognises the AI Studio key shape without requiring it', () => {
-    expect(looksLikeGoogleApiKey(FAKE_KEY)).toBe(true);
-    expect(looksLikeGoogleApiKey(`  ${FAKE_KEY}  `)).toBe(true);
-    expect(looksLikeGoogleApiKey('AIzaShort')).toBe(false);
-    expect(looksLikeGoogleApiKey('sk-not-a-google-key')).toBe(false);
-  });
-
   it('blocks only empty input and embedded whitespace', () => {
     expect(geminiKeyProblem(undefined)).toBe('Enter a Gemini API key.');
     expect(geminiKeyProblem('   ')).toBe('Enter a Gemini API key.');
@@ -228,12 +220,13 @@ describe('runAntigravityAuthStep', () => {
     expect(body).toMatch(/third-party harness/);
   });
 
-  it('warns about, but still saves, a key that is not AI Studio shaped', async () => {
+  it('saves a key in any format Google issues, without a warning', async () => {
+    const newFormat = `AQ.${'Ab3_x-'.repeat(8)}`;
     const gateway = fakeGateway();
-    mock.password.mockResolvedValue('vertex-style-key-value');
+    mock.password.mockResolvedValue(newFormat);
     await runAntigravityAuthStep();
-    expect(gateway.saves).toEqual(['vertex-style-key-value']);
-    expect(mock.log.warn.mock.calls.map(([line]) => String(line)).join('\n')).toMatch(/start with AIza/);
+    expect(gateway.saves).toEqual([newFormat]);
+    expect(mock.log.warn).not.toHaveBeenCalled();
   });
 
   it('keeps a reusable stored key when the operator chooses to', async () => {

@@ -70,15 +70,10 @@ export async function antigravityCredentialConnection(root = process.cwd()): Pro
   return store.connection(ANTIGRAVITY_CREDENTIAL_TARGET);
 }
 
-/** AI Studio keys are `AIza` plus 35 URL-safe characters. Advisory only. */
-export function looksLikeGoogleApiKey(value: string): boolean {
-  return /^AIza[0-9A-Za-z_-]{35}$/.test(value.trim());
-}
-
 /**
  * Prompt validation. Blocks only what can never work (an empty value, or
- * whitespace inside the key, which agy would send verbatim); the `AIza`
- * shape is a warning after entry, since Google issues other key formats too.
+ * whitespace inside the key, which agy would send verbatim). The key's format
+ * is not checked: Google issues more than one (`AIza…`, `AQ.…`).
  */
 export function geminiKeyProblem(value: string | undefined): string | undefined {
   const key = (value ?? '').trim();
@@ -210,13 +205,6 @@ export async function runAntigravityAuthStep(options: AntigravityAuthOptions = {
   // Validation already ran in the prompt; this guards a prompt that skipped it.
   const problem = geminiKeyProblem(key);
   if (problem) fail('invalid_key_shape', problem);
-  if (!looksLikeGoogleApiKey(key)) {
-    p.log.warn(
-      brandBody(
-        "That doesn't look like a Google AI Studio key (those start with AIza). Saving it anyway; if Antigravity can't reach Gemini, check the key and run provider-auth again.",
-      ),
-    );
-  }
 
   try {
     await connection.save(key);

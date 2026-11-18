@@ -142,7 +142,7 @@ The verifier runs the host and runtime contract suites (registration and conform
 pnpm exec tsx setup/index.ts --step provider-auth antigravity
 ```
 
-The same walk-through fresh installs get from the setup picker. It explains the API-key-only policy, links https://aistudio.google.com/apikey, and asks for the key in a local masked prompt. It refuses an empty key or one containing whitespace, and warns without blocking when the key does not start with `AIza` like an AI Studio key. The key goes straight to the credential gateway, as the `Antigravity Gemini API` connection. If the gateway already holds a usable key, it offers to keep or replace it (keeping it when no terminal is attached); if the stored key is registered for a different host, it asks before moving it. It finishes with the install check. To rotate the key, run the same command in a terminal on the NanoClaw host and choose **Replace**; existing grants are kept.
+The same walk-through fresh installs get from the setup picker. It explains the API-key-only policy, links https://aistudio.google.com/apikey, and asks for the key in a local masked prompt. It refuses an empty key or one containing whitespace and accepts any key format Google issues (`AIza…`, `AQ.…`). The key goes straight to the credential gateway, as the `Antigravity Gemini API` connection. If the gateway already holds a usable key, it offers to keep or replace it (keeping it when no terminal is attached); if the stored key is registered for a different host, it asks before moving it. It finishes with the install check. To rotate the key, run the same command in a terminal on the NanoClaw host and choose **Replace**; existing grants are kept.
 
 ## Use it
 
