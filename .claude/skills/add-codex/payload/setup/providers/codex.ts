@@ -336,11 +336,12 @@ export async function runCodexLoginAuth(
       onSpawn,
       stop: onSignal,
       settled: async () => {
-        if (!stopping) return;
+        if (!stopping) return false;
         await stopping;
         // A stop for a signal ends setup with nothing printed; the exit backs
         // up the re-raised signal.
         if (raise) process.exit(1);
+        return true;
       },
     });
   } finally {
@@ -546,7 +547,8 @@ async function signIn(
   login: {
     onSpawn: (child: ChildProcess) => void;
     stop: (signal: NodeJS.Signals) => void;
-    settled: () => Promise<void>;
+    // Whether the login was stopped as one that failed.
+    settled: () => Promise<boolean>;
   },
 ): Promise<void> {
   const cli = resolveCodexCli(root, loginHome);
@@ -583,7 +585,7 @@ async function signIn(
     onSpawn: login.onSpawn,
   });
   // Until the login's whole tree is gone: a stop for a signal then ends setup.
-  await login.settled();
+  const failed = await login.settled();
   const durationMs = Date.now() - start;
   console.log();
 
@@ -612,8 +614,10 @@ async function signIn(
     process.exit(1);
   }
 
+  // A login that ended without signing in stays failed, even if what was left
+  // of it wrote auth.json while it was stopped.
   const authJsonPath = path.join(loginHome, 'auth.json');
-  if (!fs.existsSync(authJsonPath)) {
+  if (failed || !fs.existsSync(authJsonPath)) {
     setupLog.step('auth', 'failed', durationMs, { PROVIDER: 'codex', METHOD: method, ERROR: 'auth_json_not_found' });
     p.log.error(
       brandBody('Codex login succeeded but no auth.json was written. Try again, or paste an API key instead.'),

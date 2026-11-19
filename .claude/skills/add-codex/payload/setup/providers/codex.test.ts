@@ -239,7 +239,7 @@ function playTree(
     `require('fs').writeFileSync(${JSON.stringify(loginFile)}, String(process.pid));` +
     `setTimeout(() => {}, 20000);`;
   // A shell that, on SIGTERM, execs into a 300 ms sleep: same pid and group, another command line.
-  const shell = `trap 'exec /bin/sleep 0.3' TERM; echo $$ > ${JSON.stringify(loginFile)}; while :; do /bin/sleep 0.05; done`;
+  const shell = `trap 'exec /bin/sleep 0.3' TERM; echo $$ > ${JSON.stringify(loginFile)}; end=$(( $(date +%s) + 20 )); while [ $(date +%s) -lt $end ]; do /bin/sleep 0.05; done`;
   const start = execOnTerm
     ? `require('child_process').spawn('/bin/sh', ['-c', ${JSON.stringify(shell)}], { stdio: 'ignore', detached: ${ownGroup}, env: {} })`
     : `require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(login)}], { stdio: 'ignore', detached: ${ownGroup}${bareEnv ? ', env: {}' : ''} })`;
@@ -661,6 +661,23 @@ describe('runCodexLoginAuth', () => {
         : realExecFile(process.execPath, ['-e', 'process.exit(3)'], opts, cb);
     };
   }
+
+  it('keeps a login that exited 0 without signing in failed, even if what it left writes auth.json while stopped', async () => {
+    const tree = playTree(
+      "require('fs').writeFileSync(require('path').join(process.env.CODEX_HOME, 'auth.json'), '{}'); process.exit(0);",
+      true,
+      { exit: { after: 500, code: 0 } },
+    );
+    const stop = watchStop(tree);
+    const save = vi.fn();
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    await expect(runCodexLoginAuth('device', { has: async () => false, save }, root)).rejects.toThrow('setup stopped');
+    expect(save).not.toHaveBeenCalled();
+    expect(stop.order).toEqual(['SIGTERM other group', 'home removed']);
+    expect(printed(log, stdout)).toContain('no auth.json was written');
+  });
 
   // Each listing stands alone: one that fails doesn't stop a later one from
   // finding Codex.
