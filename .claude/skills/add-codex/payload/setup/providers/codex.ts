@@ -4,7 +4,7 @@
  * ~/.codex/auth.json is copied: rotating one session from two consumers
  * would invalidate it. Both setup entry points use this provider hook.
  */
-import { type ChildProcess, spawn, spawnSync } from 'child_process';
+import { type ChildProcess, type SpawnSyncOptionsWithStringEncoding, spawn, spawnSync } from 'child_process';
 import { randomBytes } from 'crypto';
 import { getCredentialStore, type ProviderCredentialStore } from '../gateways/credential-store.js';
 import fs from 'fs';
@@ -431,11 +431,13 @@ class LoginTree {
     this.failure = undefined;
     const own = listing.find((proc) => proc.pid === process.pid)?.pgid;
     const live = listing.filter((proc) => !proc.zombie);
+    // Once per listing: on Linux each is a read from /proc.
+    const marked = new Set(live.filter((proc) => !this.groups.has(proc.pgid) && this.marks(proc)).map((p) => p.pid));
     const tree = new Set<number>();
     for (let grew = true; grew;) {
       grew = false;
       for (const proc of live) {
-        const ours = this.groups.has(proc.pgid) || this.marks(proc);
+        const ours = this.groups.has(proc.pgid) || marked.has(proc.pid);
         if (tree.has(proc.pid) || !(ours || tree.has(proc.ppid))) continue;
         tree.add(proc.pid);
         grew = true;
@@ -460,23 +462,35 @@ class LoginTree {
 
   // A whole word: not OLD_NANOCLAW_CODEX_LOGIN=, nor an id that starts the same.
   private marks(proc: Proc): boolean {
-    const { text } = proc;
+    let { text } = proc;
+    let sep = ' ';
+    if (process.platform === 'linux') {
+      // The whole environment, from /proc: procps cuts it off at 128 KiB, and
+      // pnpm's shell shim may put the login id after a long one.
+      try {
+        text = fs.readFileSync(`/proc/${proc.pid}/environ`, 'latin1');
+        sep = '\0';
+      } catch {
+        return false;
+      }
+    }
     for (let at = text.indexOf(this.marker); at >= 0; at = text.indexOf(this.marker, at + 1)) {
       const end = at + this.marker.length;
-      if ((at === 0 || text[at - 1] === ' ') && (end === text.length || text[end] === ' ')) return true;
+      if ((at === 0 || text[at - 1] === sep) && (end === text.length || text[end] === sep)) return true;
     }
     return false;
   }
 }
 
-// Each row with its state (Z for a zombie), command line and, for the user's own processes, its environment.
+// Each row with its state (Z for a zombie) and command line; on macOS, its
+// environment too (Linux reads it from /proc).
 const PS_ARGS = [
   '-U',
   String(process.getuid?.() ?? 0),
   '-ww',
   ...(process.platform === 'darwin'
     ? ['-E', '-o', 'pid=,ppid=,pgid=,stat=,command=']
-    : ['-o', 'pid=,ppid=,pgid=,stat=,args=', 'e']),
+    : ['-o', 'pid=,ppid=,pgid=,stat=,args=']),
 ];
 const PS_BUFFER = 64 * 1024 * 1024;
 
@@ -519,7 +533,9 @@ function listProcs(): Promise<Proc[] | string> {
 }
 
 function listProcsSync(timeout: number): Proc[] | string {
-  const ps = spawnSync('ps', PS_ARGS, {
+  // A session of its own, as in listProcs: spawnSync takes `detached` too,
+  // though @types/node leaves it out.
+  const opts: SpawnSyncOptionsWithStringEncoding & { detached: boolean } = {
     detached: true,
     encoding: 'utf-8',
     timeout,
@@ -527,7 +543,8 @@ function listProcsSync(timeout: number): Proc[] | string {
     killSignal: 'SIGKILL',
     maxBuffer: PS_BUFFER,
     stdio: ['ignore', 'pipe', 'ignore'],
-  });
+  };
+  const ps = spawnSync('ps', PS_ARGS, opts);
   if (ps.error) return psFailure(ps.error);
   return ps.status === 0 ? parsePs(ps.stdout) : `ps exited with ${ps.status ?? ps.signal}`;
 }
@@ -718,9 +735,7 @@ function runInherit(
     // then reach setup alone, which stops the login.
     const child = spawn(cmd, args, {
       stdio: 'inherit',
-      // Setup's own variables first (values still win last): procps prints
-      // only the first 128 KiB of a command line and its environment.
-      env: opts.env ? { ...opts.env, ...process.env, ...opts.env } : process.env,
+      env: opts.env ? { ...process.env, ...opts.env } : process.env,
       detached: true,
     });
     opts.onSpawn?.(child);

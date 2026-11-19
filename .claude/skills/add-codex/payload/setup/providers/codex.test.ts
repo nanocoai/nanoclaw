@@ -840,7 +840,7 @@ describe('runCodexLoginAuth', () => {
     expect(stop.removed).toEqual([{ treeRunning: false }]);
   });
 
-  // procps prints only the first 128 KiB of a command line and environment.
+  // ps on Linux cuts an environment off at 128 KiB, and the login id comes after these.
   it('finds a login with a large environment once its wrapper is killed', async () => {
     const big = ['NANOCLAW_BIG1', 'NANOCLAW_BIG2', 'NANOCLAW_BIG3'];
     for (const name of big) process.env[name] = 'x'.repeat(64 * 1024);
