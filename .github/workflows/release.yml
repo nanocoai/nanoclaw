@@ -369,3 +369,34 @@ jobs:
             echo "- State: \`$FINAL_STATE\`"
             echo "- URL: $RELEASE_URL"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # stable and beta are the branches a new install is cloned from
+      # (`git clone --branch stable`). Each moves only to its channel's newest tag,
+      # and only forward: the API refuses an update that is not a fast-forward.
+      # Last, so a refused move never blocks the release; a publish rerun retries it.
+      - name: Move the channel branches
+        env:
+          # The default token may be refused when the move crosses workflow-file
+          # changes. If so, set CHANNEL_BRANCH_TOKEN in both release environments
+          # to a token allowed to update these two branches and workflow files.
+          GH_TOKEN: ${{ secrets.CHANNEL_BRANCH_TOKEN || github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          # From this workflow's own commit, like the order check: an older target's release.mjs lacks it.
+          git ls-remote --tags --refs origin 'refs/tags/v*' > "$RUNNER_TEMP/release-tags.txt"
+          BRANCHES=$(node "$RUNNER_TEMP/release-order.mjs" branches "$RELEASE_VERSION" "$RUNNER_TEMP/release-tags.txt")
+          if [ -z "$BRANCHES" ]; then
+            echo "- Channel branches: unchanged, v${RELEASE_VERSION} is not the newest tag of a channel" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          for BRANCH in $BRANCHES; do
+            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" >/dev/null 2>&1; then
+              gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" \
+                -f sha="$TARGET_SHA" -F force=false >/dev/null
+            else
+              gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+                -f ref="refs/heads/${BRANCH}" -f sha="$TARGET_SHA" >/dev/null
+            fi
+            echo "- Branch \`${BRANCH}\`: \`${TARGET_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          done

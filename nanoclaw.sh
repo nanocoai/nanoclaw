@@ -96,106 +96,56 @@ for arg in "$@"; do
   fi
 done
 
-# ─── new install: latest release or newest code from main ──────────────
-# Runs before the splash and bootstrap so a switch can restart this script
-# from the release's own files, with dependencies installed for that version.
-# shellcheck source=setup/lib/release-checkout.sh
-source "$PROJECT_ROOT/setup/lib/release-checkout.sh"
+# ─── new install: follow the channel of the cloned branch ──────────────
+# The official repository publishes stable and beta branches next to main.
+# Whichever one was cloned names the update channel; nothing is checked out.
+# shellcheck source=setup/lib/update-channel.sh
+source "$PROJECT_ROOT/setup/lib/update-channel.sh"
 
 REQUESTED_CHANNEL="${NANOCLAW_UPDATE_CHANNEL:-}"
-# Where a channel nobody was asked about came from, to say so before the
-# checkout moves: an env var or a .env line is easy to forget.
-RELEASE_SOURCE=NANOCLAW_UPDATE_CHANNEL
-_release_args=()
 _take_channel=false
-_past_options=false
 for arg in "$@"; do
-  # After `--` setup treats everything as positional, so this must too.
-  if [ "$_past_options" = true ]; then
-    _release_args+=("$arg")
-  elif [ "$_take_channel" = true ]; then
+  if [ "$_take_channel" = true ]; then
     REQUESTED_CHANNEL="$arg"
-    RELEASE_SOURCE=--update-channel
     _take_channel=false
   elif [ "$arg" = "--" ]; then
-    _past_options=true
-    _release_args+=("$arg")
+    # After `--` setup treats everything as positional, so this must too.
+    break
   elif [ "$arg" = "--update-channel" ]; then
     _take_channel=true
   elif [ "${arg#--update-channel=}" != "$arg" ]; then
     REQUESTED_CHANNEL="${arg#--update-channel=}"
-    RELEASE_SOURCE=--update-channel
-  else
-    _release_args+=("$arg")
   fi
 done
 if [ "$_take_channel" = true ]; then
   echo "error: Missing value for --update-channel"
   exit 1
 fi
-unset _take_channel _past_options
+unset _take_channel
 
-# Neither a flag nor the env var gave one: a known channel can only be .env's.
-if [ -z "${REQUESTED_CHANNEL//[[:space:]]/}" ]; then RELEASE_SOURCE=.env; fi
-
-RELEASE_TTY=0
-if [ -t 0 ] && [ -t 1 ]; then RELEASE_TTY=1; fi
-read -r RELEASE_ACTION RELEASE_REST <<<"$(release_checkout_decide "$PROJECT_ROOT" "$REQUESTED_CHANNEL" "$RELEASE_TTY")"
-
-if [ "$RELEASE_ACTION" = invalid ]; then
-  echo "error: unknown update channel \"$RELEASE_REST\". Use one of: stable, beta, edge"
-  exit 1
-fi
-
-if [ "$RELEASE_ACTION" = offer ]; then
-  # shellcheck disable=SC2086 # two tags, split on purpose
-  release_checkout_menu $RELEASE_REST
-  RELEASE_CHANNEL=
-  while [ -z "$RELEASE_CHANNEL" ]; do
-    read -r -p "  Choose [1/2/3]: " RELEASE_ANS </dev/tty
-    RELEASE_CHANNEL=$(release_checkout_answer "$RELEASE_ANS")
-    [ -n "$RELEASE_CHANNEL" ] || echo "  Type 1, 2 or 3."
-  done
-  echo ""
-  export NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL
-  RELEASE_SOURCE=
-  read -r RELEASE_ACTION RELEASE_REST <<<"$(release_checkout_decide "$PROJECT_ROOT" "$RELEASE_CHANNEL" 1)"
-  if [ "$RELEASE_ACTION" != switch ] && ! release_checkout_save_channel "$PROJECT_ROOT" "$RELEASE_CHANNEL"; then
-    echo "error: couldn't save NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL to .env. Nothing was installed."
+read -r CHANNEL_ACTION CHANNEL_NAME <<<"$(update_channel_decide "$PROJECT_ROOT" "$REQUESTED_CHANNEL")"
+case "$CHANNEL_ACTION" in
+  invalid)
+    echo "error: unknown update channel \"$CHANNEL_NAME\". Use one of: stable, beta, edge"
     exit 1
-  fi
-fi
-
-if [ "$RELEASE_ACTION" = switch ]; then
-  read -r RELEASE_CHANNEL RELEASE_TAG <<<"$RELEASE_REST"
-  # Saved before the checkout, and either failing stops here: the release may
-  # predate this setting, and its code must never run with another channel saved.
-  if ! release_checkout_save_channel "$PROJECT_ROOT" "$RELEASE_CHANNEL"; then
-    echo "error: couldn't save NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL to .env. Nothing was installed."
-    exit 1
-  fi
-  if ! release_checkout_switch "$PROJECT_ROOT" "$RELEASE_CHANNEL" "$RELEASE_TAG"; then
-    echo "error: couldn't check out $RELEASE_TAG; git says why above. Nothing was installed."
-    echo "  Fix that and run bash nanoclaw.sh again, or pass --update-channel edge to install main."
-    exit 1
-  fi
-  echo "  Installing $RELEASE_TAG (branch: $RELEASE_CHANNEL)${RELEASE_SOURCE:+, the channel set by $RELEASE_SOURCE}."
-  # The release may predate --update-channel; .env and the env var carry the choice.
-  export NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL
-  exec bash "$PROJECT_ROOT/nanoclaw.sh" ${_release_args[@]+"${_release_args[@]}"}
-fi
-
-if [ "$RELEASE_ACTION" = notice ]; then
-  read -r RELEASE_CHANNEL RELEASE_TAG <<<"$RELEASE_REST"
-  echo "  This copy is on main, which is newer than the latest $RELEASE_CHANNEL release ($RELEASE_TAG). Updates follow releases."
-  echo "  To follow main instead: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel edge"
-fi
-
-if [ "$RELEASE_ACTION" = shallow ]; then
-  echo "  This copy is a shallow clone with no release tags, so setup can't offer a release and installs main."
-  echo "  Updates follow releases. To follow main instead: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel edge"
-fi
-unset _release_args RELEASE_SOURCE
+    ;;
+  record)
+    # Setup saves it to .env before its first step.
+    export NANOCLAW_UPDATE_CHANNEL=$CHANNEL_NAME
+    if [ "$CHANNEL_NAME" = edge ]; then
+      echo "  This copy is main, so updates follow main (the edge channel)."
+      echo "  For published releases instead, start from: git clone --branch stable https://github.com/nanocoai/nanoclaw.git"
+    else
+      echo "  This copy is the $CHANNEL_NAME branch, so updates follow the $CHANNEL_NAME channel."
+      echo "  To change that later: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel <stable|beta|edge>"
+    fi
+    ;;
+  ahead)
+    echo "  This copy is main, which is newer than the $CHANNEL_NAME channel's releases: its first update waits for one that includes it."
+    echo "  To follow main instead: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel edge"
+    ;;
+esac
+unset CHANNEL_ACTION CHANNEL_NAME
 
 LOGS_DIR="$PROJECT_ROOT/logs"
 STEPS_DIR="$LOGS_DIR/setup-steps"
@@ -417,7 +367,7 @@ if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" -eq 0 ]; then
       printf '  %s\n' "$(dim '3. Enable passwordless sudo:    echo "nanoclaw ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/nanoclaw')"
       printf '  %s\n' "$(dim '4. Log out:                     exit')"
       printf '  %s\n' "$(dim '5. Log back in as the new user: ssh nanoclaw@your-server')"
-      printf '  %s\n' "$(dim '6. Clone the repo:              git clone https://github.com/nanocoai/nanoclaw.git && cd nanoclaw')"
+      printf '  %s\n' "$(dim '6. Clone the repo:              git clone --branch stable https://github.com/nanocoai/nanoclaw.git && cd nanoclaw')"
       printf '  %s\n\n' "$(dim '7. Re-run setup:               bash nanoclaw.sh')"
       exit 1
       ;;

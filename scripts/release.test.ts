@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   assembleReleaseBody,
   changelogSection,
+  channelBranches,
   compareTags,
   isPrerelease,
   publicationPlan,
@@ -433,6 +434,41 @@ describe('release.mjs verify command', () => {
       expect(() => verify(version)).toThrow(/version must be x\.y\.z, x\.y\.z-beta\.N or x\.y\.z-rc\.N/);
     },
   );
+});
+
+describe('channel branches', () => {
+  const existing = ['v2026.10.0', 'v2026.10.1-rc.1', 'v2026.11.0-beta.1', 'pre-update-1'];
+
+  it('moves stable and beta to a release that is the newest tag', () => {
+    expect(channelBranches('2026.11.0', existing)).toEqual(['stable', 'beta']);
+    // A publish rerun finds its own tag already in the list.
+    expect(channelBranches('2026.11.0', [...existing, 'v2026.11.0'])).toEqual(['stable', 'beta']);
+  });
+
+  it('moves only beta for the newest pre-release', () => {
+    expect(channelBranches('2026.11.0-beta.2', existing)).toEqual(['beta']);
+    expect(channelBranches('2026.11.0-rc.1', existing)).toEqual(['beta']);
+  });
+
+  it('moves only stable for a release older than the newest pre-release', () => {
+    expect(channelBranches('2026.10.1', existing)).toEqual(['stable']);
+  });
+
+  it('moves nothing for a patch or pre-release of an older line', () => {
+    expect(channelBranches('2026.9.5', existing)).toEqual([]);
+    expect(channelBranches('2026.10.1-rc.2', existing)).toEqual([]);
+  });
+
+  it('picks the tags the updater picks, and the workflow moves the branches last', () => {
+    const tags = ['v2026.10.0', 'v2026.11.0-rc.2', 'v2026.11.0-beta.4'];
+    expect([...tags].sort(compareReleaseTags).at(-1)).toBe('v2026.11.0-rc.2');
+    expect(channelBranches('2026.11.0-rc.2', tags)).toEqual(['beta']);
+    expect(releaseWorkflow).toContain('release-order.mjs" branches "$RELEASE_VERSION"');
+    expect(releaseWorkflow).toContain('-f sha="$TARGET_SHA" -F force=false');
+    expect(releaseWorkflow.indexOf('- name: Move the channel branches')).toBeGreaterThan(
+      releaseWorkflow.indexOf('node scripts/release.mjs readback'),
+    );
+  });
 });
 
 describe('release order check', () => {

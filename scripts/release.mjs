@@ -236,11 +236,25 @@ function repositoryInputs() {
   };
 }
 
+// `stable` and `beta` are the branches a new install is cloned from. Each moves only to
+// the tag the updater picks for its channel: the newest release for stable, the newest
+// tag of any stage for beta. A patch to an older line moves neither.
+export function channelBranches(version, tags) {
+  const tag = `v${version}`;
+  const prerelease = isPrerelease(version);
+  const known = [...new Set([...tags.filter((other) => parseTag(other) !== null), tag])];
+  const newest = (list) => [...list].sort(compareTags).at(-1);
+  const branches = [];
+  if (!prerelease && newest(known.filter((other) => parseTag(other).stage === 2)) === tag) branches.push('stable');
+  if (newest(known) === tag) branches.push('beta');
+  return branches;
+}
+
 export function main(argv) {
   const [command, version, ...args] = argv;
   if (!command || !version) {
     throw new Error(
-      'usage: node scripts/release.mjs <verify|extract|assemble|plan|readback|order> <x.y.z[-beta.N|-rc.N]> [command arguments]',
+      'usage: node scripts/release.mjs <verify|extract|assemble|plan|readback|order|branches> <x.y.z[-beta.N|-rc.N]> [command arguments]',
     );
   }
 
@@ -252,6 +266,18 @@ export function main(argv) {
     }
     verifyReleaseOrder(version, tagsFromLsRemote(readFileSync(tagListPath, 'utf8')));
     process.stdout.write(`v${version} sorts above every existing tag of its version\n`);
+    return;
+  }
+
+  // Reads no repository files either, for the same reason.
+  if (command === 'branches') {
+    const [tagListPath] = args;
+    if (!tagListPath) {
+      throw new Error('branches requires the path to a git ls-remote tag list');
+    }
+    process.stdout.write(
+      `${channelBranches(version, tagsFromLsRemote(readFileSync(tagListPath, 'utf8'))).join(' ')}\n`,
+    );
     return;
   }
 
