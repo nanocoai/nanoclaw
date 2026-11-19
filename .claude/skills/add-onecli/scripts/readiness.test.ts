@@ -7,10 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { detectInstalledOneCLI } from './detect.js';
-import { gatewayReadinessError } from './setup.js';
+import { gatewayReadinessError, pollGatewayReadiness } from './setup.js';
 
 const roots: string[] = [];
 
@@ -37,6 +37,8 @@ describe('OneCLI readiness', () => {
   it.each([
     ['incompatible', 1, 'failed'],
     ['unreachable', 1, 'failed'],
+    ['timeout', 1, 'failed'],
+    ['delayed', 0, 'success'],
     ['ok', 0, 'success'],
   ] as const)(
     'gateway /v1 API %s: exits %i (%s)',
@@ -52,12 +54,16 @@ describe('OneCLI readiness', () => {
         '#!/bin/sh\ncase "$*" in\n  version) echo 2.11.0 ;;\n  "config get api-host") echo "$TEST_GATEWAY_URL" ;;\n  *) exit 1 ;;\nesac\n',
         { mode: 0o755 },
       );
+      let v1Calls = 0;
       const server = createServer((req, res) => {
+        if (req.url === '/v1/health') v1Calls++;
         if (req.url === '/v1/health' && v1Status === 'unreachable') {
           req.socket.destroy();
           return;
         }
-        res.statusCode = req.url === '/v1/health' && v1Status === 'incompatible' ? 404 : 200;
+        if (req.url === '/v1/health' && v1Status === 'timeout') return;
+        if (req.url === '/v1/health' && v1Status === 'incompatible') res.statusCode = 404;
+        if (req.url === '/v1/health' && v1Status === 'delayed' && v1Calls <= 2) res.statusCode = 503;
         res.end('{}');
       });
       server.listen(0, '127.0.0.1');
@@ -100,6 +106,7 @@ describe('OneCLI readiness', () => {
         expect(result.stdout).toContain(`STATUS: ${status}`);
         if (exitCode !== 0) expect(result.stdout).toContain('ERROR: gateway_not_ready');
         expect(result.code, result.stderr).toBe(exitCode);
+        if (v1Status === 'delayed') expect(v1Calls).toBe(3);
       } finally {
         server.closeAllConnections();
         await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -107,4 +114,47 @@ describe('OneCLI readiness', () => {
     },
     15_000,
   );
+});
+
+describe('OneCLI readiness deadline', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('allows /v1 to become ready while an auth-gated /api waits on the same deadline', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    let v1Calls = 0;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).endsWith('/api/health')) return new Response(null, { status: 401 });
+      return new Response(null, { status: ++v1Calls <= 2 ? 503 : 200 });
+    });
+
+    const readiness = pollGatewayReadiness('http://gateway.test', 2500, fetchImpl);
+    await vi.advanceTimersByTimeAsync(2500);
+
+    // Waiting for /api first would use up /v1's budget; granting /v1 a new
+    // budget would leave timers running beyond the shared deadline instead.
+    expect(vi.getTimerCount()).toBe(0);
+    await expect(readiness).resolves.toEqual({ healthy: false, v1Status: 'ok' });
+    expect(v1Calls).toBe(3);
+  });
+
+  it('bounds requests and retry sleeps by the remaining budget without extending it', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 404 }));
+
+    const readiness = pollGatewayReadiness('http://gateway.test', 2500, fetchImpl);
+    await vi.advanceTimersByTimeAsync(2500);
+
+    expect(vi.getTimerCount()).toBe(0);
+    await expect(readiness).resolves.toEqual({ healthy: false, v1Status: 'incompatible' });
+    expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([2500, 2500, 1500, 1500, 500, 500]);
+    expect(fetchImpl).toHaveBeenCalledTimes(6);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(fetchImpl).toHaveBeenCalledTimes(6);
+  });
 });
