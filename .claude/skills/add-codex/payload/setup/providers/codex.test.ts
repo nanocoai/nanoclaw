@@ -11,21 +11,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mockSpawn = vi.fn();
 const mockSpawnSync = vi.fn();
 const mockExecFileSync = vi.fn();
-// The login's process tree is read from the real `ps`; `mockPs.run` (execFile)
+// The login's process tree is read from the real `ps`; `mockPs.run` (spawn)
 // and `mockPs.sync` (spawnSync) stand in for it to play a failing one.
-type ExecFile = (file: string, args: string[], opts: object, done: (...result: unknown[]) => void) => unknown;
-const mockPs: { run?: ExecFile; sync?: (...args: unknown[]) => unknown } = {};
+type SpawnPs = (file: string, args: string[], opts: { detached?: boolean }) => unknown;
+const mockPs: { run?: SpawnPs; sync?: (...args: unknown[]) => unknown } = {};
 vi.mock('child_process', async (importOriginal) => {
   const real = await importOriginal<typeof import('child_process')>();
   return {
-    spawn: (...args: unknown[]) => mockSpawn(...args),
+    spawn: (...args: unknown[]) =>
+      args[0] === 'ps'
+        ? (mockPs.run ?? (real.spawn as unknown as SpawnPs))(...(args as Parameters<SpawnPs>))
+        : mockSpawn(...args),
     spawnSync: (...args: unknown[]) =>
       args[0] === 'ps'
         ? (mockPs.sync ?? (real.spawnSync as (...a: unknown[]) => unknown))(...args)
         : mockSpawnSync(...args),
     execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
-    execFile: ((file, args, opts, done) =>
-      (mockPs.run ?? (real.execFile as unknown as ExecFile))(file, args, opts, done)) satisfies ExecFile,
   };
 });
 
@@ -160,12 +161,8 @@ describe('offerCodexFailureAssist', () => {
 // when refresh tokens rotate (see the header of codex.ts).
 // ─── real login trees ────────────────────────────────────────────────────
 
-const {
-  spawn: realSpawn,
-  spawnSync: realSpawnSync,
-  execFile: realExecFileFn,
-} = await vi.importActual<typeof import('child_process')>('child_process');
-const realExecFile = realExecFileFn as unknown as ExecFile;
+const { spawn: realSpawn, spawnSync: realSpawnSync } =
+  await vi.importActual<typeof import('child_process')>('child_process');
 
 /** What went to the screen through these spies. */
 const printed = (...spies: Array<ReturnType<typeof vi.spyOn>>): string =>
@@ -567,10 +564,11 @@ describe('runCodexLoginAuth', () => {
   // A wrapper killed by a signal may leave Codex behind, orphaned. Setup still
   // finds it by the login id it inherited, and stops it before the failure
   // is reported and the home goes.
+  // The wrapper's group, held for one more listing, is signalled too.
   it.each([
-    ['in the wrapper group', false, 'wrapper'],
-    ['in a group of its own', true, 'other'],
-  ])('stops what a wrapper killed by a signal leaves %s, then removes the home', async (_label, ownGroup, group) => {
+    ['in the wrapper group', false, ['SIGTERM wrapper group', 'home removed']],
+    ['in a group of its own', true, ['SIGTERM wrapper group', 'SIGTERM other group', 'home removed']],
+  ])('stops what a wrapper killed by a signal leaves %s, then removes the home', async (_label, ownGroup, order) => {
     const before = listeners();
     const tree = playTree('setTimeout(() => process.exit(0), 300)', ownGroup);
     const stop = watchStop(tree);
@@ -583,7 +581,7 @@ describe('runCodexLoginAuth', () => {
 
     await expect(done).rejects.toThrow('setup stopped');
     expect(isRunning(login)).toBe(false);
-    expect(stop.order).toEqual([`SIGTERM ${group} group`, 'home removed']);
+    expect(stop.order).toEqual(order);
     expect(stop.removed).toEqual([{ treeRunning: false }]);
     expect(stop.reraised).toEqual([]);
     expect(printed(log, stdout)).toContain("Couldn't complete the Codex sign-in");
@@ -604,7 +602,7 @@ describe('runCodexLoginAuth', () => {
     signalSignIn(before[LOGIN_EVENTS.indexOf('SIGINT')], 'SIGINT');
 
     await expect(done).rejects.toThrow('setup stopped');
-    expect(stop.order).toEqual(['SIGTERM other group', 'home removed']);
+    expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGTERM other group', 'home removed']);
     expect(stop.reraised).toEqual([{ signal: 'SIGINT', treeRunning: false, home: false }]);
     expect(printed(log, stdout)).not.toContain("Couldn't");
     expect(listeners()).toEqual(before);
@@ -661,21 +659,25 @@ describe('runCodexLoginAuth', () => {
       'setup stopped',
     );
     expect(isRunning(tree.pids()[1])).toBe(false);
-    expect(stop.order).toEqual(['SIGTERM other group', 'home removed']);
+    expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGTERM other group', 'home removed']);
     expect(stop.removed).toEqual([{ treeRunning: false }]);
     expect(printed(log, stdout)).toMatch(/Couldn't complete the Codex sign-in|ended without signing in/);
   });
 
-  /** Fails listings `from` to `to` (from 1), as if ps were missing or as a ps that errs; the others are real. */
-  function failListing(from: number, to = from, how: 'missing' | 'errs' = 'missing'): void {
+  /**
+   * Fails listings `from` to `to` (from 1), as if ps were missing or as a ps
+   * that errs; the others are real. Returns the count of listings so far.
+   */
+  function failListing(from: number, to = from, how: 'missing' | 'errs' = 'missing'): () => number {
     let calls = 0;
-    mockPs.run = (file, args, opts, cb) => {
+    mockPs.run = (file, args, opts) => {
       calls += 1;
-      if (calls < from || calls > to) return realExecFile(file, args, opts, cb);
+      if (calls < from || calls > to) return realSpawn(file, args, opts);
       return how === 'missing'
-        ? realExecFile(`${file}-missing-4455`, args, opts, cb)
-        : realExecFile(process.execPath, ['-e', 'process.exit(3)'], opts, cb);
+        ? realSpawn(`${file}-missing-4455`, args, opts)
+        : realSpawn(process.execPath, ['-e', 'process.exit(3)'], opts);
     };
+    return () => calls;
   }
 
   it('keeps a login that exited 0 without signing in failed, even if what it left writes auth.json while stopped', async () => {
@@ -691,7 +693,7 @@ describe('runCodexLoginAuth', () => {
 
     await expect(runCodexLoginAuth('device', { has: async () => false, save }, root)).rejects.toThrow('setup stopped');
     expect(save).not.toHaveBeenCalled();
-    expect(stop.order).toEqual(['SIGTERM other group', 'home removed']);
+    expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGTERM other group', 'home removed']);
     expect(stop.authAtRemoval).toEqual([true]);
     expect(printed(log, stdout)).toContain('The Codex sign-in ended without signing in');
   });
@@ -706,10 +708,12 @@ describe('runCodexLoginAuth', () => {
     const before = listeners();
     const { done, ready } = signInOn(tree);
     await ready;
-    failListing(2);
+    const listings = failListing(2);
     signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
 
     await expect(done).rejects.toThrow('setup stopped');
+    // After the failed one, two empty listings in a row.
+    expect(listings()).toBeGreaterThanOrEqual(4);
     expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGTERM other group', 'home removed']);
     expect(stop.removed).toEqual([{ treeRunning: false }]);
     expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false, home: false }]);
@@ -752,7 +756,7 @@ describe('runCodexLoginAuth', () => {
     expect(tree.running()).toBe(false);
     expect(stop.removed).toEqual([]);
     expect(printed(log, stdout)).toContain(
-      "Couldn't confirm that the Codex sign-in stopped: setup couldn't list its processes (ps: ",
+      "Couldn't confirm that the Codex sign-in stopped: setup couldn't list its processes (ps exited with 3)",
     );
   });
 
@@ -766,19 +770,91 @@ describe('runCodexLoginAuth', () => {
     const { done, ready } = signInOn(tree);
     await ready;
     let calls = 0;
-    mockPs.run = (file, args, opts, cb) =>
-      realExecFile(file, args, opts, (error, stdout, stderr) => {
-        calls += 1;
-        // Only setup's own row, as if the listing had missed the rest.
-        const own = (row: string) => row.trim().startsWith(`${process.pid} `);
-        cb(error, calls === 2 ? String(stdout).split('\n').filter(own).join('\n') : stdout, stderr);
-      });
+    mockPs.run = (file, args, opts) =>
+      ++calls === 2
+        ? // Only setup's own row, as if the listing had missed the rest.
+          realSpawn('/bin/sh', ['-c', `${file} "$@" | grep -E '^ *${process.pid} '`, 'sh', ...args], opts)
+        : realSpawn(file, args, opts);
     signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
 
     await expect(done).rejects.toThrow('setup stopped');
     expect(calls).toBeGreaterThan(2);
     expect(stop.removed).toEqual([{ treeRunning: false }]);
     expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false, home: false }]);
+  });
+
+  // Seeing one group isn't seeing them all: a listing that misses one, while
+  // another still shows, doesn't drop it.
+  it('holds a group that one listing misses while another group shows, and waits for its helper', async () => {
+    const before = listeners();
+    const tree = playTree(
+      "require('fs').writeFileSync($HELPER, String(require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1000)'], { stdio: 'ignore', env: {} }).pid)); process.exit(0);",
+      true,
+    );
+    const stop = watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { done, ready } = signInOn(tree);
+    await ready;
+    const [wrapper, login] = tree.pids();
+    let calls = 0;
+    // Once the login has gone: its group's rows left out, and a row of the
+    // login's in the wrapper's group, as if still being read.
+    const partial = `while ps -o stat= -p ${login} | grep -qv Z; do sleep 0.01; done; "$0" "$@" | awk '$3 != ${login}'; echo "999999 1 ${wrapper} S node NANOCLAW_CODEX_LOGIN=${tree.id()}"`;
+    mockPs.run = (file, args, opts) =>
+      ++calls === 2 ? realSpawn('/bin/sh', ['-c', partial, file, ...args], opts) : realSpawn(file, args, opts);
+    signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(tree.pids()).toHaveLength(3);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+  });
+
+  // A terminal's signals reach every process in its foreground group, so a
+  // ps sharing setup's group would die by them, here as soon as it starts.
+  const terminalSignals = (opts: { detached?: boolean }) => !opts.detached;
+
+  it('on a second Ctrl-C while ps lists the tree, still lists it, kills all of it and removes the home', async () => {
+    const before = listeners();
+    const tree = playTree('', true, { bareEnv: true });
+    const stop = watchStop(tree);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const { done, ready } = signInOn(tree);
+    await ready;
+    mockPs.run = (file, args, opts) => {
+      const ps = realSpawn(file, args, opts);
+      if (terminalSignals(opts)) ps.kill('SIGINT');
+      return ps;
+    };
+    const sigints = before[LOGIN_EVENTS.indexOf('SIGINT')];
+    signalSignIn(sigints, 'SIGINT');
+    signalSignIn(sigints, 'SIGINT');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(stop.order).toEqual(['SIGKILL wrapper group', 'SIGKILL other group', 'home removed']);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+    expect(printed(log, stdout)).not.toContain("Couldn't confirm");
+  });
+
+  it('on a Ctrl-C while ps lists the tree on the way out, still kills all of it and removes the home', async () => {
+    const before = listeners();
+    const tree = playTree('', true, { bareEnv: true });
+    const stop = watchStop(tree);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const { done, ready } = signInOn(tree);
+    await ready;
+    mockPs.sync = (file, args, opts) =>
+      terminalSignals(opts as { detached?: boolean })
+        ? realSpawnSync('/bin/sh', ['-c', 'kill -INT $$'], opts as object)
+        : realSpawnSync(file as string, args as string[], opts as object);
+    signalSignIn(before[0], 'exit');
+
+    expect(stop.order).toEqual(['SIGKILL wrapper group', 'SIGKILL other group', 'home removed']);
+    expect(tree.running()).toBe(false);
+    expect(printed(log, stdout)).not.toContain("Couldn't confirm");
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(listeners()).toEqual(before);
   });
 
   // Without a listing before the first signal, a process known only through
@@ -973,14 +1049,14 @@ describe('runCodexLoginAuth', () => {
   it.each([
     [
       'is missing',
-      ((file, args, opts, done) => realExecFile(`${file}-missing-4455`, args, opts, done)) satisfies ExecFile,
+      ((file, args, opts) => realSpawn(`${file}-missing-4455`, args, opts)) satisfies SpawnPs,
       'ps not found',
       ['SIGTERM wrapper group'],
     ],
     [
       'times out',
-      ((_file, _args, opts, done) =>
-        realExecFile(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], opts, done)) satisfies ExecFile,
+      ((_file, _args, opts) =>
+        realSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], opts)) satisfies SpawnPs,
       'ps timed out',
       // A timeout may pass, so the stop keeps trying, to the 3 s kill.
       ['SIGTERM wrapper group', 'SIGKILL wrapper group'],

@@ -4,7 +4,7 @@
  * ~/.codex/auth.json is copied: rotating one session from two consumers
  * would invalidate it. Both setup entry points use this provider hook.
  */
-import { type ChildProcess, execFile, spawn, spawnSync } from 'child_process';
+import { type ChildProcess, spawn, spawnSync } from 'child_process';
 import { randomBytes } from 'crypto';
 import { getCredentialStore, type ProviderCredentialStore } from '../gateways/credential-store.js';
 import fs from 'fs';
@@ -356,20 +356,20 @@ export async function runCodexLoginAuth(
 type Proc = { pid: number; ppid: number; pgid: number; zombie: boolean; text: string };
 
 /**
- * The login's process tree. A listing finds its processes by the login id
- * each inherits (set next to CODEX_HOME), whatever became of its parent; one
- * without it (macOS hides a system binary's environment, such as pnpm 12's
- * `sh`) by descent, or as one in a group the tree held at the last listing. A
- * group gains members only from its own session, so only from the login: it
- * runs in a session of its own (see runInherit). Their groups are the ones
- * signalled: pnpm 12 runs Codex in a group of its own. Zombies don't count.
- * Whatever writes to the home is Codex, which shows the id; the one known
- * process that shows neither and leaves the group is pnpm 12's `sh`, which
- * kills Codex's group and exits once pnpm has gone.
+ * The login's process tree. A listing finds its processes by the login id each
+ * inherits (set next to CODEX_HOME), whatever became of its parent; one without
+ * it (macOS hides a system binary's environment, such as pnpm 12's `sh`) by
+ * descent, or as one in a group the tree holds. A group gains members only from
+ * its own session, so only from the login: it runs in a session of its own (see
+ * runInherit). Their groups are the ones signalled: pnpm 12 runs Codex in a
+ * group of its own. Zombies don't count. Whatever writes to the home is Codex,
+ * which shows the id; the one known process that shows neither and leaves the
+ * group is pnpm 12's `sh`, which kills Codex's group and exits once pnpm has
+ * gone.
  */
 class LoginTree {
-  // As of the last listing; the login's own until there is one.
-  private groups: number[];
+  // Each with the listings in a row that missed it; the login's own until there is one.
+  private readonly groups = new Map<number, number>();
   private readonly marker: string;
   private signalled = false;
   // Empty listings in a row.
@@ -380,7 +380,7 @@ class LoginTree {
   blind: string | undefined;
 
   constructor(leader: number, id: string) {
-    this.groups = [leader];
+    this.groups.set(leader, 0);
     this.marker = `${LOGIN_ID_VAR}=${id}`;
   }
 
@@ -390,7 +390,7 @@ class LoginTree {
   }
 
   /** Signals the groups; whether any still holds a member. */
-  signal(signal: NodeJS.Signals | 0, groups: Iterable<number> = this.groups): boolean {
+  signal(signal: NodeJS.Signals | 0, groups: Iterable<number> = this.groups.keys()): boolean {
     if (signal) this.signalled = true;
     let alive = false;
     for (const group of groups) {
@@ -434,23 +434,27 @@ class LoginTree {
     for (let grew = true; grew;) {
       grew = false;
       for (const proc of live) {
-        const ours = this.groups.includes(proc.pgid) || this.marks(proc);
+        const ours = this.groups.has(proc.pgid) || this.marks(proc);
         if (tree.has(proc.pid) || !(ours || tree.has(proc.ppid))) continue;
         tree.add(proc.pid);
         grew = true;
       }
     }
     const members = live.filter((proc) => tree.has(proc.pid));
-    // ps reads processes one by one: an empty listing may have missed a
-    // helper forked as its parent went, so the end takes two in a row, and
-    // the groups stay held across the first.
-    if (members.length === 0) return ++this.empty < 2;
-    this.empty = 0;
-    const groups = [...new Set(members.map((proc) => proc.pgid))].filter((group) => group > 1 && group !== own);
-    const found = groups.filter((group) => !this.groups.includes(group));
-    this.groups = groups;
+    const seen = new Set(members.map((proc) => proc.pgid).filter((group) => group > 1 && group !== own));
+    const found = [...seen].filter((group) => !this.groups.has(group));
+    // ps reads processes one by one, so a listing may miss a helper forked as
+    // its parent went: a group is held until two listings in a row miss it,
+    // and the end takes two empty listings in a row.
+    for (const [group, missed] of this.groups) {
+      if (seen.has(group)) this.groups.set(group, 0);
+      else if (missed) this.groups.delete(group);
+      else this.groups.set(group, 1);
+    }
+    for (const group of found) this.groups.set(group, 0);
     if (signal) this.signal(signal(), found);
-    return true;
+    this.empty = members.length > 0 ? 0 : this.empty + 1;
+    return this.empty < 2;
   }
 
   // A whole word: not OLD_NANOCLAW_CODEX_LOGIN=, nor an id that starts the same.
@@ -475,17 +479,39 @@ const PS_ARGS = [
 ];
 const PS_BUFFER = 64 * 1024 * 1024;
 
-/** The user's processes, from `ps`, or why they couldn't be listed. */
+/**
+ * The user's processes, from `ps`, or why they couldn't be listed. `ps` runs
+ * in a session of its own, so a second Ctrl-C or a hangup at the terminal
+ * reaches setup, not the listing.
+ */
 function listProcs(): Promise<Proc[] | string> {
   return new Promise((resolve) => {
-    execFile('ps', PS_ARGS, { timeout: PS_TIMEOUT_MS, maxBuffer: PS_BUFFER }, (error, stdout) =>
-      resolve(error ? psFailure(error) : parsePs(String(stdout))),
-    );
+    const ps = spawn('ps', PS_ARGS, { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    let why: string | undefined;
+    const stop = (reason: string) => {
+      why ??= reason;
+      ps.kill('SIGKILL');
+    };
+    const timer = setTimeout(() => stop('ps timed out'), PS_TIMEOUT_MS);
+    ps.stdout?.setEncoding('utf-8').on('data', (chunk: string) => {
+      out += chunk;
+      if (out.length > PS_BUFFER) stop('ps: output too large');
+    });
+    ps.on('error', (error) => {
+      clearTimeout(timer);
+      resolve(psFailure(error));
+    });
+    ps.on('close', (code, signal) => {
+      clearTimeout(timer);
+      resolve(why ?? (code === 0 ? parsePs(out) : `ps exited with ${code ?? signal}`));
+    });
   });
 }
 
 function listProcsSync(timeout: number): Proc[] | string {
   const ps = spawnSync('ps', PS_ARGS, {
+    detached: true,
     encoding: 'utf-8',
     timeout,
     maxBuffer: PS_BUFFER,
