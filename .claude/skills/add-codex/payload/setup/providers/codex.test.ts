@@ -15,6 +15,8 @@ const mockExecFileSync = vi.fn();
 // and `mockPs.sync` (spawnSync) stand in for it to play a failing one.
 type SpawnPs = (file: string, args: string[], opts: { detached?: boolean }) => unknown;
 const mockPs: { run?: SpawnPs; sync?: (...args: unknown[]) => unknown } = {};
+// Groups of stand-in listings that leave a process behind.
+const strayPs: number[] = [];
 vi.mock('child_process', async (importOriginal) => {
   const real = await importOriginal<typeof import('child_process')>();
   return {
@@ -221,12 +223,15 @@ function playTree(
     bareEnv = false,
     bareLeader = false,
     execOnTerm = false,
+    oddEnv = false,
   }: {
     late?: boolean;
     exit?: { after: number; code: number; auth?: boolean };
     bareEnv?: boolean;
     bareLeader?: boolean;
     execOnTerm?: boolean;
+    // The login with a value holding U+2028 and a carriage return.
+    oddEnv?: boolean;
   } = {},
 ): {
   pids: () => number[];
@@ -247,7 +252,7 @@ function playTree(
   const shell = `trap 'exec /bin/sleep 0.3' TERM; echo $$ > ${JSON.stringify(loginFile)}; end=$(( $(date +%s) + 20 )); while [ $(date +%s) -lt $end ]; do /bin/sleep 0.05; done`;
   const start = execOnTerm
     ? `require('child_process').spawn('/bin/sh', ['-c', ${JSON.stringify(shell)}], { stdio: 'ignore', detached: ${ownGroup}, env: {} })`
-    : `require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(login)}], { stdio: 'ignore', detached: ${ownGroup}${bareEnv ? ', env: {}' : ''} })`;
+    : `require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(login)}], { stdio: 'ignore', detached: ${ownGroup}${bareEnv ? ', env: {}' : ''}${oddEnv ? ", env: { ...process.env, NANOCLAW_ODD: 'a\\u2028b\\rc' }" : ''} })`;
   const wrapper =
     (late ? '' : `${start};`) +
     `require('fs').writeFileSync(${JSON.stringify(wrapperFile)}, String(process.pid));` +
@@ -337,6 +342,13 @@ describe('runCodexLoginAuth', () => {
     mockPs.run = undefined;
     mockPs.sync = undefined;
     vi.restoreAllMocks();
+    for (const group of strayPs.splice(0)) {
+      try {
+        process.kill(-group, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    }
   });
 
   /** Plays `codex login`: records its env and its home's mode, writes auth.json. */
@@ -809,6 +821,20 @@ describe('runCodexLoginAuth', () => {
     expect(stop.removed).toEqual([{ treeRunning: false }]);
   });
 
+  it('finds a login whose environment holds U+2028 or a carriage return', async () => {
+    const before = listeners();
+    const tree = playTree('setTimeout(() => process.exit(0), 300)', true, { oddEnv: true });
+    const stop = watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { done, ready } = signInOn(tree);
+    await ready;
+    signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGTERM other group', 'home removed']);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+  });
+
   // A terminal's signals reach every process in its foreground group, so a
   // ps sharing setup's group would die by them, here as soon as it starts.
   const terminalSignals = (opts: { detached?: boolean }) => !opts.detached;
@@ -1015,7 +1041,12 @@ describe('runCodexLoginAuth', () => {
   // A slow first listing leaves time for another, within the 1.5 s.
   it.each([
     ['fails', ['ps-missing-4455'], 'ps not found'],
-    ['times out', [process.execPath, '-e', 'setTimeout(() => {}, 10000)'], 'ps timed out'],
+    // One that ignores SIGTERM.
+    [
+      'times out',
+      [process.execPath, '-e', "process.on('SIGTERM', () => {}); setTimeout(() => {}, 10000)"],
+      'ps timed out',
+    ],
   ])(
     'when the first listing on the way out %s, kills what later ones find, keeps the home and says so',
     async (_label, first, why) => {
@@ -1031,8 +1062,10 @@ describe('runCodexLoginAuth', () => {
         ++calls === 1
           ? realSpawnSync(first[0], first.slice(1), opts as object)
           : realSpawnSync(file as string, args as string[], opts as object);
+      const start = Date.now();
       signalSignIn(before[0], 'exit');
 
+      expect(Date.now() - start).toBeLessThan(2500);
       expect(stop.order).toEqual(['SIGKILL wrapper group', 'SIGKILL other group']);
       expect(tree.running()).toBe(false);
       expect(stop.removed).toEqual([]);
@@ -1055,8 +1088,12 @@ describe('runCodexLoginAuth', () => {
     ],
     [
       'times out',
-      ((_file, _args, opts) =>
-        realSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], opts)) satisfies SpawnPs,
+      // One that leaves a child holding its output open.
+      ((_file, _args, opts) => {
+        const ps = realSpawn('/bin/sh', ['-c', '/bin/sleep 10 & /bin/sleep 10'], opts);
+        if (ps.pid) strayPs.push(ps.pid);
+        return ps;
+      }) satisfies SpawnPs,
       'ps timed out',
       // A timeout may pass, so the stop keeps trying, to the 3 s kill.
       ['SIGTERM wrapper group', 'SIGKILL wrapper group'],
@@ -1073,9 +1110,11 @@ describe('runCodexLoginAuth', () => {
       const { done, ready } = signInOn(tree);
       await ready;
       const [, login] = tree.pids();
+      const start = Date.now();
       signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
 
       await expect(done).rejects.toThrow('setup stopped');
+      expect(Date.now() - start).toBeLessThan(8000);
       // Codex, in the group setup never saw, still runs, and its home stays.
       expect(stop.order).toEqual(order);
       expect(isRunning(login)).toBe(true);

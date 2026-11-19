@@ -488,10 +488,11 @@ function listProcs(): Promise<Proc[] | string> {
   return new Promise((resolve) => {
     const ps = spawn('ps', PS_ARGS, { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
     let out = '';
-    let why: string | undefined;
+    // Settled here, not on 'close': whatever still holds the pipe would delay it.
     const stop = (reason: string) => {
-      why ??= reason;
       ps.kill('SIGKILL');
+      ps.stdout?.destroy();
+      resolve(reason);
     };
     const timer = setTimeout(() => stop('ps timed out'), PS_TIMEOUT_MS);
     ps.stdout?.setEncoding('utf-8').on('data', (chunk: string) => {
@@ -504,7 +505,7 @@ function listProcs(): Promise<Proc[] | string> {
     });
     ps.on('close', (code, signal) => {
       clearTimeout(timer);
-      resolve(why ?? (code === 0 ? parsePs(out) : `ps exited with ${code ?? signal}`));
+      resolve(code === 0 ? parsePs(out) : `ps exited with ${code ?? signal}`);
     });
   });
 }
@@ -514,6 +515,8 @@ function listProcsSync(timeout: number): Proc[] | string {
     detached: true,
     encoding: 'utf-8',
     timeout,
+    // SIGTERM may not end it, and spawnSync waits for the end.
+    killSignal: 'SIGKILL',
     maxBuffer: PS_BUFFER,
     stdio: ['ignore', 'pipe', 'ignore'],
   });
@@ -528,10 +531,11 @@ function psFailure(err: Error & { code?: unknown; killed?: boolean }): string {
 }
 
 function parsePs(stdout: string): Proc[] | string {
+  // `s`: a value may hold a carriage return or U+2028, which `.` alone skips.
   const procs = stdout
     .trim()
     .split('\n')
-    .map((row) => row.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s?(.*)$/))
+    .map((row) => row.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s?(.*)$/s))
     .filter((m) => m !== null)
     .map((m) => ({
       pid: Number(m[1]),
