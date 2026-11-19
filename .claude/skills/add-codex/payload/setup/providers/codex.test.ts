@@ -11,13 +11,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mockSpawn = vi.fn();
 const mockSpawnSync = vi.fn();
 const mockExecFileSync = vi.fn();
-vi.mock('child_process', async (importOriginal) => ({
-  spawn: (...args: unknown[]) => mockSpawn(...args),
-  spawnSync: (...args: unknown[]) => mockSpawnSync(...args),
-  execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
-  // A stop reads the login's process tree from the real `ps`.
-  execFile: (await importOriginal<typeof import('child_process')>()).execFile,
-}));
+// The login's process tree is read from the real `ps`; `mockPs.run` stands in
+// for it to play a failing one. `mockPs.done` counts the listings that returned.
+type ExecFile = (file: string, args: string[], opts: object, done: (...result: unknown[]) => void) => unknown;
+const mockPs: { run?: ExecFile; done: number } = { done: 0 };
+vi.mock('child_process', async (importOriginal) => {
+  const real = await importOriginal<typeof import('child_process')>();
+  return {
+    spawn: (...args: unknown[]) => mockSpawn(...args),
+    spawnSync: (...args: unknown[]) =>
+      args[0] === 'ps' ? (real.spawnSync as (...a: unknown[]) => unknown)(...args) : mockSpawnSync(...args),
+    execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
+    execFile: ((file, args, opts, done) =>
+      (mockPs.run ?? (real.execFile as unknown as ExecFile))(file, args, opts, (...result) => {
+        mockPs.done++;
+        done(...result);
+      })) satisfies ExecFile,
+  };
+});
 
 // Keep the auth flow's structured logging out of logs/setup.log.
 vi.mock('../logs.js', () => ({ step: vi.fn(), userInput: vi.fn() }));
@@ -150,8 +161,19 @@ describe('offerCodexFailureAssist', () => {
 // when refresh tokens rotate (see the header of codex.ts).
 // ─── real login trees ────────────────────────────────────────────────────
 
-const { spawn: realSpawn, spawnSync: realSpawnSync } =
-  await vi.importActual<typeof import('child_process')>('child_process');
+const {
+  spawn: realSpawn,
+  spawnSync: realSpawnSync,
+  execFile: realExecFileFn,
+} = await vi.importActual<typeof import('child_process')>('child_process');
+const realExecFile = realExecFileFn as unknown as ExecFile;
+
+/** What went to the screen through these spies. */
+const printed = (...spies: Array<ReturnType<typeof vi.spyOn>>): string =>
+  spies
+    .flatMap((spy) => spy.mock.calls)
+    .map((call: unknown[]) => String(call[0]))
+    .join('\n');
 
 /** Running, not a zombie waiting to be reaped. */
 function isRunning(pid: number): boolean {
@@ -270,6 +292,7 @@ describe('runCodexLoginAuth', () => {
     fs.rmSync(root, { recursive: true, force: true });
     mockSpawn.mockReset();
     mockSpawnSync.mockReset();
+    mockPs.run = undefined;
     vi.restoreAllMocks();
   });
 
@@ -444,41 +467,102 @@ describe('runCodexLoginAuth', () => {
     expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false, home: false }]);
   });
 
-  it('kills the login tree outright when setup exits mid-sign-in', async () => {
-    const before = listeners();
-    const tree = playTree('', false);
-    const stop = watchStop(tree);
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    const { done, ready } = signInOn(tree);
-    await ready;
-    signalSignIn(before[0], 'exit');
-    // Nothing can wait during 'exit': the kill goes out before the home does.
-    expect(stop.order).toEqual(['SIGKILL wrapper group', 'home removed']);
-    await until(() => !tree.running());
+  // Both trees: Codex in pnpm's group (pnpm 10) or in a group of its own (pnpm 12).
+  it.each([
+    ['in the wrapper group', false, ['SIGKILL wrapper group', 'home removed']],
+    ['in a group of its own', true, ['SIGKILL wrapper group', 'SIGKILL other group', 'home removed']],
+  ])(
+    'kills the login tree outright when setup exits mid-sign-in, with the login %s',
+    async (_label, ownGroup, order) => {
+      const before = listeners();
+      const tree = playTree('', ownGroup);
+      const stop = watchStop(tree);
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      const { done, ready } = signInOn(tree);
+      await ready;
+      signalSignIn(before[0], 'exit');
+      // Nothing can wait during 'exit': everything is killed, and seen gone, before the home goes.
+      expect(stop.order).toEqual(order);
+      expect(stop.removed).toEqual([{ treeRunning: false }]);
 
-    await expect(done).rejects.toThrow('setup stopped');
-    expect(listeners()).toEqual(before);
-  });
+      await expect(done).rejects.toThrow('setup stopped');
+      expect(listeners()).toEqual(before);
+    },
+  );
 
   // pnpm waits for Codex, so a wrapper that exits by itself leaves no login;
-  // one killed by a signal may, and setup kills it on the way out.
-  it('kills what a wrapper killed by a signal leaves behind, then removes the home', async () => {
+  // one killed by a signal may. Setup followed its tree, so it still finds the
+  // login and stops it before the failure is reported and the home goes.
+  it.each([
+    ['in the wrapper group', false, 'wrapper'],
+    ['in a group of its own', true, 'other'],
+  ])('stops what a wrapper killed by a signal leaves %s, then removes the home', async (_label, ownGroup, group) => {
     const before = listeners();
-    const tree = playTree('', false);
+    const tree = playTree('setTimeout(() => process.exit(0), 300)', ownGroup);
     const stop = watchStop(tree);
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const { done, ready } = signInOn(tree);
     await ready;
+    // Listings never overlap: the second to return after this began after it.
+    const listed = mockPs.done;
+    await until(() => mockPs.done >= listed + 2);
     const [wrapper, login] = tree.pids();
     process.kill(wrapper, 'SIGKILL');
 
     await expect(done).rejects.toThrow('setup stopped');
-    expect(stop.order).toEqual(['SIGKILL wrapper group', 'home removed']);
-    await until(() => !isRunning(login));
+    expect(isRunning(login)).toBe(false);
+    expect(stop.order).toEqual([`SIGTERM ${group} group`, 'home removed']);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+    expect(stop.reraised).toEqual([]);
+    expect(printed(log, stdout)).toContain("Couldn't complete the Codex sign-in");
     expect(listeners()).toEqual(before);
   });
+
+  // Without a listing, setup can't see a group Codex moved to: it stops what
+  // it knows, then says so and keeps the home rather than claim the tree is gone.
+  it.each([
+    [
+      'is missing',
+      ((file, args, opts, done) => realExecFile(`${file}-missing-4455`, args, opts, done)) satisfies ExecFile,
+      'ps not found',
+    ],
+    [
+      'times out',
+      ((_file, _args, opts, done) =>
+        realExecFile(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], opts, done)) satisfies ExecFile,
+      'ps timed out after 2s',
+    ],
+  ])(
+    'when ps %s, stops the groups it knows, keeps the home and says so',
+    async (_label, run, why) => {
+      const before = listeners();
+      const tree = playTree('', true);
+      const stop = watchStop(tree);
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      mockPs.run = run;
+      const { done, ready } = signInOn(tree);
+      await ready;
+      const [, login] = tree.pids();
+      signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
+
+      await expect(done).rejects.toThrow('setup stopped');
+      // Codex, in the group setup never saw, still runs, and its home stays.
+      expect(stop.order).toEqual(['SIGTERM wrapper group']);
+      expect(isRunning(login)).toBe(true);
+      expect(stop.removed).toEqual([]);
+      expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: true, home: true }]);
+      const out = printed(log, stdout);
+      expect(out).toContain(
+        `Couldn't confirm that the Codex sign-in stopped: setup couldn't list its processes (${why})`,
+      );
+      expect(out).toContain(path.relative(root, tree.home()!));
+      expect(listeners()).toEqual(before);
+    },
+    10_000,
+  );
 });
 
 // #3791: a host without `codex` runs the image's pinned CLI through pnpm dlx

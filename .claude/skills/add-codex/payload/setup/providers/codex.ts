@@ -224,17 +224,191 @@ export async function runCodexLoginAuth(
   // `finally` for returns and throws, the exit hook for process.exit (which
   // skips finally), and the signal hook for Ctrl-C, SIGTERM and a hangup.
   const removeLoginHome = (): void => fs.rmSync(loginHome, { recursive: true, force: true });
-  // The login runs in a session of its own (see runInherit). These are its
-  // process groups while setup owns it; a stop first finds all of them.
-  let groups: number[] = [];
-  let known = false;
-  let login: ChildProcess | undefined;
-  let closed = false;
+  // The login runs in a session of its own (see runInherit); its tree is
+  // followed from the spawn on, so a member its parent leaves is still known.
+  let tree: LoginTree | undefined;
+  let following: NodeJS.Timeout | undefined;
+  let looking = false;
+  // Not once the login exits by itself: it took Codex with it, and what it
+  // leaves (a browser it opened) isn't setup's.
+  let owned = true;
   let stopping: Promise<void> | undefined;
-  let killNow = false;
-  let finished = false;
-  let timer: NodeJS.Timeout | undefined;
-  const signalGroups = (signal: NodeJS.Signals | 0): boolean => {
+  let raise: NodeJS.Signals | undefined;
+  let level: NodeJS.Signals = 'SIGTERM';
+  let known = false;
+  // Whether the whole tree was seen to end; the home goes only then.
+  let ended: boolean | undefined;
+  let cleaned = false;
+  const follow = (): void => {
+    if (looking) return;
+    looking = true;
+    void listProcs().then((procs) => {
+      tree?.add(procs);
+      looking = false;
+    });
+  };
+  const cleanUp = (): void => {
+    if (cleaned) return;
+    cleaned = true;
+    clearInterval(following);
+    if (!tree || !owned || ended) return removeLoginHome();
+    // Something of the login may still run and write to the home: it stays,
+    // and the next sign-in removes it once it's an hour old.
+    const why = tree.failure
+      ? `setup couldn't list its processes (${tree.failure})`
+      : 'part of it was still running after it was killed';
+    p.log.warn(
+      brandBody(
+        `Couldn't confirm that the Codex sign-in stopped: ${why}. Close any Codex sign-in still running. Its sign-in folder stays at ${path.relative(root, loginHome)}; the next Codex sign-in removes it once it's an hour old.`,
+      ),
+    );
+  };
+  // On the way out (process.exit skips finally) nothing can wait: what is left
+  // of the login is killed outright, then looked for once more.
+  const release = (): void => {
+    if (tree && owned && ended === undefined) ended = tree.killAll();
+    cleanUp();
+  };
+  const detach = (): void => {
+    process.off('exit', release);
+    for (const signal of LOGIN_SIGNALS) process.off(signal, onSignal);
+  };
+  const finish = (signal: NodeJS.Signals): void => {
+    detach();
+    cleanUp();
+    process.kill(process.pid, signal);
+  };
+  // No signal reaches the login but this stop. Every group of its tree gets
+  // SIGTERM, then SIGKILL after 3s or on a second signal; it has ended once
+  // nothing but zombies is left. The hooks stay attached until then.
+  async function stopTree(login: LoginTree): Promise<void> {
+    clearInterval(following);
+    // Before any signal: a member orphaned by its parent's exit can't be traced back.
+    login.add(await listProcs());
+    known = true;
+    login.signal(level);
+    const timer = setTimeout(() => {
+      level = 'SIGKILL';
+      login.signal(level);
+    }, STOP_GRACE_MS);
+    // Bounded, in case a member never goes.
+    const end = Date.now() + STOP_GRACE_MS + 1000;
+    let gone = await login.ended(level);
+    while (!gone && Date.now() < end) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      gone = await login.ended(level);
+    }
+    clearTimeout(timer);
+    ended = gone && login.complete;
+  }
+  function onSignal(signal: NodeJS.Signals): void {
+    if (stopping) {
+      // A signal while a killed login's leftovers stop ends setup after them.
+      if (!raise) {
+        raise = signal;
+        return;
+      }
+      // A second signal kills at once, though not before the tree is known:
+      // the kill would orphan members it then can't find.
+      level = 'SIGKILL';
+      if (known) tree?.signal('SIGKILL');
+      return;
+    }
+    raise = signal;
+    if (!tree || !owned) return finish(signal);
+    stopping = stopTree(tree).then(() => finish(signal));
+  }
+  const onSpawn = (child: ChildProcess): void => {
+    if (!child.pid) return;
+    const login = (tree = new LoginTree(child.pid));
+    follow();
+    following = setInterval(follow, FOLLOW_MS);
+    following.unref();
+    child.once('close', (_code, signal) => {
+      clearInterval(following);
+      if (stopping) return;
+      if (!signal) {
+        owned = false;
+        return;
+      }
+      // Killed by a signal, the login may leave Codex behind. That stops
+      // before the failure is reported, or before a signal meanwhile ends setup.
+      stopping = stopTree(login).then(() => {
+        if (raise) finish(raise);
+      });
+    });
+  };
+  process.on('exit', release);
+  for (const signal of LOGIN_SIGNALS) process.on(signal, onSignal);
+  try {
+    await signIn(method, store, root, loginHome, {
+      onSpawn,
+      stop: onSignal,
+      settled: async () => {
+        if (!stopping) return;
+        await stopping;
+        // A stop for a signal ends setup with nothing printed; the exit backs
+        // up the re-raised signal.
+        if (raise) process.exit(1);
+      },
+    });
+  } finally {
+    detach();
+    release();
+  }
+}
+
+type Proc = { pid: number; ppid: number; pgid: number; zombie: boolean };
+
+/**
+ * A login's process tree as seen so far. Each listing adds what descends from
+ * a known member or shares a known group, and drops the groups that emptied.
+ * pnpm 12 runs Codex in a group of its own. A failed listing leaves it
+ * incomplete for good: what it missed can't be found later.
+ */
+class LoginTree {
+  readonly groups = new Set<number>();
+  private readonly pids = new Set<number>();
+  failure: string | undefined;
+
+  constructor(leader: number) {
+    this.groups.add(leader);
+    this.pids.add(leader);
+  }
+
+  get complete(): boolean {
+    return this.failure === undefined;
+  }
+
+  /** Adds a listing (or why there is none); returns the groups it found. */
+  add(listing: Proc[] | string): number[] {
+    if (typeof listing === 'string') {
+      this.failure ??= listing;
+      return [];
+    }
+    const present = new Set(listing.map((proc) => proc.pid));
+    for (const pid of this.pids) if (!present.has(pid)) this.pids.delete(pid);
+    const held = new Set(listing.map((proc) => proc.pgid));
+    for (const group of this.groups) if (!held.has(group)) this.groups.delete(group);
+    const own = listing.find((proc) => proc.pid === process.pid)?.pgid;
+    const found: number[] = [];
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const proc of listing) {
+        if (this.pids.has(proc.pid) || !(this.pids.has(proc.ppid) || this.groups.has(proc.pgid))) continue;
+        this.pids.add(proc.pid);
+        grew = true;
+        if (proc.pgid > 1 && proc.pgid !== own && !this.groups.has(proc.pgid)) {
+          this.groups.add(proc.pgid);
+          found.push(proc.pgid);
+        }
+      }
+    }
+    return found;
+  }
+
+  /** Signals the groups; whether any still holds a member. */
+  signal(signal: NodeJS.Signals | 0, groups: Iterable<number> = this.groups): boolean {
     let alive = false;
     for (const group of groups) {
       try {
@@ -246,104 +420,80 @@ export async function runCodexLoginAuth(
       }
     }
     return alive;
-  };
-  // On the way out what is left of the login is killed outright: nothing can
-  // wait during 'exit'.
-  const release = (): void => {
-    signalGroups('SIGKILL');
-    removeLoginHome();
-  };
-  const detach = (): void => {
-    process.off('exit', release);
-    for (const signal of LOGIN_SIGNALS) process.off(signal, onSignal);
-  };
-  const finish = (signal: NodeJS.Signals): void => {
-    if (finished) return;
-    finished = true;
-    clearTimeout(timer);
-    detach();
-    removeLoginHome();
-    process.kill(process.pid, signal);
-  };
-  // No signal reaches the login but this stop. Every group of its tree gets
-  // SIGTERM, then SIGKILL after 3s or on a second signal, and the home goes
-  // only once all of them are gone. The hooks stay attached until then.
-  async function stopLogin(leader: number, signal: NodeJS.Signals): Promise<void> {
-    // Before any signal: a member orphaned by its parent's exit can't be traced back.
-    groups = await loginGroups(leader);
-    known = true;
-    signalGroups(killNow ? 'SIGKILL' : 'SIGTERM');
-    timer = setTimeout(() => signalGroups('SIGKILL'), STOP_GRACE_MS);
-    // Bounded, in case a member is never reaped.
-    for (const end = Date.now() + STOP_GRACE_MS + 1000; signalGroups(0) && Date.now() < end;) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    finish(signal);
   }
-  function onSignal(signal: NodeJS.Signals): void {
-    if (stopping) {
-      // Not before the tree is known: the kill would orphan members it then can't find.
-      killNow = true;
-      if (known) signalGroups('SIGKILL');
-      return;
-    }
-    if (!login?.pid || closed) return finish(signal);
-    stopping = stopLogin(login.pid, signal);
+
+  /** Whether nothing but zombies is left. Members found late get `signal`. */
+  async ended(signal: NodeJS.Signals): Promise<boolean> {
+    return this.check(this.complete ? await listProcs() : undefined, signal);
   }
-  const onSpawn = (child: ChildProcess): void => {
-    login = child;
-    if (child.pid) groups = [child.pid];
-    child.once('close', (_code, signal) => {
-      closed = true;
-      // A login that exited by itself took Codex with it; what it leaves (a
-      // browser it opened) isn't setup's. One killed by a signal may leave Codex,
-      // which goes on the way out.
-      if (!stopping && !signal) groups = [];
-    });
-  };
-  process.on('exit', release);
-  for (const signal of LOGIN_SIGNALS) process.on(signal, onSignal);
-  try {
-    await signIn(method, store, root, loginHome, { onSpawn, stop: onSignal, stopping: () => stopping });
-  } finally {
-    detach();
-    release();
+
+  /** Kills the whole tree at once; whether it was seen to end within a second. */
+  killAll(): boolean {
+    this.add(listProcsSync());
+    this.signal('SIGKILL');
+    const pause = new Int32Array(new SharedArrayBuffer(4));
+    for (const end = Date.now() + 1000; this.complete; Atomics.wait(pause, 0, 0, 20)) {
+      if (this.check(listProcsSync(), 'SIGKILL')) return this.complete;
+      if (Date.now() >= end) return false;
+    }
+    return false;
+  }
+
+  private check(listing: Proc[] | string | undefined, signal: NodeJS.Signals): boolean {
+    if (listing !== undefined) this.signal(signal, this.add(listing));
+    // Without a listing, a group ends once nothing in it answers a signal.
+    if (listing === undefined || typeof listing === 'string') return !this.signal(0);
+    return !listing.some((proc) => !proc.zombie && this.groups.has(proc.pgid));
   }
 }
 
-/**
- * The process groups in the login's tree: its own, plus any a member moved to
- * (pnpm 12 runs Codex in a group of its own). Read from `ps`; without it, the
- * login's own group.
- */
-function loginGroups(leader: number): Promise<number[]> {
+const PS_ARGS = ['-A', '-o', 'pid=,ppid=,pgid=,stat='];
+
+/** Every process, from `ps`, or why they couldn't be listed. */
+function listProcs(): Promise<Proc[] | string> {
   return new Promise((resolve) => {
-    execFile('ps', ['-A', '-o', 'pid=,ppid=,pgid='], { timeout: 2000 }, (error, stdout) => {
-      const rows = error
-        ? []
-        : String(stdout)
-            .trim()
-            .split('\n')
-            .map((row) => row.trim().split(/\s+/).map(Number));
-      const own = rows.find(([pid]) => pid === process.pid)?.[2];
-      const tree = new Set([leader]);
-      const found = new Set([leader]);
-      for (let grew = true; grew;) {
-        grew = false;
-        for (const [pid, ppid, pgid] of rows) {
-          if (tree.has(pid) || !tree.has(ppid)) continue;
-          tree.add(pid);
-          if (pgid > 1 && pgid !== own) found.add(pgid);
-          grew = true;
-        }
-      }
-      resolve([...found]);
-    });
+    execFile('ps', PS_ARGS, { timeout: PS_TIMEOUT_MS }, (error, stdout) =>
+      resolve(error ? psFailure(error) : parsePs(String(stdout))),
+    );
   });
+}
+
+function listProcsSync(): Proc[] | string {
+  const ps = spawnSync('ps', PS_ARGS, {
+    encoding: 'utf-8',
+    timeout: PS_TIMEOUT_MS,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  if (ps.error) return psFailure(ps.error);
+  return ps.status === 0 ? parsePs(ps.stdout) : `ps exited with ${ps.status ?? ps.signal}`;
+}
+
+function psFailure(err: Error & { code?: unknown; killed?: boolean }): string {
+  if (err.killed || err.code === 'ETIMEDOUT') return `ps timed out after ${PS_TIMEOUT_MS / 1000}s`;
+  if (err.code === 'ENOENT') return 'ps not found';
+  return `ps: ${err.message.split('\n')[0]}`;
+}
+
+function parsePs(stdout: string): Proc[] | string {
+  const procs = stdout
+    .trim()
+    .split('\n')
+    .map((row) => row.trim().split(/\s+/))
+    .map(([pid, ppid, pgid, stat = '']) => ({
+      pid: Number(pid),
+      ppid: Number(ppid),
+      pgid: Number(pgid),
+      zombie: stat.startsWith('Z'),
+    }));
+  // A listing without setup in it, or with a row it can't read, isn't one to go by.
+  const readable = procs.every((proc) => [proc.pid, proc.ppid, proc.pgid].every(Number.isInteger));
+  return readable && procs.some((proc) => proc.pid === process.pid) ? procs : 'ps gave an unreadable listing';
 }
 
 const LOGIN_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
 const STOP_GRACE_MS = 3000;
+const FOLLOW_MS = 500;
+const PS_TIMEOUT_MS = 2000;
 const STALE_LOGIN_MS = 60 * 60 * 1000;
 
 /**
@@ -376,7 +526,7 @@ async function signIn(
   login: {
     onSpawn: (child: ChildProcess) => void;
     stop: (signal: NodeJS.Signals) => void;
-    stopping: () => Promise<void> | undefined;
+    settled: () => Promise<void>;
   },
 ): Promise<void> {
   const cli = resolveCodexCli(root, loginHome);
@@ -412,13 +562,8 @@ async function signIn(
     env: { CODEX_HOME: loginHome },
     onSpawn: login.onSpawn,
   });
-  // A stop under way ends setup once the login's tree is gone, with nothing
-  // printed. The exit backs up the re-raised signal.
-  const stopped = login.stopping();
-  if (stopped) {
-    await stopped;
-    process.exit(1);
-  }
+  // Until the login's whole tree is gone: a stop for a signal then ends setup.
+  await login.settled();
   const durationMs = Date.now() - start;
   console.log();
 
