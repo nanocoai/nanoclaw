@@ -500,6 +500,25 @@ describe('runCodexLoginAuth', () => {
     expect(listeners()).toEqual(before);
   }, 10_000);
 
+  it('keeps to the 3-second kill when the wall clock jumps ahead during the stop', async () => {
+    const before = listeners();
+    const tree = playTree('', false);
+    const stop = watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { done, ready } = signInOn(tree);
+    await ready;
+    const realNow = Date.now.bind(Date);
+    const start = realNow();
+    // A minute ahead, from half a second into the stop.
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + (realNow() - start > 500 ? 60_000 : 0));
+    signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGKILL wrapper group', 'home removed']);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+    expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false, home: false }]);
+  });
+
   it('kills the whole login tree on a second signal, then cleans up', async () => {
     const before = listeners();
     const tree = playTree('', false);
@@ -821,6 +840,26 @@ describe('runCodexLoginAuth', () => {
     expect(stop.removed).toEqual([{ treeRunning: false }]);
   });
 
+  // procps prints only the first 128 KiB of a command line and environment.
+  it('finds a login with a large environment once its wrapper is killed', async () => {
+    const big = ['NANOCLAW_BIG1', 'NANOCLAW_BIG2', 'NANOCLAW_BIG3'];
+    for (const name of big) process.env[name] = 'x'.repeat(64 * 1024);
+    try {
+      const tree = playTree('setTimeout(() => process.exit(0), 300)', true);
+      const stop = watchStop(tree);
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      const { done, ready } = signInOn(tree);
+      await ready;
+      process.kill(tree.pids()[0], 'SIGKILL');
+
+      await expect(done).rejects.toThrow('setup stopped');
+      expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGTERM other group', 'home removed']);
+      expect(stop.removed).toEqual([{ treeRunning: false }]);
+    } finally {
+      for (const name of big) delete process.env[name];
+    }
+  });
+
   it('finds a login whose environment holds U+2028 or a carriage return', async () => {
     const before = listeners();
     const tree = playTree('setTimeout(() => process.exit(0), 300)', true, { oddEnv: true });
@@ -1085,6 +1124,15 @@ describe('runCodexLoginAuth', () => {
       ((file, args, opts) => realSpawn(`${file}-missing-4455`, args, opts)) satisfies SpawnPs,
       'ps not found',
       ['SIGTERM wrapper group'],
+    ],
+    [
+      "can't start",
+      (() => {
+        throw Object.assign(new Error('spawn ps ENOMEM'), { code: 'ENOMEM' });
+      }) satisfies SpawnPs,
+      'ps: spawn ps ENOMEM',
+      // Another start may work, so the stop keeps trying, to the 3 s kill.
+      ['SIGTERM wrapper group', 'SIGKILL wrapper group'],
     ],
     [
       'times out',

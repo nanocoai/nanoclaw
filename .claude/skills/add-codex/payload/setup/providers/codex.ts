@@ -287,11 +287,12 @@ export async function runCodexLoginAuth(
       login.signal(level);
     }, STOP_GRACE_MS);
     // Bounded, in case a member never goes.
-    const end = Date.now() + STOP_GRACE_MS + 1000;
+    // A monotonic clock: a step in the wall clock mustn't cut the grace short.
+    const end = performance.now() + STOP_GRACE_MS + 1000;
     let live = await login.look(() => level);
     // Without a listing nothing can be confirmed. With no ps at all, once no
     // group answers, waiting can't help; another failure may pass.
-    while (live !== false && Date.now() < end && (live || login.signal(0) || login.failure !== 'ps not found')) {
+    while (live !== false && performance.now() < end && (live || login.signal(0) || login.failure !== 'ps not found')) {
       await new Promise((resolve) => setTimeout(resolve, 50));
       live = await login.look(() => level);
     }
@@ -407,13 +408,13 @@ class LoginTree {
 
   /** Kills the whole tree at once; whether it was seen to end. Bounded: nothing can wait during 'exit'. */
   killAll(): boolean {
-    const end = Date.now() + 1500;
+    const end = performance.now() + 1500;
     // Listed first, while a member without the login id is still linked to
     // its parent; in half the time, so another listing can follow a slow one.
     this.take(listProcsSync(750));
     this.signal('SIGKILL');
     const pause = new Int32Array(new SharedArrayBuffer(4));
-    for (let left = end - Date.now(); left > 0; left = end - Date.now()) {
+    for (let left = Math.ceil(end - performance.now()); left > 0; left = Math.ceil(end - performance.now())) {
       if (this.take(listProcsSync(Math.min(left, PS_TIMEOUT_MS)), () => 'SIGKILL') === false) return !this.blind;
       Atomics.wait(pause, 0, 0, 20);
     }
@@ -486,7 +487,14 @@ const PS_BUFFER = 64 * 1024 * 1024;
  */
 function listProcs(): Promise<Proc[] | string> {
   return new Promise((resolve) => {
-    const ps = spawn('ps', PS_ARGS, { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    let ps: ChildProcess;
+    try {
+      ps = spawn('ps', PS_ARGS, { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch (err) {
+      // ENOMEM and the like throw rather than emit 'error'.
+      resolve(psFailure(err as Error));
+      return;
+    }
     let out = '';
     // Settled here, not on 'close': whatever still holds the pipe would delay it.
     const stop = (reason: string) => {
@@ -710,7 +718,9 @@ function runInherit(
     // then reach setup alone, which stops the login.
     const child = spawn(cmd, args, {
       stdio: 'inherit',
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
+      // Setup's own variables first (values still win last): procps prints
+      // only the first 128 KiB of a command line and its environment.
+      env: opts.env ? { ...opts.env, ...process.env, ...opts.env } : process.env,
       detached: true,
     });
     opts.onSpawn?.(child);
