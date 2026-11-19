@@ -411,11 +411,23 @@ describe('runCodexLoginAuth', () => {
     expect(fs.readdirSync(base)).toEqual([]);
   });
 
-  /** A home a sign-in left behind; `old` puts it two hours back. */
-  function leftHome(name: string, old: boolean): string {
+  /**
+   * On Linux, a home's record of its boot and setup's start (see MADE_FILE):
+   * here a start no process on the host follows, so its own processes that
+   * Linux won't show (the user's systemd manager) don't keep the home.
+   */
+  function madeNow(): Record<string, string> {
+    if (process.platform !== 'linux') return {};
+    const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf-8').trim();
+    return { '.nanoclaw-made': `${boot} ${Number.MAX_SAFE_INTEGER}\n` };
+  }
+
+  /** A home a sign-in left behind, with `files` besides auth.json; `old` puts it two hours back. */
+  function leftHome(name: string, old: boolean, files: Record<string, string> = {}): string {
     const dir = path.join(root, 'data', 'codex-login', name);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'auth.json'), '{}');
+    for (const [file, text] of Object.entries({ 'auth.json': '{}', ...files }))
+      fs.writeFileSync(path.join(dir, file), text);
     const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
     if (old) fs.utimesSync(dir, twoHoursAgo, twoHoursAgo);
     return dir;
@@ -424,8 +436,8 @@ describe('runCodexLoginAuth', () => {
   it('removes a home that a killed sign-in left over an hour ago, and keeps a newer one', async () => {
     const stale = `login-${'a'.repeat(16)}`;
     const recent = `login-${'b'.repeat(16)}`;
-    leftHome(stale, true);
-    leftHome(recent, false);
+    leftHome(stale, true, madeNow());
+    leftHome(recent, false, madeNow());
     // Not named for a login id: not setup's to remove.
     leftHome('notes', true);
     playLogin();
@@ -439,8 +451,8 @@ describe('runCodexLoginAuth', () => {
   // killed outright while Codex ran on: its age doesn't say the login ended.
   it('keeps an old home while a process carries its login id, and removes it once that ends', async () => {
     const [liveId, otherId] = ['c'.repeat(16), 'd'.repeat(16)];
-    const live = leftHome(`login-${liveId}`, true);
-    const other = leftHome(`login-${otherId}`, true);
+    const live = leftHome(`login-${liveId}`, true, madeNow());
+    const other = leftHome(`login-${otherId}`, true, madeNow());
     const holder = (env: NodeJS.ProcessEnv) =>
       realSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], {
         stdio: 'ignore',
@@ -468,7 +480,7 @@ describe('runCodexLoginAuth', () => {
 
   it('keeps an old home when one listing misses the process carrying its id', async () => {
     const id = 'f'.repeat(16);
-    const home = leftHome(`login-${id}`, true);
+    const home = leftHome(`login-${id}`, true, madeNow());
     const owner = realSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], {
       stdio: 'ignore',
       env: { ...process.env, NANOCLAW_CODEX_LOGIN: id },
@@ -499,8 +511,123 @@ describe('runCodexLoginAuth', () => {
   });
 
   it("keeps an old home when ps can't list processes", async () => {
-    const old = leftHome(`login-${'e'.repeat(16)}`, true);
+    const old = leftHome(`login-${'e'.repeat(16)}`, true, madeNow());
     mockPs.sync = (_file, args, opts) => realSpawnSync('ps-missing-4455', args as string[], opts as object);
+    playLogin();
+
+    await runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
+
+    expect(fs.existsSync(path.join(old, 'auth.json'))).toBe(true);
+  });
+
+  /**
+   * Plays Linux's /proc for the sweep: `other`'s environment read fails with
+   * `code`, and it started at `ticks` (undefined: unknown). Every other
+   * environment reads as one without an id. `boot` is this boot's id.
+   */
+  function fakeProc(other: number, code: string, ticks: number | undefined, boot: string | undefined): () => void {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const read = fs.readFileSync;
+    Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((file: unknown, ...rest: unknown[]) => {
+      if (typeof file !== 'string' || !file.startsWith('/proc/'))
+        return (read as (...a: unknown[]) => unknown)(file, ...rest);
+      if (file === '/proc/sys/kernel/random/boot_id' && boot) return `${boot}\n`;
+      // Setup's own start, for the home it makes.
+      if (file === '/proc/self/stat') return '1 (node) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 9000 0 0';
+      if (file === `/proc/${other}/environ`) throw Object.assign(new Error(`${code}: ${file}`), { code });
+      // A command name with a space and a ')' in it.
+      if (file === `/proc/${other}/stat` && ticks !== undefined) {
+        return `${other} (a) b) S 1 1 1 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 ${ticks} 0 0`;
+      }
+      if (file.endsWith('/environ')) return '';
+      throw Object.assign(new Error(`ENOENT: ${file}`), { code: 'ENOENT' });
+    }) as typeof fs.readFileSync);
+    return () => Object.defineProperty(process, 'platform', platform);
+  }
+
+  // On Linux the sweep reads each listed process's environment from /proc. One
+  // it can't read (the user's systemd manager, say) may be a login's, unless it
+  // started before the setup that made that login's home; one that has exited
+  // isn't, nor is one from an earlier boot. The home records its boot and that
+  // setup's start (5000 here) in clock ticks since boot.
+  const BOOT = '0b0e0f00-0000-4000-8000-000000000001';
+  it.each([
+    { code: 'EACCES', ticks: 5001, kept: true },
+    { code: 'EPERM', ticks: 5001, kept: true },
+    { code: 'EACCES', ticks: 5000, kept: true },
+    { code: 'EACCES', ticks: 4999, kept: false },
+    { code: 'EACCES', ticks: undefined, kept: true },
+    { code: 'EACCES', ticks: 5001, made: 'none', kept: true },
+    { code: 'EACCES', ticks: 5001, made: 'earlier boot', kept: false },
+    // A record that isn't one: no boot it names can clear the home.
+    { code: 'EACCES', ticks: 5001, made: 'malformed', kept: true },
+    { code: 'EACCES', ticks: 5001, boot: 'unknown', kept: true },
+    // Nor can a boot id that isn't one.
+    { code: 'EACCES', ticks: 5001, boot: 'malformed', kept: true },
+    // Linux won't show a zombie's environment either, and it uses nothing.
+    { code: 'EACCES', ticks: 5001, zombie: true, kept: false },
+    { code: 'ENOENT', ticks: 5001, kept: false },
+    { code: 'ESRCH', ticks: 5001, kept: false },
+  ])(
+    'on Linux, a process whose environment read fails with $code, started at $ticks: kept $kept ($made $boot $zombie)',
+    async ({ code, ticks, made = 'this boot', boot = 'known', zombie = false, kept }) => {
+      const record: Record<string, string> = {
+        'this boot': `${BOOT} 5000\n`,
+        'earlier boot': '0b0e0f00-0000-4000-8000-000000000002 5000\n',
+        malformed: 'unknown 5000\n',
+      };
+      const boots: Record<string, string | undefined> = { known: BOOT, malformed: 'unknown' };
+      const old = leftHome(`login-${'1'.repeat(16)}`, true, made in record ? { '.nanoclaw-made': record[made] } : {});
+      const other = realSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'ignore' });
+      let restore = () => {};
+      try {
+        await until(() => isRunning(other.pid!));
+        restore = fakeProc(other.pid!, code, ticks, boots[boot]);
+        if (zombie) {
+          mockPs.sync = (file, args, opts) => {
+            const ps = realSpawnSync(file as string, args as string[], { ...(opts as object), encoding: 'utf-8' });
+            ps.stdout = ps.stdout.replace(new RegExp(`^(\\s*${other.pid}\\s+\\d+\\s+\\d+\\s+)\\S+`, 'm'), '$1Z');
+            return ps;
+          };
+        }
+        playLogin();
+
+        await runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
+      } finally {
+        restore();
+        other.kill('SIGKILL');
+      }
+      expect(fs.existsSync(old)).toBe(kept);
+    },
+  );
+
+  it("on Linux, records in a new home this boot's id and when setup started", async () => {
+    let made: string | undefined;
+    mockSpawn.mockImplementation((...args: unknown[]) => {
+      const home = (args[2] as { env: NodeJS.ProcessEnv }).env.CODEX_HOME!;
+      made = fs.readFileSync(path.join(home, '.nanoclaw-made'), 'utf-8');
+      fs.writeFileSync(path.join(home, 'auth.json'), '{"tokens":{}}');
+      const child = new EventEmitter();
+      setImmediate(() => child.emit('close', 0));
+      return child;
+    });
+    const restore = fakeProc(-1, 'EACCES', undefined, BOOT);
+    try {
+      await runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
+    } finally {
+      restore();
+    }
+    expect(made).toBe(`${BOOT} 9000\n`);
+  });
+
+  it("leaves alone an old home another user owns: setup can't list that user's processes", async () => {
+    const old = leftHome(`login-${'2'.repeat(16)}`, true, madeNow());
+    const stat = fs.statSync;
+    vi.spyOn(fs, 'statSync').mockImplementation(((file: fs.PathLike, ...rest: unknown[]) => {
+      const real = (stat as (...a: unknown[]) => fs.Stats)(file, ...rest);
+      return file === old ? Object.assign(real, { uid: real.uid + 1 }) : real;
+    }) as typeof fs.statSync);
     playLogin();
 
     await runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
