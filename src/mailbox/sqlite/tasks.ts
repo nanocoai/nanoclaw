@@ -83,6 +83,7 @@ export interface TaskUpdate {
   script?: string | null;
   recurrence?: string | null;
   processAfter?: string;
+  fields?: Record<string, unknown>;
 }
 
 // Merges content JSON in-place so callers can update prompt/script without
@@ -105,13 +106,15 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
 
   const setProcessAfter = update.processAfter !== undefined;
   const setRecurrence = update.recurrence !== undefined;
-  const mergeContent = update.prompt !== undefined || update.script !== undefined;
+  const mergeContent =
+    update.prompt !== undefined || update.script !== undefined || Object.keys(update.fields ?? {}).length > 0;
 
   const tx = db.transaction(() => {
     for (const row of rows) {
       let content = row.content;
       if (mergeContent) {
         const parsed = JSON.parse(row.content) as Record<string, unknown>;
+        Object.assign(parsed, update.fields);
         if (update.prompt !== undefined) parsed.prompt = update.prompt;
         if (update.script !== undefined) parsed.script = update.script;
         content = JSON.stringify(parsed);

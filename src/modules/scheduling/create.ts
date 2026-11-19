@@ -28,6 +28,8 @@ export interface PreparedScheduledTask {
   recurrence: string | null;
   script: string | null;
   processAfter: string;
+  /** Registered extra fields (see task-fields.ts), stored in the content envelope. */
+  fields?: Record<string, unknown>;
 }
 
 export type ScheduledTaskRow = TaskRecord;
@@ -108,6 +110,7 @@ export function prepareScheduledTask(input: {
   script?: string | null;
   dangerouslyOverrideRecurrenceLimit?: boolean;
   timezone?: string;
+  fields?: Record<string, unknown>;
 }): PreparedScheduledTask {
   if (!input.prompt) throw new Error('--prompt is required');
   const recurrence = input.recurrence ?? null;
@@ -125,7 +128,7 @@ export function prepareScheduledTask(input: {
     processAfter = parseProcessAfter(input.processAfter, tz);
   }
 
-  return { name: input.name, prompt: input.prompt, recurrence, script, processAfter };
+  return { name: input.name, prompt: input.prompt, recurrence, script, processAfter, fields: input.fields };
 }
 
 /** Persist a prepared task through NanoClaw's single task/session representation. */
@@ -144,6 +147,7 @@ export async function createScheduledTask(
       processAfter: task.processAfter,
       recurrence: task.recurrence,
       content: JSON.stringify({
+        ...task.fields,
         prompt: task.prompt,
         script: task.script,
         originSessionId: options?.originSessionId ?? null,
