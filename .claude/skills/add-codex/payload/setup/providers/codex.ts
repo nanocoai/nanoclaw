@@ -224,36 +224,23 @@ export async function runCodexLoginAuth(
   // `finally` for returns and throws, the exit hook for process.exit (which
   // skips finally), and the signal hook for Ctrl-C, SIGTERM and a hangup.
   const removeLoginHome = (): void => fs.rmSync(loginHome, { recursive: true, force: true });
-  // The login runs in a session of its own (see runInherit); its tree is
-  // followed from the spawn on, so a member its parent leaves is still known.
+  // The login runs in a session of its own (see runInherit).
   let tree: LoginTree | undefined;
-  let following: NodeJS.Timeout | undefined;
-  let looking = false;
-  // Not once the login exits by itself: it took Codex with it, and what it
-  // leaves (a browser it opened) isn't setup's.
+  // Not once the login has signed in: what it leaves (a browser it opened)
+  // isn't setup's.
   let owned = true;
   let stopping: Promise<void> | undefined;
   let raise: NodeJS.Signals | undefined;
   let level: NodeJS.Signals = 'SIGTERM';
-  let known = false;
   // Whether the whole tree was seen to end; the home goes only then.
   let ended: boolean | undefined;
   let cleaned = false;
-  const follow = (): void => {
-    if (looking) return;
-    looking = true;
-    void listProcs().then((procs) => {
-      tree?.add(procs);
-      looking = false;
-    });
-  };
   const cleanUp = (): void => {
     if (cleaned) return;
     cleaned = true;
-    clearInterval(following);
     if (!tree || !owned || ended) return removeLoginHome();
-    // Something of the login may still run and write to the home: it stays,
-    // and the next sign-in removes it once it's an hour old.
+    // Part of the login may still run and write to the home: it stays, and
+    // the next sign-in removes it once it's an hour old.
     const why = tree.failure
       ? `setup couldn't list its processes (${tree.failure})`
       : 'part of it was still running after it was killed';
@@ -279,13 +266,11 @@ export async function runCodexLoginAuth(
     process.kill(process.pid, signal);
   };
   // No signal reaches the login but this stop. Every group of its tree gets
-  // SIGTERM, then SIGKILL after 3s or on a second signal; it has ended once
-  // nothing but zombies is left. The hooks stay attached until then.
+  // SIGTERM, then SIGKILL after 3s or on a second signal; it has ended once a
+  // listing shows none of it. The hooks stay attached until then.
   async function stopTree(login: LoginTree): Promise<void> {
-    clearInterval(following);
-    // Before any signal: a member orphaned by its parent's exit can't be traced back.
-    login.add(await listProcs());
-    known = true;
+    // Before any signal, while a member without CODEX_HOME is still linked to its parent.
+    await login.look();
     login.signal(level);
     const timer = setTimeout(() => {
       level = 'SIGKILL';
@@ -293,25 +278,25 @@ export async function runCodexLoginAuth(
     }, STOP_GRACE_MS);
     // Bounded, in case a member never goes.
     const end = Date.now() + STOP_GRACE_MS + 1000;
-    let gone = await login.ended(level);
-    while (!gone && Date.now() < end) {
+    let live = await login.look(() => level);
+    // Without a listing nothing can be confirmed; once no group answers, waiting can't help.
+    while (live !== false && Date.now() < end && (live || login.signal(0))) {
       await new Promise((resolve) => setTimeout(resolve, 50));
-      gone = await login.ended(level);
+      live = await login.look(() => level);
     }
     clearTimeout(timer);
-    ended = gone && login.complete;
+    ended = live === false;
   }
   function onSignal(signal: NodeJS.Signals): void {
     if (stopping) {
-      // A signal while a killed login's leftovers stop ends setup after them.
+      // A signal while a failed login's leftovers stop ends setup after them.
       if (!raise) {
         raise = signal;
         return;
       }
-      // A second signal kills at once, though not before the tree is known:
-      // the kill would orphan members it then can't find.
+      // A second signal kills at once.
       level = 'SIGKILL';
-      if (known) tree?.signal('SIGKILL');
+      tree?.signal('SIGKILL');
       return;
     }
     raise = signal;
@@ -320,18 +305,15 @@ export async function runCodexLoginAuth(
   }
   const onSpawn = (child: ChildProcess): void => {
     if (!child.pid) return;
-    const login = (tree = new LoginTree(child.pid));
-    follow();
-    following = setInterval(follow, FOLLOW_MS);
-    following.unref();
-    child.once('close', (_code, signal) => {
-      clearInterval(following);
+    const login = (tree = new LoginTree(child.pid, loginHome));
+    child.once('close', (code) => {
       if (stopping) return;
-      if (!signal) {
+      // Signed in, the login took Codex with it.
+      if (code === 0 && fs.existsSync(path.join(loginHome, 'auth.json'))) {
         owned = false;
         return;
       }
-      // Killed by a signal, the login may leave Codex behind. That stops
+      // Killed, or ended without signing in: Codex may be left, so it stops
       // before the failure is reported, or before a signal meanwhile ends setup.
       stopping = stopTree(login).then(() => {
         if (raise) finish(raise);
@@ -358,53 +340,30 @@ export async function runCodexLoginAuth(
   }
 }
 
-type Proc = { pid: number; ppid: number; pgid: number; zombie: boolean };
+type Proc = { pid: number; ppid: number; pgid: number; text: string };
 
 /**
- * A login's process tree as seen so far. Each listing adds what descends from
- * a known member or shares a known group, and drops the groups that emptied.
- * pnpm 12 runs Codex in a group of its own. A failed listing leaves it
- * incomplete for good: what it missed can't be found later.
+ * The login's process tree. A listing finds its processes by the CODEX_HOME
+ * each inherits, whatever became of its parent; one without it (macOS hides a
+ * system binary's environment, such as pnpm 12's `sh`) only by descent, while
+ * its parent lives. Nothing without CODEX_HOME writes to the home. Their groups
+ * are the ones signalled: pnpm 12 runs Codex in a group of its own. A zombie
+ * shows no environment, so it isn't one of them.
  */
 class LoginTree {
-  readonly groups = new Set<number>();
-  private readonly pids = new Set<number>();
+  // As of the last listing; the login's own until there is one.
+  private groups: number[];
+  private readonly marker: string;
   failure: string | undefined;
 
-  constructor(leader: number) {
-    this.groups.add(leader);
-    this.pids.add(leader);
+  constructor(leader: number, home: string) {
+    this.groups = [leader];
+    this.marker = `CODEX_HOME=${home}`;
   }
 
-  get complete(): boolean {
-    return this.failure === undefined;
-  }
-
-  /** Adds a listing (or why there is none); returns the groups it found. */
-  add(listing: Proc[] | string): number[] {
-    if (typeof listing === 'string') {
-      this.failure ??= listing;
-      return [];
-    }
-    const present = new Set(listing.map((proc) => proc.pid));
-    for (const pid of this.pids) if (!present.has(pid)) this.pids.delete(pid);
-    const held = new Set(listing.map((proc) => proc.pgid));
-    for (const group of this.groups) if (!held.has(group)) this.groups.delete(group);
-    const own = listing.find((proc) => proc.pid === process.pid)?.pgid;
-    const found: number[] = [];
-    for (let grew = true; grew;) {
-      grew = false;
-      for (const proc of listing) {
-        if (this.pids.has(proc.pid) || !(this.pids.has(proc.ppid) || this.groups.has(proc.pgid))) continue;
-        this.pids.add(proc.pid);
-        grew = true;
-        if (proc.pgid > 1 && proc.pgid !== own && !this.groups.has(proc.pgid)) {
-          this.groups.add(proc.pgid);
-          found.push(proc.pgid);
-        }
-      }
-    }
-    return found;
+  /** Lists the tree; whether any of it runs (undefined without a listing). New groups get `signal()`. */
+  async look(signal?: () => NodeJS.Signals): Promise<boolean | undefined> {
+    return this.take(await listProcs(), signal);
   }
 
   /** Signals the groups; whether any still holds a member. */
@@ -422,46 +381,75 @@ class LoginTree {
     return alive;
   }
 
-  /** Whether nothing but zombies is left. Members found late get `signal`. */
-  async ended(signal: NodeJS.Signals): Promise<boolean> {
-    return this.check(this.complete ? await listProcs() : undefined, signal);
-  }
-
-  /** Kills the whole tree at once; whether it was seen to end within a second. */
+  /** Kills the whole tree at once; whether it was seen to end. Bounded: nothing can wait during 'exit'. */
   killAll(): boolean {
-    this.add(listProcsSync());
+    const end = Date.now() + 1500;
     this.signal('SIGKILL');
     const pause = new Int32Array(new SharedArrayBuffer(4));
-    for (const end = Date.now() + 1000; this.complete; Atomics.wait(pause, 0, 0, 20)) {
-      if (this.check(listProcsSync(), 'SIGKILL')) return this.complete;
-      if (Date.now() >= end) return false;
+    for (let left = end - Date.now(); left > 0; left = end - Date.now()) {
+      if (this.take(listProcsSync(Math.min(left, PS_TIMEOUT_MS)), () => 'SIGKILL') === false) return true;
+      Atomics.wait(pause, 0, 0, 20);
     }
     return false;
   }
 
-  private check(listing: Proc[] | string | undefined, signal: NodeJS.Signals): boolean {
-    if (listing !== undefined) this.signal(signal, this.add(listing));
-    // Without a listing, a group ends once nothing in it answers a signal.
-    if (listing === undefined || typeof listing === 'string') return !this.signal(0);
-    return !listing.some((proc) => !proc.zombie && this.groups.has(proc.pgid));
+  private take(listing: Proc[] | string, signal?: () => NodeJS.Signals): boolean | undefined {
+    if (typeof listing === 'string') {
+      this.failure = listing;
+      return undefined;
+    }
+    this.failure = undefined;
+    const own = listing.find((proc) => proc.pid === process.pid)?.pgid;
+    const tree = new Set<number>();
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const proc of listing) {
+        if (tree.has(proc.pid) || !(tree.has(proc.ppid) || this.marks(proc))) continue;
+        tree.add(proc.pid);
+        grew = true;
+      }
+    }
+    const members = listing.filter((proc) => tree.has(proc.pid));
+    const groups = [...new Set(members.map((proc) => proc.pgid))].filter((group) => group > 1 && group !== own);
+    const found = groups.filter((group) => !this.groups.includes(group));
+    this.groups = groups;
+    if (signal) this.signal(signal(), found);
+    return members.length > 0;
+  }
+
+  private marks(proc: Proc): boolean {
+    const at = proc.text.indexOf(this.marker);
+    if (at < 0) return false;
+    const next = proc.text[at + this.marker.length];
+    return next === undefined || next === ' ';
   }
 }
 
-const PS_ARGS = ['-A', '-o', 'pid=,ppid=,pgid=,stat='];
+// Each row with its command line and, for the user's own processes, its environment.
+const PS_ARGS = [
+  '-U',
+  String(process.getuid?.() ?? 0),
+  '-ww',
+  ...(process.platform === 'darwin'
+    ? ['-E', '-o', 'pid=,ppid=,pgid=,command=']
+    : ['-o', 'pid=,ppid=,pgid=,args=', 'e']),
+];
+const PS_BUFFER = 64 * 1024 * 1024;
 
-/** Every process, from `ps`, or why they couldn't be listed. */
+/** The user's processes, from `ps`, or why they couldn't be listed. */
 function listProcs(): Promise<Proc[] | string> {
   return new Promise((resolve) => {
-    execFile('ps', PS_ARGS, { timeout: PS_TIMEOUT_MS }, (error, stdout) =>
+    execFile('ps', PS_ARGS, { timeout: PS_TIMEOUT_MS, maxBuffer: PS_BUFFER }, (error, stdout) =>
       resolve(error ? psFailure(error) : parsePs(String(stdout))),
     );
   });
 }
 
-function listProcsSync(): Proc[] | string {
+function listProcsSync(timeout: number): Proc[] | string {
   const ps = spawnSync('ps', PS_ARGS, {
     encoding: 'utf-8',
-    timeout: PS_TIMEOUT_MS,
+    timeout,
+    maxBuffer: PS_BUFFER,
     stdio: ['ignore', 'pipe', 'ignore'],
   });
   if (ps.error) return psFailure(ps.error);
@@ -469,7 +457,7 @@ function listProcsSync(): Proc[] | string {
 }
 
 function psFailure(err: Error & { code?: unknown; killed?: boolean }): string {
-  if (err.killed || err.code === 'ETIMEDOUT') return `ps timed out after ${PS_TIMEOUT_MS / 1000}s`;
+  if (err.killed || err.code === 'ETIMEDOUT') return 'ps timed out';
   if (err.code === 'ENOENT') return 'ps not found';
   return `ps: ${err.message.split('\n')[0]}`;
 }
@@ -478,21 +466,20 @@ function parsePs(stdout: string): Proc[] | string {
   const procs = stdout
     .trim()
     .split('\n')
-    .map((row) => row.trim().split(/\s+/))
-    .map(([pid, ppid, pgid, stat = '']) => ({
-      pid: Number(pid),
-      ppid: Number(ppid),
-      pgid: Number(pgid),
-      zombie: stat.startsWith('Z'),
+    .map((row) => row.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s?(.*)$/))
+    .filter((m) => m !== null)
+    .map((m) => ({
+      pid: Number(m[1]),
+      ppid: Number(m[2]),
+      pgid: Number(m[3]),
+      text: m[4],
     }));
-  // A listing without setup in it, or with a row it can't read, isn't one to go by.
-  const readable = procs.every((proc) => [proc.pid, proc.ppid, proc.pgid].every(Number.isInteger));
-  return readable && procs.some((proc) => proc.pid === process.pid) ? procs : 'ps gave an unreadable listing';
+  // A listing without setup in it isn't one to go by.
+  return procs.some((proc) => proc.pid === process.pid) ? procs : 'ps gave an unreadable listing';
 }
 
 const LOGIN_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
 const STOP_GRACE_MS = 3000;
-const FOLLOW_MS = 500;
 const PS_TIMEOUT_MS = 2000;
 const STALE_LOGIN_MS = 60 * 60 * 1000;
 
