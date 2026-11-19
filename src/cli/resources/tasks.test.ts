@@ -36,6 +36,7 @@ import { dispatch } from '../dispatch.js';
 import { formatTasksTable } from '../format-tasks.js';
 import type { CallerContext } from '../frame.js';
 import { getAgentMailbox } from '../../mailbox/index.js';
+import { registerReconcileEnqueue } from '../../reconcile-feeds.js';
 import './tasks.js';
 import '../commands/index.js'; // registers tasks-help for the help-topic test
 
@@ -388,6 +389,42 @@ describe('tasks CLI resource', () => {
     const runRow = pending.find((p) => p.id === fired.row_id);
     expect(runRow?.recurrence).toBeNull(); // never re-armed into a phantom series
     expect(new Date(runRow!.process_after).getTime()).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('create, run and a moved due time ask for a prompt reconcile of the task session', async () => {
+    const enqueued: string[] = [];
+    registerReconcileEnqueue((sessionId) => enqueued.push(sessionId));
+    try {
+      const created = await dispatch(
+        {
+          id: 'c',
+          command: 'tasks-create',
+          args: { prompt: 'x', name: 'prompt-start', process_after: '2999-01-01T00:00:00Z' },
+        },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const { series_id, session_id } = created.data as { series_id: string; session_id: string };
+      expect(enqueued).toEqual([session_id]);
+
+      await dispatch({ id: 'r', command: 'tasks-run', args: { id: series_id } }, agentCtx('ag-1', 'chat-1'));
+      expect(enqueued).toEqual([session_id, session_id]);
+
+      await dispatch(
+        { id: 'u', command: 'tasks-update', args: { id: series_id, prompt: 'y' } },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(enqueued).toHaveLength(2); // prompt-only edit: due time unchanged
+
+      await dispatch(
+        { id: 'u2', command: 'tasks-update', args: { id: series_id, process_after: '2998-01-01T00:00:00Z' } },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(enqueued).toEqual([session_id, session_id, session_id]);
+    } finally {
+      registerReconcileEnqueue(null);
+    }
   });
 
   it('run snapshots the updated schedule instead of an older in-flight occurrence', async () => {
