@@ -509,8 +509,9 @@ function entrypointClone() {
 const savedChannel = (install: string) =>
   fs.existsSync(path.join(install, '.env')) ? fs.readFileSync(path.join(install, '.env'), 'utf8') : null;
 
-// Root gets nanoclaw.sh's own "running as root" prompt, which needs a terminal.
-describe.skipIf(process.getuid?.() === 0)('nanoclaw.sh without a terminal', () => {
+// Root gets nanoclaw.sh's own "running as root" prompt, which needs a terminal. Each test runs the
+// real nanoclaw.sh and Git, which can pass 5 s on a loaded machine.
+describe.skipIf(process.getuid?.() === 0)('nanoclaw.sh without a terminal', { timeout: 30_000 }, () => {
   const onMain = (install: string, head: string) => {
     expect(git(install, ['rev-parse', 'HEAD'])).toBe(head);
     expect(git(install, ['symbolic-ref', '--short', 'HEAD'])).toBe('main');
