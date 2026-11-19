@@ -676,11 +676,14 @@ function describeSnapshotSpace(state: UpdateState, space: SnapshotSpace): string
   );
 }
 
+// CONTROLLER_SCRIPT sits in a temp dir, and validate saves this text in
+// state.json, so the command can outlive the path it names.
 function snapshotSpaceShortfall(state: UpdateState, space: SnapshotSpace): string {
   return (
     `Not enough free space for mutable-state snapshot: ${describeSnapshotSpace(state, space)}. ` +
     `Free at least ${formatBytes(space.neededBytes - space.freeBytes)} more, then run cutover. ` +
-    'To list the older finished updates that prune would remove, with their snapshots and backup refs: ' +
+    'To list the older finished updates that prune would remove, with their snapshots and backup refs, run this ' +
+    '(its controller path is temporary: after a reboot, recreate the controller first): ' +
     `cd ${shellQuote(state.projectRoot)} && pnpm exec tsx ${shellQuote(CONTROLLER_SCRIPT)} prune --id ${state.id} --dry-run`
   );
 }

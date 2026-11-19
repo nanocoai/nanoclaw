@@ -1319,6 +1319,7 @@ describe('update-nanoclaw transaction end to end', () => {
         new RegExp(
           'Not enough free space for mutable-state snapshot: need 257 MiB \\(1 MiB of mutable state plus 256 MiB spare\\), ' +
             `have 100 MiB free in .*Free at least 157 MiB more.*` +
+            'run this \\(its controller path is temporary: after a reboot, recreate the controller first\\): ' +
             `cd .+ && pnpm exec tsx .+/scripts/update-nanoclaw\\.ts'? prune --id ${prepared.id} --dry-run`,
         ),
       );
