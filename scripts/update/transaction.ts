@@ -695,8 +695,14 @@ function assertSnapshotFits(state: UpdateState): void {
 
 // What clearSnapshotLeftovers would free: `.new`, and `.prev` once `snapshot/` exists.
 function snapshotLeftoverBytes(snapshotRoot: string): number {
-  const superseded = fs.existsSync(snapshotRoot) ? entrySize(`${snapshotRoot}.prev`) : 0;
-  return entrySize(`${snapshotRoot}.new`) + superseded;
+  const superseded = fs.existsSync(snapshotRoot) ? entrySize(`${snapshotRoot}.prev`, false, allocatedBytes) : 0;
+  return entrySize(`${snapshotRoot}.new`, false, allocatedBytes) + superseded;
+}
+
+// Blocks on disk, not logical size: deleting a sparse file frees less than its
+// size, and deleting one name of a hard-linked file frees nothing.
+function allocatedBytes(stat: fs.Stats): number {
+  return stat.nlink === 1 ? stat.blocks * 512 : 0;
 }
 
 // For the operator before they agree to cutover. Never fails validation:
@@ -765,13 +771,19 @@ function createSnapshot(state: UpdateState): SnapshotEntry[] {
 // The pre-stop space check walks state that live agents still write, so a
 // file (a SQLite journal, say) can vanish, or a directory become a file,
 // mid-walk. Such an entry counts as zero.
-function entrySize(source: string, dereferenceRoot = false): number {
+function entrySize(
+  source: string,
+  dereferenceRoot = false,
+  sizeOf: (stat: fs.Stats) => number = (stat) => stat.size,
+): number {
   try {
     const linkStat = fs.lstatSync(source);
     const stat = dereferenceRoot && linkStat.isSymbolicLink() ? fs.statSync(source) : linkStat;
-    if (stat.isFile()) return stat.size;
+    if (stat.isFile()) return sizeOf(stat);
     if (!stat.isDirectory()) return 0;
-    return fs.readdirSync(source).reduce((total, entry) => total + entrySize(path.join(source, entry)), 0);
+    return fs
+      .readdirSync(source)
+      .reduce((total, entry) => total + entrySize(path.join(source, entry), false, sizeOf), 0);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR') return 0;

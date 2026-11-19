@@ -1382,17 +1382,32 @@ describe('update-nanoclaw transaction end to end', () => {
         ),
       );
 
-      // A crashed copy holds 300 MiB (sparse) that cutover would clear first: it
-      // counts as free, but validate leaves it, as a cutover may be building it.
+      // A crashed copy that cutover would clear first. Its v2.db reports 300 MiB
+      // of logical size; stat is stubbed for its allocated blocks, since
+      // filesystems differ in how they store sparse files.
       const partial = path.join(prepared.transactionRoot, 'snapshot.new', 'data', 'v2.db');
-      write(prepared.transactionRoot, 'snapshot.new/data/v2.db', '');
-      fs.truncateSync(partial, 300 * MIB);
+      write(prepared.transactionRoot, 'snapshot.new/data/v2.db', 'partial');
+      let leftoverBlocks = 0;
+      const lstat = fs.lstatSync;
+      vi.spyOn(fs, 'lstatSync').mockImplementation(((file: fs.PathLike, options?: never) => {
+        const stat = lstat(file, options);
+        if (!stat || !/snapshot\.(new|prev)\/data\/v2\.db$/.test(String(file))) return stat;
+        return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
+          size: 300 * MIB,
+          blocks: leftoverBlocks,
+        });
+      }) as typeof fs.lstatSync);
+      // Sparse: deleting it frees next to nothing, so its size is not credited.
+      state = await validateUpdate(fixture.install, prepared.id, runtime);
+      expect(state.snapshotSpace).toMatchObject({ fits: false, freeBytes: 100 * MIB });
+      // Allocated: it counts as free, but validate leaves it, as a cutover may be building it.
+      leftoverBlocks = (300 * MIB) / 512;
       state = await validateUpdate(fixture.install, prepared.id, runtime);
       expect(state.snapshotSpace).toMatchObject({ fits: true, freeBytes: 400 * MIB });
       expect(state.snapshotSpace?.summary).toMatch(
         /^Snapshot fits: need 297 MiB .* have 400 MiB free in .*\. Free space counts 300 MiB a failed copy holds; cutover removes it first\.$/,
       );
-      expect(fs.statSync(partial).size).toBe(300 * MIB);
+      expect(fs.readFileSync(partial, 'utf8')).toBe('partial');
 
       // A crash between the renames: with `snapshot/` absent, `.prev` is the only
       // complete copy and cutover keeps it, so it is not free. Beside `snapshot/`, it is.
