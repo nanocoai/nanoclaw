@@ -75,6 +75,9 @@ const DEFAULT_BLOCKED_PATTERNS = [
   // directory is a container-to-host code-execution primitive: drop a file,
   // wait for the host to run it.
   '.local/bin',
+  // The local OneCLI gateway's stack: its .env holds the database password, and
+  // the operator runs `docker compose` on the compose file beside it.
+  '.onecli',
   'credentials',
   '.env',
   '.netrc',
