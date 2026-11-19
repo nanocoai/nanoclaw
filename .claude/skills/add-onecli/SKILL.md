@@ -145,11 +145,7 @@ Setup moves a local OneCLI database off the compose default password, but it lea
 pnpm exec tsx .claude/skills/add-onecli/scripts/postgres-check.ts || echo '{"warn":"no","hint":"none"}'
 ```
 
-When it does, any agent container can log in to OneCLI's database. Show the user what to run:
-
-```nc:operator when:db_warn=yes
-{{db_hint}}
-```
+When it does, any agent container can log in to OneCLI's database. The note for the user comes after the proxy check below, so that neither note holds the install for a confirmation.
 
 ## Check the proxy address
 
@@ -163,4 +159,10 @@ When that address is `host.docker.internal`, a loopback address or a wildcard ad
 
 ```nc:operator when:proxy_warn=yes
 {{proxy_hint}}
+```
+
+When the database check found the default password, or could not read a running database, show the user what to run:
+
+```nc:operator when:db_warn=yes
+{{db_hint}}
 ```
