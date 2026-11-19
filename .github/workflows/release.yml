@@ -395,11 +395,16 @@ jobs:
           for BRANCH in $BRANCHES; do
             # Exit 2 is the only "no such branch": an auth or network failure must not fall through to creating it.
             FOUND=0
-            git ls-remote --exit-code --heads origin "refs/heads/${BRANCH}" >/dev/null || FOUND=$?
+            REF=$(git ls-remote --exit-code --heads origin "refs/heads/${BRANCH}") || FOUND=$?
             if [ "$FOUND" -ne 0 ] && [ "$FOUND" -ne 2 ]; then
               echo "::error::Branch $BRANCH was not moved: looking it up failed (git ls-remote exit $FOUND)."
               echo "- Branch \`${BRANCH}\` NOT moved: the lookup failed, see the step log." >> "$GITHUB_STEP_SUMMARY"
               FAILED="$FAILED $BRANCH"
+              continue
+            fi
+            # Already there, e.g. an admin pushed it after a run without the token: a rerun goes green.
+            if [ "$FOUND" -eq 0 ] && [ "$(printf '%s\n' "$REF" | awk -v ref="refs/heads/${BRANCH}" '$2 == ref { print $1 }')" = "$TARGET_SHA" ]; then
+              echo "- Branch \`${BRANCH}\`: \`${TARGET_SHA}\` (already there)" >> "$GITHUB_STEP_SUMMARY"
               continue
             fi
             # A beta clone of code without the channel helper records no channel, so the updater follows

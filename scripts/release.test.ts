@@ -916,6 +916,20 @@ describe('release workflow channel branch step', () => {
     expect(result.stdout).toContain('::error::Channel branches not moved: stable beta.');
   });
 
+  it('passes once an admin has pushed both branches, even without the token', { timeout: 30_000 }, () => {
+    const f = fixture();
+    const origin = path.join(path.dirname(f.checkout), 'origin.git');
+    git(origin, 'update-ref', 'refs/heads/stable', f.target);
+    git(origin, 'update-ref', 'refs/heads/beta', f.target);
+    for (const token of ['', 'app-token']) {
+      const result = run(f, { token });
+      expect(result.status).toBe(0);
+      expect(result.calls).toEqual([]);
+      expect(result.summary).toContain(`- Branch \`stable\`: \`${f.target}\` (already there)`);
+      expect(result.summary).toContain(`- Branch \`beta\`: \`${f.target}\` (already there)`);
+    }
+  });
+
   it('never creates a branch whose lookup failed, and still moves the other', { timeout: 30_000 }, () => {
     const f = fixture();
     const result = run(f, { lookupFail: 'stable' });

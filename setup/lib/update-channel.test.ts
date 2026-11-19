@@ -325,7 +325,9 @@ function entrypointClone(branch: string) {
   );
   // nanoclaw.sh stops on a Node below its minimum; the runner's own Node must not decide these tests.
   fs.writeFileSync(path.join(bin, 'node'), '#!/bin/sh\necho v26.12.1\n', { mode: 0o755 });
-  const env = { ...GIT_ENV, NANOCLAW_NO_DIAGNOSTICS: '1', PATH: `${bin}:${process.env.PATH}` };
+  // A channel exported in the developer's own shell must not decide these runs.
+  const env: NodeJS.ProcessEnv = { ...GIT_ENV, NANOCLAW_NO_DIAGNOSTICS: '1', PATH: `${bin}:${process.env.PATH}` };
+  delete env.NANOCLAW_UPDATE_CHANNEL;
   const run = (args: string[], extra: Record<string, string> = {}) => {
     try {
       const stdout = execFileSync('bash', ['nanoclaw.sh', ...args], {
