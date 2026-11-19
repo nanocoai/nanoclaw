@@ -597,39 +597,53 @@ const LOGIN_HOME = /^login-[0-9a-f]{16}$/;
  * system temp dir: Codex won't set up its helper binaries there and warns on
  * every sign-in (#4449). Named for the login id its processes carry. A sign-in
  * killed outright, or one whose stop couldn't be confirmed, leaves its home,
- * maybe with a token: one over an hour old goes once a listing shows no
- * process carrying its id. Age alone doesn't say the login has ended.
+ * maybe with a token. Setup runs one at a time (withSetupLock), so an old
+ * home's setup has ended, but its Codex may run on: age alone doesn't say the
+ * login has ended.
  */
 function makeLoginHome(root: string, id: string): string {
   const base = path.join(root, 'data', 'codex-login');
   fs.mkdirSync(path.join(root, 'data'), { recursive: true });
   fs.mkdirSync(base, { recursive: true, mode: 0o700 });
   fs.chmodSync(base, 0o700);
-  const old = fs.readdirSync(base).filter((name) => {
-    try {
-      return LOGIN_HOME.test(name) && Date.now() - fs.statSync(path.join(base, name)).mtimeMs > STALE_LOGIN_MS;
-    } catch {
-      return false;
-    }
-  });
-  const listing = old.length > 0 ? listProcsSync(PS_TIMEOUT_MS) : [];
-  // Without a listing, none can be shown unused: they wait for a later sign-in.
-  if (typeof listing !== 'string') {
-    // Once per process: on Linux each is a read from /proc.
-    const envs = listing.filter((proc) => !proc.zombie).map(environment);
-    for (const name of old) {
-      const marker = `${LOGIN_ID_VAR}=${name.slice('login-'.length)}`;
-      if (envs.some((env) => env && carries(env, marker))) continue;
+  removeUnused(
+    base,
+    fs.readdirSync(base).filter((name) => {
       try {
-        fs.rmSync(path.join(base, name), { recursive: true, force: true });
+        return LOGIN_HOME.test(name) && Date.now() - fs.statSync(path.join(base, name)).mtimeMs > STALE_LOGIN_MS;
       } catch {
-        // Gone already, or not ours to remove; the new home doesn't depend on it.
+        return false;
       }
-    }
-  }
+    }),
+  );
   const home = path.join(base, `login-${id}`);
   fs.mkdirSync(home, { mode: 0o700 });
   return home;
+}
+
+/**
+ * Removes the old homes that two listings in a row show no process carrying
+ * the id of: as in the stop, one listing may miss a process forked just then.
+ * Without a listing, none can be shown unused: they wait for a later sign-in.
+ */
+function removeUnused(base: string, names: string[]): void {
+  for (let listings = 0; listings < 2 && names.length > 0; listings++) {
+    const listing = listProcsSync(PS_TIMEOUT_MS);
+    if (typeof listing === 'string') return;
+    // Once per process: on Linux each is a read from /proc.
+    const envs = listing.map(environment);
+    names = names.filter((name) => {
+      const marker = `${LOGIN_ID_VAR}=${name.slice('login-'.length)}`;
+      return !envs.some((env) => env && carries(env, marker));
+    });
+  }
+  for (const name of names) {
+    try {
+      fs.rmSync(path.join(base, name), { recursive: true, force: true });
+    } catch {
+      // Gone already, or not ours to remove; the new home doesn't depend on it.
+    }
+  }
 }
 
 async function signIn(

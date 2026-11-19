@@ -466,6 +466,38 @@ describe('runCodexLoginAuth', () => {
     }
   });
 
+  it('keeps an old home when one listing misses the process carrying its id', async () => {
+    const id = 'f'.repeat(16);
+    const home = leftHome(`login-${id}`, true);
+    const owner = realSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], {
+      stdio: 'ignore',
+      env: { ...process.env, NANOCLAW_CODEX_LOGIN: id },
+    });
+    try {
+      await until(() => isRunning(owner.pid!));
+      let listings = 0;
+      // The first misses it, as ps may miss a process forked while it reads.
+      mockPs.sync = (file, args, opts) => {
+        const ps = realSpawnSync(file as string, args as string[], { ...(opts as object), encoding: 'utf-8' });
+        if (listings++ === 0) {
+          ps.stdout = ps.stdout
+            .split('\n')
+            .filter((row) => Number(row.trim().split(/\s+/)[0]) !== owner.pid)
+            .join('\n');
+        }
+        return ps;
+      };
+      playLogin();
+
+      await runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
+
+      expect(listings).toBe(2);
+      expect(fs.existsSync(path.join(home, 'auth.json'))).toBe(true);
+    } finally {
+      owner.kill('SIGKILL');
+    }
+  });
+
   it("keeps an old home when ps can't list processes", async () => {
     const old = leftHome(`login-${'e'.repeat(16)}`, true);
     mockPs.sync = (_file, args, opts) => realSpawnSync('ps-missing-4455', args as string[], opts as object);
