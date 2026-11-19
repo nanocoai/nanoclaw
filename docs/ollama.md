@@ -117,8 +117,10 @@ After=network-online.target
 [Service]
 Environment=PROXY_HOST=172.17.0.1
 ExecStart=/usr/bin/node %h/.config/nanoclaw/ollama-cch-proxy.mjs
-# Also retries until Docker has created the bridge address after a reboot.
+# After a reboot the bridge address may not exist yet and the proxy exits at once.
+# Wait between tries: with the default 100 ms, systemd gives up after five quick failures.
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=default.target
