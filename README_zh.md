@@ -27,10 +27,14 @@ NanoClaw 用一个您能轻松理解的代码库提供了同样的核心功能�
 ## 快速开始
 
 ```bash
-git clone https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
+git clone --branch stable https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
 cd nanoclaw-v2
 bash nanoclaw.sh
 ```
+
+`stable` 分支是最新的正式版本，更新也跟随正式版本。如果还想获取候选版本，请克隆 `--branch beta`。克隆 `main` 会运行最新代码，但更新仍然跟随正式版本，所以第一次更新会等到下一个正式版本；如果想跟随 `main`，请改为运行 `bash nanoclaw.sh --update-channel edge`。
+
+之后切换分支不会改变更新渠道。要更改，请运行 `pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel <stable|beta|edge>`。
 
 `nanoclaw.sh` 会把您从一台全新机器一直带到一个可以直接发消息的命名智能体。它会在缺失时安装 Node、pnpm 和 Docker，向 OneCLI 注册您的 Anthropic 凭据，构建智能体容器，并配对您的第一个渠道（Telegram、Discord、WhatsApp 或本地 CLI）。如果某一步失败，会自动调用 Claude Code 进行诊断并从中断处继续。
 
