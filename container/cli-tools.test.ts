@@ -55,7 +55,8 @@ describe('cli-tools manifest', () => {
   it('bakes in nothing that a skill is meant to add on request', () => {
     // Regression guard for the opt-in boundary. `vercel` comes only from
     // /add-vercel, which also adds container/skills/vercel-cli/; trunk ships
-    // neither. An entry without that skill means it was baked in again.
+    // neither. An entry without that skill means it was baked in again. Trunk
+    // adding both would pass here on purpose: that is a new skill review sees.
     const names = manifest.map((t) => t.name);
     if (names.includes('vercel')) {
       expect(
