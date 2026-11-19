@@ -376,10 +376,11 @@ jobs:
       # Last, so a refused move never blocks the release; a publish rerun retries it.
       - name: Move the channel branches
         env:
-          # The default token may be refused when the move crosses workflow-file
-          # changes. If so, set CHANNEL_BRANCH_TOKEN in both release environments
-          # to a token allowed to update these two branches and workflow files.
-          GH_TOKEN: ${{ secrets.CHANNEL_BRANCH_TOKEN || github.token }}
+          # A ruleset lets only organisation admins and listed apps move these
+          # branches, and the default token is neither. Without this secret (an
+          # app token, set in both release environments) the step prints the
+          # push for an admin to run instead.
+          GH_TOKEN: ${{ secrets.CHANNEL_BRANCH_TOKEN }}
           RELEASE_VERSION: ${{ inputs.version }}
           TARGET_SHA: ${{ inputs.target_sha }}
         run: |
@@ -391,6 +392,11 @@ jobs:
             echo "- Channel branches: unchanged, v${RELEASE_VERSION} is not the newest tag of a channel" >> "$GITHUB_STEP_SUMMARY"
           fi
           for BRANCH in $BRANCHES; do
+            if [ -z "${GH_TOKEN:-}" ]; then
+              echo "::warning::Branch $BRANCH was not moved: CHANNEL_BRANCH_TOKEN is not set. An admin must push it."
+              echo "- Branch \`${BRANCH}\` NOT moved. An admin must run: \`git push origin ${TARGET_SHA}:refs/heads/${BRANCH}\`" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
             if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" >/dev/null 2>&1; then
               gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" \
                 -f sha="$TARGET_SHA" -F force=false >/dev/null

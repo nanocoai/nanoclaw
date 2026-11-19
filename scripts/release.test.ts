@@ -465,6 +465,9 @@ describe('channel branches', () => {
     expect(channelBranches('2026.11.0-rc.2', tags)).toEqual(['beta']);
     expect(releaseWorkflow).toContain('release-order.mjs" branches "$RELEASE_VERSION"');
     expect(releaseWorkflow).toContain('-f sha="$TARGET_SHA" -F force=false');
+    // The default token cannot pass the branches' ruleset: without the app token the step only says what to push.
+    expect(releaseWorkflow).toContain('GH_TOKEN: ${{ secrets.CHANNEL_BRANCH_TOKEN }}');
+    expect(releaseWorkflow).toContain('An admin must run: \\`git push origin ${TARGET_SHA}:refs/heads/${BRANCH}\\`');
     expect(releaseWorkflow.indexOf('- name: Move the channel branches')).toBeGreaterThan(
       releaseWorkflow.indexOf('node scripts/release.mjs readback'),
     );
