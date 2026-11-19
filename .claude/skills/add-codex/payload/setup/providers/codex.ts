@@ -244,8 +244,9 @@ export async function runCodexLoginAuth(
     if (!tree || !owned || ended) return removeLoginHome();
     // Part of the login may still run and write to the home: it stays, and
     // the next sign-in removes it once it's an hour old.
-    const why = tree.failure
-      ? `setup couldn't list its processes (${tree.failure})`
+    const failure = tree.failure ?? tree.blind;
+    const why = failure
+      ? `setup couldn't list its processes (${failure})`
       : 'part of it was still running after it was killed';
     p.log.warn(
       brandBody(
@@ -289,7 +290,7 @@ export async function runCodexLoginAuth(
       live = await login.look(() => level);
     }
     clearTimeout(timer);
-    ended = live === false;
+    ended = live === false && !login.blind;
   }
   function onSignal(signal: NodeJS.Signals): void {
     if (stopping) {
@@ -344,28 +345,34 @@ export async function runCodexLoginAuth(
   }
 }
 
-type Proc = { pid: number; ppid: number; pgid: number; text: string };
+type Proc = { pid: number; ppid: number; pgid: number; zombie: boolean; text: string };
 
 /**
  * The login's process tree. A listing finds its processes by the CODEX_HOME
  * each inherits, whatever became of its parent; one without it (macOS hides a
  * system binary's environment, such as pnpm 12's `sh`) by descent, and after
- * that as the same process (pid, group and command line) while it runs. Their
- * groups are the ones signalled: pnpm 12 runs Codex in a group of its own. A
- * zombie shows neither environment nor command line, so it isn't one of them.
+ * that as the same pid in the same group. Every process in the leader's group
+ * is one: the login runs in a session of its own (see runInherit). Their
+ * groups are the ones signalled: pnpm 12 runs Codex in a group of its own.
+ * Zombies don't count.
  */
 class LoginTree {
   // As of the last listing; the login's own until there is one.
   private groups: number[];
-  // The members as last listed. The leader leads its own group (see
-  // runInherit), whatever it runs, until a listing shows its command line.
-  private known: Map<number, { pgid: number; text?: string }>;
+  // Each member's group as last listed.
+  private known = new Map<number, number>();
   private readonly marker: string;
+  private signalled = false;
   failure: string | undefined;
+  // Why no listing came before the first signal: a member linked only
+  // through its parent may then have gone unseen, so the end can't be confirmed.
+  blind: string | undefined;
 
-  constructor(leader: number, home: string) {
+  constructor(
+    private readonly leader: number,
+    home: string,
+  ) {
     this.groups = [leader];
-    this.known = new Map([[leader, { pgid: leader }]]);
     this.marker = `CODEX_HOME=${home}`;
   }
 
@@ -376,6 +383,7 @@ class LoginTree {
 
   /** Signals the groups; whether any still holds a member. */
   signal(signal: NodeJS.Signals | 0, groups: Iterable<number> = this.groups): boolean {
+    if (signal) this.signalled = true;
     let alive = false;
     for (const group of groups) {
       try {
@@ -397,7 +405,7 @@ class LoginTree {
     this.signal('SIGKILL');
     const pause = new Int32Array(new SharedArrayBuffer(4));
     for (let left = end - Date.now(); left > 0; left = end - Date.now()) {
-      if (this.take(listProcsSync(Math.min(left, PS_TIMEOUT_MS)), () => 'SIGKILL') === false) return true;
+      if (this.take(listProcsSync(Math.min(left, PS_TIMEOUT_MS)), () => 'SIGKILL') === false) return !this.blind;
       Atomics.wait(pause, 0, 0, 20);
     }
     return false;
@@ -406,21 +414,24 @@ class LoginTree {
   private take(listing: Proc[] | string, signal?: () => NodeJS.Signals): boolean | undefined {
     if (typeof listing === 'string') {
       this.failure = listing;
+      if (!this.signalled) this.blind ??= listing;
       return undefined;
     }
     this.failure = undefined;
     const own = listing.find((proc) => proc.pid === process.pid)?.pgid;
+    const live = listing.filter((proc) => !proc.zombie);
     const tree = new Set<number>();
     for (let grew = true; grew;) {
       grew = false;
-      for (const proc of listing) {
-        if (tree.has(proc.pid) || !(tree.has(proc.ppid) || this.marks(proc) || this.knows(proc))) continue;
+      for (const proc of live) {
+        const ours = proc.pgid === this.leader || this.known.get(proc.pid) === proc.pgid || this.marks(proc);
+        if (tree.has(proc.pid) || !(ours || tree.has(proc.ppid))) continue;
         tree.add(proc.pid);
         grew = true;
       }
     }
-    const members = listing.filter((proc) => tree.has(proc.pid));
-    this.known = new Map(members.map((proc) => [proc.pid, { pgid: proc.pgid, text: proc.text }]));
+    const members = live.filter((proc) => tree.has(proc.pid));
+    this.known = new Map(members.map((proc) => [proc.pid, proc.pgid]));
     const groups = [...new Set(members.map((proc) => proc.pgid))].filter((group) => group > 1 && group !== own);
     const found = groups.filter((group) => !this.groups.includes(group));
     this.groups = groups;
@@ -437,21 +448,16 @@ class LoginTree {
     }
     return false;
   }
-
-  private knows(proc: Proc): boolean {
-    const was = this.known.get(proc.pid);
-    return was !== undefined && was.pgid === proc.pgid && (was.text === undefined || was.text === proc.text);
-  }
 }
 
-// Each row with its command line and, for the user's own processes, its environment.
+// Each row with its state (Z for a zombie), command line and, for the user's own processes, its environment.
 const PS_ARGS = [
   '-U',
   String(process.getuid?.() ?? 0),
   '-ww',
   ...(process.platform === 'darwin'
-    ? ['-E', '-o', 'pid=,ppid=,pgid=,command=']
-    : ['-o', 'pid=,ppid=,pgid=,args=', 'e']),
+    ? ['-E', '-o', 'pid=,ppid=,pgid=,stat=,command=']
+    : ['-o', 'pid=,ppid=,pgid=,stat=,args=', 'e']),
 ];
 const PS_BUFFER = 64 * 1024 * 1024;
 
@@ -485,13 +491,14 @@ function parsePs(stdout: string): Proc[] | string {
   const procs = stdout
     .trim()
     .split('\n')
-    .map((row) => row.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s?(.*)$/))
+    .map((row) => row.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s?(.*)$/))
     .filter((m) => m !== null)
     .map((m) => ({
       pid: Number(m[1]),
       ppid: Number(m[2]),
       pgid: Number(m[3]),
-      text: m[4],
+      zombie: m[4].startsWith('Z'),
+      text: m[5],
     }));
   // A listing without setup in it isn't one to go by.
   return procs.some((proc) => proc.pid === process.pid) ? procs : 'ps gave an unreadable listing';
