@@ -124,28 +124,33 @@ fi
 unset _take_channel
 
 read -r CHANNEL_ACTION CHANNEL_NAME <<<"$(update_channel_decide "$PROJECT_ROOT" "$REQUESTED_CHANNEL")"
+CHANNEL_NOTE=""
+CHANNEL_HINT=""
 case "$CHANNEL_ACTION" in
   invalid)
     echo "error: unknown update channel \"$CHANNEL_NAME\". Use one of: stable, beta, edge"
     exit 1
     ;;
-  record)
+  record|record-main|record-ahead)
     # Setup saves it to .env before its first step.
     export NANOCLAW_UPDATE_CHANNEL=$CHANNEL_NAME
-    if [ "$CHANNEL_NAME" = edge ]; then
-      echo "  This copy is main, so updates follow main (the edge channel)."
-      echo "  For published releases instead, start from: git clone --branch stable https://github.com/nanocoai/nanoclaw.git"
-    else
-      echo "  This copy is the $CHANNEL_NAME branch, so updates follow the $CHANNEL_NAME channel."
-      echo "  To change that later: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel <stable|beta|edge>"
-    fi
-    ;;
-  ahead)
-    echo "  This copy is main, which is newer than the $CHANNEL_NAME channel's releases: its first update waits for one that includes it."
-    echo "  To follow main instead: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel edge"
     ;;
 esac
-unset CHANNEL_ACTION CHANNEL_NAME
+EDGE_HINT="To follow main instead, set up with: bash nanoclaw.sh --update-channel edge"
+case "$CHANNEL_ACTION" in
+  record)
+    CHANNEL_NOTE="This copy is the $CHANNEL_NAME branch, so updates follow the $CHANNEL_NAME channel."
+    ;;
+  record-main)
+    CHANNEL_NOTE="This copy is main on a release, so updates follow the stable channel."
+    CHANNEL_HINT=$EDGE_HINT
+    ;;
+  record-ahead|ahead)
+    CHANNEL_NOTE="This copy is main, which is newer than the $CHANNEL_NAME channel's releases: its first update waits for one that includes it."
+    CHANNEL_HINT=$EDGE_HINT
+    ;;
+esac
+unset EDGE_HINT
 
 LOGS_DIR="$PROJECT_ROOT/logs"
 STEPS_DIR="$LOGS_DIR/setup-steps"
@@ -263,6 +268,17 @@ write_header
 # then carries the "let's get you set up" framing — setup:auto sees
 # NANOCLAW_BOOTSTRAPPED=1 and skips re-printing the wordmark.
 cat "$PROJECT_ROOT/assets/setup-splash.txt"
+
+# Decided before diagnostics creates data/, but shown here: printed earlier, the
+# splash scrolls it away, and setup.log only starts above.
+if [ -n "$CHANNEL_NOTE" ]; then
+  printf '  %s\n' "$CHANNEL_NOTE"
+  [ -z "$CHANNEL_HINT" ] || printf '  %s\n' "$(dim "$CHANNEL_HINT")"
+  printf '  %s\n\n' "$(dim "Switching branches later does not change the channel. To change it: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel <stable|beta|edge>")"
+  printf '=== [%s] update-channel → %s ===\n  channel: %s\n  note: %s\n  hint: %s\n\n' \
+    "$(ts_utc)" "$CHANNEL_ACTION" "$CHANNEL_NAME" "$CHANNEL_NOTE" "${CHANNEL_HINT:-none}" >> "$PROGRESS_LOG"
+fi
+unset CHANNEL_ACTION CHANNEL_NAME CHANNEL_NOTE CHANNEL_HINT
 
 # ─── pre-flight: minimum hardware specs ────────────────────────────────
 # NanoClaw runs an agent container per session. Below this threshold the

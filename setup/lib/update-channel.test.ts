@@ -100,11 +100,13 @@ function clone(seed: string, branch = 'main', options: { official?: boolean; sha
 }
 
 describe('update channel decision', () => {
-  it('records the channel of the cloned branch: stable, beta, or edge for main', () => {
+  it('records the channel of the cloned branch, and stable for main', () => {
     const seed = officialSeed();
     expect(decide(clone(seed, 'stable'))).toBe('record stable');
     expect(decide(clone(seed, 'beta'))).toBe('record beta');
-    expect(decide(clone(seed, 'main'))).toBe('record edge');
+    // The updater's own default: past every release, its first update waits.
+    expect(decide(clone(seed, 'main'))).toBe('record-ahead stable');
+    expect(decide(clone(officialSeed({ ahead: false }), 'main'))).toBe('record-main stable');
   });
 
   it('records it for a shallow clone too, which has no history or older tags', () => {
@@ -118,6 +120,9 @@ describe('update channel decision', () => {
     const seed = officialSeed();
     expect(decide(clone(seed, 'stable'), 'beta')).toBe('none');
     expect(decide(clone(seed, 'main'), ' Edge ')).toBe('none');
+    const edge = clone(seed, 'main');
+    fs.writeFileSync(path.join(edge, '.env'), 'NANOCLAW_UPDATE_CHANNEL=edge\n');
+    expect(decide(edge)).toBe('none');
     const saved = clone(seed, 'beta');
     fs.writeFileSync(path.join(saved, '.env'), 'OTHER=1\nNANOCLAW_UPDATE_CHANNEL="stable"\n');
     expect(decide(saved)).toBe('none');
@@ -144,6 +149,7 @@ describe('update channel decision', () => {
     const onCandidate = clone(seed);
     expect(decide(onCandidate, 'beta')).toBe('none');
     expect(decide(onCandidate, 'stable')).toBe('ahead stable');
+    expect(decide(onCandidate)).toBe('record-ahead stable');
   });
 
   it("leaves a fork alone: its branches are its owner's", () => {
@@ -248,7 +254,7 @@ describe('the updater on a cloned channel branch', () => {
     expect(resolve(clone(seed, 'beta'), 'beta')).toMatchObject({ channel: 'beta', tag: 'v2.5.0-rc.1' });
   });
 
-  it('stops ahead of the release on main, which is why main records edge', () => {
+  it('stops ahead of the release on main, which the note for a clone of main warns of', () => {
     expect(() => resolve(clone(officialSeed()), 'stable')).toThrow(AheadOfReleaseError);
   });
 });
@@ -299,42 +305,73 @@ describe.skipIf(process.getuid?.() === 0)('nanoclaw.sh', { timeout: 30_000 }, ()
     expect(git(install, ['symbolic-ref', '--short', 'HEAD'])).toBe(branch);
     expect(fs.existsSync(path.join(install, '.env'))).toBe(false);
   };
+  const switching =
+    'Switching branches later does not change the channel. To change it: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel <stable|beta|edge>';
+  // Under the splash, which would otherwise scroll it away, and in setup.log.
+  const shown = (install: string, stdout: string, note: string) => {
+    expect(stdout.indexOf('splash\n')).toBeGreaterThanOrEqual(0);
+    expect(stdout.indexOf(note)).toBeGreaterThan(stdout.indexOf('splash\n'));
+    expect(fs.readFileSync(path.join(install, 'logs/setup.log'), 'utf8')).toContain(`  note: ${note}\n`);
+  };
 
   it.each(['stable', 'beta'])('hands setup the %s channel for a clone of that branch', (branch) => {
     const { install, run, head } = entrypointClone(branch);
     const result = run(['--template-path', 'sales/sdr']);
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain(`This copy is the ${branch} branch, so updates follow the ${branch} channel.`);
+    shown(install, result.stdout, `This copy is the ${branch} branch, so updates follow the ${branch} channel.`);
+    expect(result.stdout).toContain(switching);
     expect(result.stdout).toContain(
       `HANDOFF args=[--silent run setup:auto --template-path sales/sdr] channel=[${branch}]`,
     );
     untouched(install, head, branch);
   });
 
-  it('hands setup edge for a clone of main, and says how to get releases', () => {
+  it('hands setup stable for a clone of main, and says the first update waits', () => {
     const { install, run, head } = entrypointClone('main');
     const result = run([]);
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('This copy is main, so updates follow main (the edge channel).');
-    expect(result.stdout).toContain('git clone --branch stable');
-    expect(result.stdout).toContain('HANDOFF args=[--silent run setup:auto] channel=[edge]');
+    shown(
+      install,
+      result.stdout,
+      "This copy is main, which is newer than the stable channel's releases: its first update waits for one that includes it.",
+    );
+    expect(result.stdout).toContain('To follow main instead, set up with: bash nanoclaw.sh --update-channel edge');
+    expect(result.stdout).toContain(switching);
+    expect(result.stdout).toContain('HANDOFF args=[--silent run setup:auto] channel=[stable]');
     untouched(install, head, 'main');
+  });
+
+  it('follows main only when edge is asked for', () => {
+    const { run } = entrypointClone('main');
+    const flag = run(['--update-channel', 'edge']);
+    expect(flag.status).toBe(0);
+    expect(flag.stdout).not.toContain('This copy is');
+    expect(flag.stdout).toContain('HANDOFF args=[--silent run setup:auto --update-channel edge] channel=[]');
+    const env = run([], { NANOCLAW_UPDATE_CHANNEL: 'edge' });
+    expect(env.status).toBe(0);
+    expect(env.stdout).not.toContain('This copy is');
+    expect(env.stdout).toContain('HANDOFF args=[--silent run setup:auto] channel=[edge]');
   });
 
   it('leaves a requested channel to setup, and warns when main is past its releases', () => {
     const { install, run, head } = entrypointClone('main');
     const result = run(['--update-channel', 'stable']);
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("newer than the stable channel's releases");
-    expect(result.stdout).toContain('set-channel --channel edge');
+    shown(
+      install,
+      result.stdout,
+      "This copy is main, which is newer than the stable channel's releases: its first update waits for one that includes it.",
+    );
+    expect(result.stdout).toContain('bash nanoclaw.sh --update-channel edge');
     expect(result.stdout).toContain('HANDOFF args=[--silent run setup:auto --update-channel stable] channel=[]');
     untouched(install, head, 'main');
   });
 
   it('takes the channel from the environment too, and stays quiet when it fits', () => {
-    const { run } = entrypointClone('stable');
+    const { install, run } = entrypointClone('stable');
     const result = run([], { NANOCLAW_UPDATE_CHANNEL: 'beta' });
     expect(result.stdout).not.toContain('This copy is');
+    expect(fs.readFileSync(path.join(install, 'logs/setup.log'), 'utf8')).not.toContain('update-channel');
     expect(result.stdout).toContain('HANDOFF args=[--silent run setup:auto] channel=[beta]');
   });
 

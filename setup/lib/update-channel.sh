@@ -5,8 +5,9 @@
 # The official repository publishes `stable` and `beta` branches next to `main`;
 # the release workflow moves them to each release. Cloning one is the choice
 # (`git clone --branch stable`), so setup never moves the checkout: it records
-# the matching channel for the updater. Sourced by nanoclaw.sh; needs only git
-# and POSIX tools, since it runs before Node is installed.
+# the matching channel for the updater. A clone of main records stable, the
+# updater's default; edge is only ever asked for. Sourced by nanoclaw.sh; needs
+# only git and POSIX tools, since it runs before Node is installed.
 
 # update_channel_saved <root> — NANOCLAW_UPDATE_CHANNEL from .env, if any.
 # Read as the updater reads it: trimmed, one pair of outer quotes removed, the last
@@ -43,12 +44,15 @@ update_channel_official_branch() {
 # update_channel_decide <root> <requested-channel>
 #
 # Prints one line:
-#   none              say nothing and record nothing
-#   record <channel>  no channel chosen yet: the cloned branch names it
-#                     (stable, beta, or main for edge)
-#   ahead <channel>   stable or beta was chosen, but this copy is main past that
-#                     channel's releases: print a hint
-#   invalid <raw>     the requested channel is not stable, beta or edge
+#   none                 say nothing and record nothing
+#   record <channel>     no channel chosen yet: a clone of stable or beta records it
+#   record-main stable   no channel chosen yet, and this copy is main exactly on a
+#                        release: record stable
+#   record-ahead stable  no channel chosen yet, and this copy is main past every
+#                        release: record stable, and say the first update waits
+#   ahead <channel>      stable or beta was chosen, but this copy is main past that
+#                        channel's releases: say the first update waits
+#   invalid <raw>        the requested channel is not stable, beta or edge
 update_channel_decide() {
   local root=$1 requested channel branch
   requested=$(printf '%s' "${2:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr 'A-Z' 'a-z')
@@ -72,9 +76,12 @@ update_channel_decide() {
   case "$branch" in stable|beta|main) ;; *) echo none; return 0 ;; esac
   update_channel_official_branch "$root" "$branch" || { echo none; return 0; }
 
+  # Nothing chosen: main gets the updater's own default, so a later switch to
+  # edge is always a deliberate choice.
+  local ahead=ahead found=none
   if [ -z "$channel" ]; then
-    if [ "$branch" = main ]; then echo "record edge"; else echo "record $branch"; fi
-    return 0
+    [ "$branch" = main ] || { echo "record $branch"; return 0; }
+    channel=stable ahead=record-ahead found=record-main
   fi
 
   # main is past a channel's releases unless it sits exactly on one: a release
@@ -82,10 +89,10 @@ update_channel_decide() {
   # the updater.
   if [ "$branch" = main ] && [ "$channel" != edge ]; then
     if [ "$channel" = stable ]; then
-      git -C "$root" describe --exact-match --match 'v[0-9]*' --exclude '*-*' HEAD >/dev/null 2>&1 || { echo "ahead stable"; return 0; }
+      git -C "$root" describe --exact-match --match 'v[0-9]*' --exclude '*-*' HEAD >/dev/null 2>&1 || { echo "$ahead stable"; return 0; }
     else
-      git -C "$root" describe --exact-match --match 'v[0-9]*' HEAD >/dev/null 2>&1 || { echo "ahead beta"; return 0; }
+      git -C "$root" describe --exact-match --match 'v[0-9]*' HEAD >/dev/null 2>&1 || { echo "$ahead beta"; return 0; }
     fi
   fi
-  echo none
+  if [ "$found" = none ]; then echo none; else echo "$found $channel"; fi
 }
