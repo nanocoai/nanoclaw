@@ -128,8 +128,11 @@ export interface InboundMailbox {
    */
   armNextTask(originalId: string, task: Task): Promise<void>;
   countLiveTasks(): number;
-  /** Delete pending rows of one channel type past the age cutoff or the keep cap; returns their ids. */
-  prunePendingMessages(channelType: string, before: string, keep: number): string[];
+  /**
+   * Delete pending rows of one channel type past the age cutoff or the keep
+   * cap, except `skipIds`; returns the deleted ids.
+   */
+  prunePendingMessages(channelType: string, before: string, keep: number, skipIds?: readonly string[]): string[];
   getInboundHistory(limit: number): MailboxHistoryMessage[];
   getConversationRoot(): MailboxTimelineMessage | undefined;
   findTaskBySeriesSlug(slug: string): TaskRecord | undefined;

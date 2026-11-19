@@ -251,15 +251,17 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
           .prepare("SELECT COUNT(*) AS count FROM messages_in WHERE kind = 'task' AND status IN ('pending', 'paused')")
           .get() as { count: number }
       ).count,
-    prunePendingMessages: (channelType, before, keep) => {
+    prunePendingMessages: (channelType, before, keep, skipIds = []) => {
+      const skip = JSON.stringify(skipIds);
       const expired = db
         .prepare(
           `DELETE FROM messages_in
             WHERE channel_type = ? AND status = 'pending'
               AND datetime(timestamp) < datetime(?)
+              AND id NOT IN (SELECT value FROM json_each(?))
           RETURNING id`,
         )
-        .all(channelType, before) as Array<{ id: string }>;
+        .all(channelType, before, skip) as Array<{ id: string }>;
       const overflow = db
         .prepare(
           `DELETE FROM messages_in
@@ -269,9 +271,10 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
                  WHERE channel_type = ? AND status = 'pending'
                  ORDER BY seq DESC LIMIT ?
               )
+              AND id NOT IN (SELECT value FROM json_each(?))
           RETURNING id`,
         )
-        .all(channelType, channelType, keep) as Array<{ id: string }>;
+        .all(channelType, channelType, keep, skip) as Array<{ id: string }>;
       return [...expired, ...overflow].map((row) => row.id);
     },
     getInboundHistory: (limit) =>

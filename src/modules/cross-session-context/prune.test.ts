@@ -91,6 +91,26 @@ describe('pruneEchoBacklog', () => {
     expect(ids).not.toContain('e-0');
   });
 
+  it('skips rows the agent has claimed, under both the age cutoff and the cap', () => {
+    const oldMs = (ECHO_MAX_AGE_DAYS * 24 + 1) * 60 * 60 * 1000;
+    insertRow({ id: 'claimed-old', seq: 2, ageMs: oldMs });
+    insertRow({ id: 'unclaimed-old', seq: 4, ageMs: oldMs });
+    insertRow({ id: 'claimed-overflow', seq: 6 });
+    for (let i = 0; i < ECHO_BACKLOG_CAP; i++) insertRow({ id: `e-${i}`, seq: 100 + i * 2 });
+
+    const pruned = pruneEchoBacklog(wrapSqliteInbound(db), {
+      ...SESSION,
+      claimedIds: ['claimed-old', 'claimed-overflow'],
+      now: NOW,
+    });
+
+    expect(pruned).toBe(1);
+    const ids = remainingIds();
+    expect(ids).toContain('claimed-old');
+    expect(ids).toContain('claimed-overflow');
+    expect(ids).not.toContain('unclaimed-old');
+  });
+
   it('returns 0 on an empty session', () => {
     expect(pruneEchoBacklog(wrapSqliteInbound(db), { ...SESSION, now: NOW })).toBe(0);
   });
@@ -117,6 +137,18 @@ describe('pruneEchoBacklog', () => {
       expect(pruneEchoBacklog(wrapSqliteInbound(db), { ...SESSION, now: NOW })).toBe(1);
 
       expect(fs.readdirSync(inbox()).sort()).toEqual(['m2:echo:s-1', 'm3:echo:s-1', 'own-message']);
+    });
+
+    it('keeps the files of a claimed row the agent may be reading', () => {
+      insertRow({ id: 'm1:echo:s-1', seq: 2, ageMs: oldMs });
+      insertRow({ id: 'm2:echo:s-1', seq: 4, ageMs: oldMs });
+      stage('m1:echo:s-1');
+      stage('m2:echo:s-1');
+
+      expect(pruneEchoBacklog(wrapSqliteInbound(db), { ...SESSION, claimedIds: ['m1:echo:s-1'], now: NOW })).toBe(1);
+
+      expect(fs.readdirSync(inbox())).toEqual(['m1:echo:s-1']);
+      expect(remainingIds()).toEqual(['m1:echo:s-1']);
     });
 
     it('prunes rows that had no files without error', () => {
