@@ -5,6 +5,7 @@
  * would invalidate it. Both setup entry points use this provider hook.
  */
 import { type ChildProcess, execFile, spawn, spawnSync } from 'child_process';
+import { randomBytes } from 'crypto';
 import { getCredentialStore, type ProviderCredentialStore } from '../gateways/credential-store.js';
 import fs from 'fs';
 import os from 'os';
@@ -220,6 +221,7 @@ export async function runCodexLoginAuth(
   // throwaway CODEX_HOME so the vaulted session is dedicated to the gateway
   // and never shared with the user's personal ~/.codex.
   const loginHome = makeLoginHome(root);
+  const loginId = randomBytes(8).toString('hex');
   // Holds a live credential after login, so it goes on every exit path:
   // `finally` for returns and throws, the exit hook for process.exit (which
   // skips finally), and the signal hook for Ctrl-C, SIGTERM and a hangup.
@@ -276,7 +278,7 @@ export async function runCodexLoginAuth(
   // SIGTERM, then SIGKILL after 3s or on a second signal; it has ended once a
   // listing shows none of it. The hooks stay attached until then.
   async function stopTree(login: LoginTree): Promise<void> {
-    // Before any signal, while a member without CODEX_HOME is still linked to its parent.
+    // Before any signal, while a member without the login id is still linked to its parent.
     await login.look();
     listed = true;
     login.signal(level);
@@ -314,7 +316,7 @@ export async function runCodexLoginAuth(
   }
   const onSpawn = (child: ChildProcess): void => {
     if (!child.pid) return;
-    const login = (tree = new LoginTree(child.pid, loginHome));
+    const login = (tree = new LoginTree(child.pid, loginId));
     child.once('close', (code) => {
       if (stopping) return;
       // Signed in, the login took Codex with it.
@@ -333,6 +335,7 @@ export async function runCodexLoginAuth(
   for (const signal of LOGIN_SIGNALS) process.on(signal, onSignal);
   try {
     await signIn(method, store, root, loginHome, {
+      id: loginId,
       onSpawn,
       stop: onSignal,
       settled: async () => {
@@ -353,29 +356,32 @@ export async function runCodexLoginAuth(
 type Proc = { pid: number; ppid: number; pgid: number; zombie: boolean; text: string };
 
 /**
- * The login's process tree. A listing finds its processes by the CODEX_HOME
- * each inherits, whatever became of its parent; one without it (macOS hides a
- * system binary's environment, such as pnpm 12's `sh`) by descent, or as one
- * in a group the tree held at the last listing. A group gains members only
- * from its own session, so only from the login: it runs in a session of its
- * own (see runInherit). Their groups are the ones signalled: pnpm 12 runs
- * Codex in a group of its own. Zombies don't count. Whatever writes to the home is Codex, which shows
- * CODEX_HOME; the one known process that shows neither and leaves the group
- * is pnpm 12's `sh`, which kills Codex's group and exits once pnpm has gone.
+ * The login's process tree. A listing finds its processes by the login id
+ * each inherits (set next to CODEX_HOME), whatever became of its parent; one
+ * without it (macOS hides a system binary's environment, such as pnpm 12's
+ * `sh`) by descent, or as one in a group the tree held at the last listing. A
+ * group gains members only from its own session, so only from the login: it
+ * runs in a session of its own (see runInherit). Their groups are the ones
+ * signalled: pnpm 12 runs Codex in a group of its own. Zombies don't count.
+ * Whatever writes to the home is Codex, which shows the id; the one known
+ * process that shows neither and leaves the group is pnpm 12's `sh`, which
+ * kills Codex's group and exits once pnpm has gone.
  */
 class LoginTree {
   // As of the last listing; the login's own until there is one.
   private groups: number[];
   private readonly marker: string;
   private signalled = false;
+  // Empty listings in a row.
+  private empty = 0;
   failure: string | undefined;
   // Why no listing came before the first signal: a member linked only
   // through its parent may then have gone unseen, so the end can't be confirmed.
   blind: string | undefined;
 
-  constructor(leader: number, home: string) {
+  constructor(leader: number, id: string) {
     this.groups = [leader];
-    this.marker = `CODEX_HOME=${home}`;
+    this.marker = `${LOGIN_ID_VAR}=${id}`;
   }
 
   /** Lists the tree; whether any of it runs (undefined without a listing). New groups get `signal()`. */
@@ -402,8 +408,8 @@ class LoginTree {
   /** Kills the whole tree at once; whether it was seen to end. Bounded: nothing can wait during 'exit'. */
   killAll(): boolean {
     const end = Date.now() + 1500;
-    // Listed first, while a member without CODEX_HOME is still linked to its
-    // parent; in half the time, so another listing can follow a slow one.
+    // Listed first, while a member without the login id is still linked to
+    // its parent; in half the time, so another listing can follow a slow one.
     this.take(listProcsSync(750));
     this.signal('SIGKILL');
     const pause = new Int32Array(new SharedArrayBuffer(4));
@@ -416,6 +422,7 @@ class LoginTree {
 
   private take(listing: Proc[] | string, signal?: () => NodeJS.Signals): boolean | undefined {
     if (typeof listing === 'string') {
+      this.empty = 0;
       this.failure = listing;
       if (!this.signalled) this.blind ??= listing;
       return undefined;
@@ -434,14 +441,19 @@ class LoginTree {
       }
     }
     const members = live.filter((proc) => tree.has(proc.pid));
+    // ps reads processes one by one: an empty listing may have missed a
+    // helper forked as its parent went, so the end takes two in a row, and
+    // the groups stay held across the first.
+    if (members.length === 0) return ++this.empty < 2;
+    this.empty = 0;
     const groups = [...new Set(members.map((proc) => proc.pgid))].filter((group) => group > 1 && group !== own);
     const found = groups.filter((group) => !this.groups.includes(group));
     this.groups = groups;
     if (signal) this.signal(signal(), found);
-    return members.length > 0;
+    return true;
   }
 
-  // A whole word: not OLD_CODEX_HOME=, nor another home that starts the same.
+  // A whole word: not OLD_NANOCLAW_CODEX_LOGIN=, nor an id that starts the same.
   private marks(proc: Proc): boolean {
     const { text } = proc;
     for (let at = text.indexOf(this.marker); at >= 0; at = text.indexOf(this.marker, at + 1)) {
@@ -507,6 +519,9 @@ function parsePs(stdout: string): Proc[] | string {
 }
 
 const LOGIN_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+// Marks the login's processes. An ASCII word of setup's own: ps may escape a
+// path (a newline, or non-ASCII under the C locale).
+const LOGIN_ID_VAR = 'NANOCLAW_CODEX_LOGIN';
 const STOP_GRACE_MS = 3000;
 const PS_TIMEOUT_MS = 2000;
 const STALE_LOGIN_MS = 60 * 60 * 1000;
@@ -539,6 +554,7 @@ async function signIn(
   root: string,
   loginHome: string,
   login: {
+    id: string;
     onSpawn: (child: ChildProcess) => void;
     stop: (signal: NodeJS.Signals) => void;
     // Whether the login was stopped as one that failed.
@@ -575,7 +591,7 @@ async function signIn(
   const args = method === 'device' ? ['login', '--device-auth'] : ['login'];
   const start = Date.now();
   const { code, error } = await runInherit(cli.command, [...cli.prefix, ...args], {
-    env: { CODEX_HOME: loginHome },
+    env: { CODEX_HOME: loginHome, [LOGIN_ID_VAR]: login.id },
     onSpawn: login.onSpawn,
   });
   // Until the login's whole tree is gone: a stop for a signal then ends setup.
@@ -614,7 +630,11 @@ async function signIn(
   if (failed || !fs.existsSync(authJsonPath)) {
     setupLog.step('auth', 'failed', durationMs, { PROVIDER: 'codex', METHOD: method, ERROR: 'auth_json_not_found' });
     p.log.error(
-      brandBody('Codex login succeeded but no auth.json was written. Try again, or paste an API key instead.'),
+      brandBody(
+        failed
+          ? 'The Codex sign-in ended without signing in. Try again, or paste an API key instead.'
+          : 'Codex login succeeded but no auth.json was written. Try again, or paste an API key instead.',
+      ),
     );
     process.exit(1);
   }

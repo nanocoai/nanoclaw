@@ -208,11 +208,12 @@ afterEach(() => {
  * as pnpm 12 runs Codex. `late` starts it only on SIGTERM, 300 ms before the
  * wrapper exits; `exit` has the wrapper exit by itself, with `auth.json`
  * written into its CODEX_HOME first when `auth` is set. `bareEnv` starts the
- * grandchild with no environment, so no CODEX_HOME; `bareLeader` starts the
- * wrapper without CODEX_HOME, as `ps` shows a leader whose environment it
- * can't read. `execOnTerm` plays the grandchild as a shell, with no
- * environment, that execs another program on SIGTERM. Both give up after
- * 20 s, so a failing run leaves nothing.
+ * grandchild with no environment, so no login id; `bareLeader` starts the
+ * wrapper without it, as `ps` shows a leader whose environment it can't read.
+ * `execOnTerm` plays the grandchild as a shell, with no environment, that
+ * execs another program on SIGTERM. `$HELPER` in `onTerm` names a file whose
+ * pid counts as the tree's too. All give up after 20 s, so a failing run
+ * leaves nothing.
  */
 function playTree(
   onTerm: string,
@@ -230,12 +231,19 @@ function playTree(
     bareLeader?: boolean;
     execOnTerm?: boolean;
   } = {},
-): { pids: () => number[]; running: () => boolean; home: () => string | undefined } {
+): {
+  pids: () => number[];
+  running: () => boolean;
+  home: () => string | undefined;
+  id: () => string | undefined;
+} {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-login-tree-'));
   treeDirs.push(dir);
-  const [wrapperFile, loginFile] = ['wrapper.pid', 'login.pid'].map((name) => path.join(dir, name));
+  const [wrapperFile, loginFile, helperFile] = ['wrapper.pid', 'login.pid', 'helper.pid'].map((name) =>
+    path.join(dir, name),
+  );
   const login =
-    `process.on('SIGTERM', () => { ${onTerm} });` +
+    `process.on('SIGTERM', () => { ${onTerm.replaceAll('$HELPER', JSON.stringify(helperFile))} });` +
     `require('fs').writeFileSync(${JSON.stringify(loginFile)}, String(process.pid));` +
     `setTimeout(() => {}, 20000);`;
   // A shell that, on SIGTERM, execs into a 300 ms sleep: same pid and group, another command line.
@@ -255,18 +263,20 @@ function playTree(
       : '') +
     `setTimeout(() => process.exit(1), 20000);`;
   let home: string | undefined;
+  let id: string | undefined;
   mockSpawn.mockImplementation((...args: unknown[]) => {
     const opts = args[2] as { env: NodeJS.ProcessEnv };
     home = opts.env.CODEX_HOME;
-    const { CODEX_HOME: _home, ...rest } = opts.env;
+    id = opts.env.NANOCLAW_CODEX_LOGIN;
+    const { NANOCLAW_CODEX_LOGIN: _id, ...rest } = opts.env;
     return realSpawn(process.execPath, ['-e', wrapper], bareLeader ? { ...opts, env: rest } : opts);
   });
   const pids = (): number[] =>
-    [wrapperFile, loginFile]
+    [wrapperFile, loginFile, helperFile]
       .filter((file) => fs.existsSync(file))
       .map((file) => Number(fs.readFileSync(file, 'utf-8')))
       .filter((pid) => pid > 1);
-  return { pids, running: () => pids().some(isRunning), home: () => home };
+  return { pids, running: () => pids().some(isRunning), home: () => home, id: () => id };
 }
 
 /**
@@ -358,6 +368,8 @@ describe('runCodexLoginAuth', () => {
     const codexHome = login.env()?.CODEX_HOME;
     expect(codexHome).toBeDefined();
     expect(codexHome).not.toBe(path.join(os.homedir(), '.codex'));
+    // Its processes carry an id of the sign-in's own, for stopping them.
+    expect(login.env()?.NANOCLAW_CODEX_LOGIN).toMatch(/^[0-9a-f]{16}$/);
 
     // The vault snapshot was read from the isolated dir, not ~/.codex.
     expect(save).toHaveBeenCalledWith('codex', { kind: 'oauth', file: path.join(codexHome!, 'auth.json') });
@@ -527,7 +539,7 @@ describe('runCodexLoginAuth', () => {
     ['in the wrapper group', false, false, ['SIGKILL wrapper group', 'home removed']],
     ['in a group of its own', true, false, ['SIGKILL wrapper group', 'SIGKILL other group', 'home removed']],
     [
-      'in a group of its own, without CODEX_HOME',
+      'in a group of its own, with no environment',
       true,
       true,
       ['SIGKILL wrapper group', 'SIGKILL other group', 'home removed'],
@@ -553,7 +565,7 @@ describe('runCodexLoginAuth', () => {
   );
 
   // A wrapper killed by a signal may leave Codex behind, orphaned. Setup still
-  // finds it by the CODEX_HOME it inherited, and stops it before the failure
+  // finds it by the login id it inherited, and stops it before the failure
   // is reported and the home goes.
   it.each([
     ['in the wrapper group', false, 'wrapper'],
@@ -651,7 +663,7 @@ describe('runCodexLoginAuth', () => {
     expect(isRunning(tree.pids()[1])).toBe(false);
     expect(stop.order).toEqual(['SIGTERM other group', 'home removed']);
     expect(stop.removed).toEqual([{ treeRunning: false }]);
-    expect(printed(log, stdout)).toMatch(/Couldn't complete the Codex sign-in|no auth\.json was written/);
+    expect(printed(log, stdout)).toMatch(/Couldn't complete the Codex sign-in|ended without signing in/);
   });
 
   /** Fails listings `from` to `to` (from 1), as if ps were missing or as a ps that errs; the others are real. */
@@ -681,7 +693,7 @@ describe('runCodexLoginAuth', () => {
     expect(save).not.toHaveBeenCalled();
     expect(stop.order).toEqual(['SIGTERM other group', 'home removed']);
     expect(stop.authAtRemoval).toEqual([true]);
-    expect(printed(log, stdout)).toContain('no auth.json was written');
+    expect(printed(log, stdout)).toContain('The Codex sign-in ended without signing in');
   });
 
   // Each listing stands alone: one that fails doesn't stop a later one from
@@ -744,6 +756,31 @@ describe('runCodexLoginAuth', () => {
     );
   });
 
+  // ps reads processes one by one, so a listing can miss one forked as its
+  // parent went: one empty listing isn't the end.
+  it('when one listing during the stop misses the tree, a later one still finds it, and the home waits', async () => {
+    const tree = playTree('setTimeout(() => process.exit(0), 300)', true);
+    const stop = watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const before = listeners();
+    const { done, ready } = signInOn(tree);
+    await ready;
+    let calls = 0;
+    mockPs.run = (file, args, opts, cb) =>
+      realExecFile(file, args, opts, (error, stdout, stderr) => {
+        calls += 1;
+        // Only setup's own row, as if the listing had missed the rest.
+        const own = (row: string) => row.trim().startsWith(`${process.pid} `);
+        cb(error, calls === 2 ? String(stdout).split('\n').filter(own).join('\n') : stdout, stderr);
+      });
+    signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(calls).toBeGreaterThan(2);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+    expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false, home: false }]);
+  });
+
   // Without a listing before the first signal, a process known only through
   // its parent may go unseen: Codex is still stopped, but the home stays.
   it('when the listing before the first signal fails, stops what it finds later, keeps the home and says so', async () => {
@@ -768,9 +805,9 @@ describe('runCodexLoginAuth', () => {
   });
 
   it.each([
-    ['whose CODEX_HOME only starts the same', (home: string) => ({ env: { CODEX_HOME: `${home}-other` } })],
-    ['with the home in OLD_CODEX_HOME', (home: string) => ({ env: { OLD_CODEX_HOME: home } })],
-    ['naming it inside an argument', (home: string) => ({ arg: `--note=CODEX_HOME=${home}` })],
+    ['whose login id only starts the same', (id: string) => ({ env: { NANOCLAW_CODEX_LOGIN: `${id}0` } })],
+    ['with the id in OLD_NANOCLAW_CODEX_LOGIN', (id: string) => ({ env: { OLD_NANOCLAW_CODEX_LOGIN: id } })],
+    ['naming it inside an argument', (id: string) => ({ arg: `--note=NANOCLAW_CODEX_LOGIN=${id}` })],
   ])("stops only the sign-in's own processes, not one %s", async (_label, decoyOf) => {
     const before = listeners();
     const tree = playTree('setTimeout(() => process.exit(0), 300)', true);
@@ -778,7 +815,7 @@ describe('runCodexLoginAuth', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const { done, ready } = signInOn(tree);
     await ready;
-    const { env, arg } = decoyOf(tree.home()!) as { env?: Record<string, string>; arg?: string };
+    const { env, arg } = decoyOf(tree.id()!) as { env?: Record<string, string>; arg?: string };
     const decoy = realSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)', ...(arg ? ['--', arg] : [])], {
       stdio: 'ignore',
       detached: true,
@@ -798,7 +835,7 @@ describe('runCodexLoginAuth', () => {
 
   // macOS hides a system binary's environment: such a member is found through
   // its parent, and still waited for once that has gone.
-  it('stops a member without CODEX_HOME, and waits for it after its parent has gone', async () => {
+  it('stops a member with no environment, and waits for it after its parent has gone', async () => {
     const before = listeners();
     const tree = playTree('setTimeout(() => process.exit(0), 300)', true, { bareEnv: true });
     const stop = watchStop(tree);
@@ -814,7 +851,7 @@ describe('runCodexLoginAuth', () => {
   });
 
   // The login has a session of its own, so its leader's group holds only its processes.
-  it("stops what a login that fails leaves in its group, even what doesn't show CODEX_HOME", async () => {
+  it('stops what a login that fails leaves in its group, even what shows no environment', async () => {
     const tree = playTree('setTimeout(() => process.exit(0), 300)', false, {
       bareEnv: true,
       exit: { after: 500, code: 1 },
@@ -844,14 +881,12 @@ describe('runCodexLoginAuth', () => {
     expect(stop.removed).toEqual([{ treeRunning: false }]);
   });
 
-  it('waits for a helper that a member starts in its own group on SIGTERM, with no CODEX_HOME, before exiting', async () => {
+  it('waits for a helper that a member starts in its own group on SIGTERM, with no environment, before exiting', async () => {
     const before = listeners();
-    const helper = (file: string) =>
-      `require('fs').writeFileSync(${JSON.stringify(file)}, String(require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300)'], { stdio: 'ignore', env: {} }).pid)); process.exit(0);`;
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-login-helper-'));
-    treeDirs.push(dir);
-    const helperFile = path.join(dir, 'helper.pid');
-    const tree = playTree(helper(helperFile), true);
+    const tree = playTree(
+      "require('fs').writeFileSync($HELPER, String(require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300)'], { stdio: 'ignore', env: {} }).pid)); process.exit(0);",
+      true,
+    );
     const stop = watchStop(tree);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const { done, ready } = signInOn(tree);
@@ -859,10 +894,9 @@ describe('runCodexLoginAuth', () => {
     signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
 
     await expect(done).rejects.toThrow('setup stopped');
-    const helperPid = Number(fs.readFileSync(helperFile, 'utf-8'));
+    expect(tree.pids()).toHaveLength(3);
     expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGTERM other group', 'home removed']);
     expect(stop.removed).toEqual([{ treeRunning: false }]);
-    expect(isRunning(helperPid)).toBe(false);
   });
 
   it("stops a login whose own environment ps can't show", async () => {
