@@ -208,8 +208,9 @@ afterEach(() => {
  * as pnpm 12 runs Codex. `late` starts it only on SIGTERM, 300 ms before the
  * wrapper exits; `exit` has the wrapper exit by itself, with `auth.json`
  * written into its CODEX_HOME first when `auth` is set. `bareEnv` starts the
- * grandchild with no environment, so no CODEX_HOME. Both give up
- * after 20 s, so a failing run leaves nothing.
+ * grandchild with no environment, so no CODEX_HOME; `bareLeader` starts the
+ * wrapper without CODEX_HOME, as `ps` shows a leader whose environment it
+ * can't read. Both give up after 20 s, so a failing run leaves nothing.
  */
 function playTree(
   onTerm: string,
@@ -218,7 +219,13 @@ function playTree(
     late = false,
     exit,
     bareEnv = false,
-  }: { late?: boolean; exit?: { after: number; code: number; auth?: boolean }; bareEnv?: boolean } = {},
+    bareLeader = false,
+  }: {
+    late?: boolean;
+    exit?: { after: number; code: number; auth?: boolean };
+    bareEnv?: boolean;
+    bareLeader?: boolean;
+  } = {},
 ): { pids: () => number[]; running: () => boolean; home: () => string | undefined } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-login-tree-'));
   treeDirs.push(dir);
@@ -243,7 +250,8 @@ function playTree(
   mockSpawn.mockImplementation((...args: unknown[]) => {
     const opts = args[2] as { env: NodeJS.ProcessEnv };
     home = opts.env.CODEX_HOME;
-    return realSpawn(process.execPath, ['-e', wrapper], opts);
+    const { CODEX_HOME: _home, ...rest } = opts.env;
+    return realSpawn(process.execPath, ['-e', wrapper], bareLeader ? { ...opts, env: rest } : opts);
   });
   const pids = (): number[] =>
     [wrapperFile, loginFile]
@@ -465,9 +473,10 @@ describe('runCodexLoginAuth', () => {
     expect(listeners()).toEqual(before);
   });
 
+  // Killing the wrapper first would orphan a member found only through it.
   it('on a second signal before the tree is known, still finds and kills all of it', async () => {
     const before = listeners();
-    const tree = playTree('', true);
+    const tree = playTree('', true, { bareEnv: true });
     const stop = watchStop(tree);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const { done, ready } = signInOn(tree);
@@ -477,21 +486,26 @@ describe('runCodexLoginAuth', () => {
     signalSignIn(sigterms, 'SIGTERM');
 
     await expect(done).rejects.toThrow('setup stopped');
-    expect(stop.order[0]).toBe('SIGKILL wrapper group');
-    expect(stop.order).toContain('SIGKILL other group');
+    expect(stop.order).toEqual(['SIGKILL wrapper group', 'SIGKILL other group', 'home removed']);
     expect(stop.removed).toEqual([{ treeRunning: false }]);
     expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false, home: false }]);
   });
 
   // Both trees: Codex in pnpm's group (pnpm 10) or in a group of its own (pnpm 12).
   it.each([
-    ['in the wrapper group', false, ['SIGKILL wrapper group', 'home removed']],
-    ['in a group of its own', true, ['SIGKILL wrapper group', 'SIGKILL other group', 'home removed']],
+    ['in the wrapper group', false, false, ['SIGKILL wrapper group', 'home removed']],
+    ['in a group of its own', true, false, ['SIGKILL wrapper group', 'SIGKILL other group', 'home removed']],
+    [
+      'in a group of its own, without CODEX_HOME',
+      true,
+      true,
+      ['SIGKILL wrapper group', 'SIGKILL other group', 'home removed'],
+    ],
   ])(
     'kills the login tree outright when setup exits mid-sign-in, with the login %s',
-    async (_label, ownGroup, order) => {
+    async (_label, ownGroup, bareEnv, order) => {
       const before = listeners();
-      const tree = playTree('', ownGroup);
+      const tree = playTree('', ownGroup, { bareEnv });
       const stop = watchStop(tree);
       vi.spyOn(console, 'log').mockImplementation(() => {});
       vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -632,17 +646,22 @@ describe('runCodexLoginAuth', () => {
     expect(printed(log, stdout)).not.toContain("Couldn't confirm");
   });
 
-  it("stops only the sign-in's own processes, not one whose CODEX_HOME only starts the same", async () => {
+  it.each([
+    ['whose CODEX_HOME only starts the same', (home: string) => ({ env: { CODEX_HOME: `${home}-other` } })],
+    ['with the home in OLD_CODEX_HOME', (home: string) => ({ env: { OLD_CODEX_HOME: home } })],
+    ['naming it inside an argument', (home: string) => ({ arg: `--note=CODEX_HOME=${home}` })],
+  ])("stops only the sign-in's own processes, not one %s", async (_label, decoyOf) => {
     const before = listeners();
     const tree = playTree('setTimeout(() => process.exit(0), 300)', true);
     const stop = watchStop(tree);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const { done, ready } = signInOn(tree);
     await ready;
-    const decoy = realSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], {
+    const { env, arg } = decoyOf(tree.home()!) as { env?: Record<string, string>; arg?: string };
+    const decoy = realSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)', ...(arg ? ['--', arg] : [])], {
       stdio: 'ignore',
       detached: true,
-      env: { ...process.env, CODEX_HOME: `${tree.home()}-other` },
+      env: { ...process.env, ...env },
     });
     try {
       await until(() => isRunning(decoy.pid!));
@@ -657,8 +676,8 @@ describe('runCodexLoginAuth', () => {
   });
 
   // macOS hides a system binary's environment: such a member is found through
-  // its parent, while that lives.
-  it('signals a member without CODEX_HOME through its parent', async () => {
+  // its parent, and still waited for once that has gone.
+  it('stops a member without CODEX_HOME, and waits for it after its parent has gone', async () => {
     const before = listeners();
     const tree = playTree('setTimeout(() => process.exit(0), 300)', true, { bareEnv: true });
     const stop = watchStop(tree);
@@ -668,8 +687,24 @@ describe('runCodexLoginAuth', () => {
     signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
 
     await expect(done).rejects.toThrow('setup stopped');
-    expect(stop.order.slice(0, 2)).toEqual(['SIGTERM wrapper group', 'SIGTERM other group']);
-    await until(() => !tree.running());
+    expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGTERM other group', 'home removed']);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+    expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false, home: false }]);
+  });
+
+  it("stops a login whose own environment ps can't show", async () => {
+    const before = listeners();
+    const tree = playTree('setTimeout(() => process.exit(0), 300)', false, { bareLeader: true });
+    const stop = watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { done, ready } = signInOn(tree);
+    await ready;
+    signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(stop.order).toEqual(['SIGTERM wrapper group', 'home removed']);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+    expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false, home: false }]);
   });
 
   it('when ps is missing on the way out, kills what it knows, keeps the home and says so', async () => {

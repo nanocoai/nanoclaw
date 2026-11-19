@@ -234,6 +234,9 @@ export async function runCodexLoginAuth(
   let level: NodeJS.Signals = 'SIGTERM';
   // Whether the whole tree was seen to end; the home goes only then.
   let ended: boolean | undefined;
+  // Once the stop has listed the tree: a kill before that could orphan a
+  // member it finds only through its parent.
+  let listed = false;
   let cleaned = false;
   const cleanUp = (): void => {
     if (cleaned) return;
@@ -271,6 +274,7 @@ export async function runCodexLoginAuth(
   async function stopTree(login: LoginTree): Promise<void> {
     // Before any signal, while a member without CODEX_HOME is still linked to its parent.
     await login.look();
+    listed = true;
     login.signal(level);
     const timer = setTimeout(() => {
       level = 'SIGKILL';
@@ -294,9 +298,9 @@ export async function runCodexLoginAuth(
         raise = signal;
         return;
       }
-      // A second signal kills at once.
+      // A second signal kills at once, or as soon as the tree is listed.
       level = 'SIGKILL';
-      tree?.signal('SIGKILL');
+      if (listed) tree?.signal('SIGKILL');
       return;
     }
     raise = signal;
@@ -345,19 +349,23 @@ type Proc = { pid: number; ppid: number; pgid: number; text: string };
 /**
  * The login's process tree. A listing finds its processes by the CODEX_HOME
  * each inherits, whatever became of its parent; one without it (macOS hides a
- * system binary's environment, such as pnpm 12's `sh`) only by descent, while
- * its parent lives. Nothing without CODEX_HOME writes to the home. Their groups
- * are the ones signalled: pnpm 12 runs Codex in a group of its own. A zombie
- * shows no environment, so it isn't one of them.
+ * system binary's environment, such as pnpm 12's `sh`) by descent, and after
+ * that as the same process (pid, group and command line) while it runs. Their
+ * groups are the ones signalled: pnpm 12 runs Codex in a group of its own. A
+ * zombie shows neither environment nor command line, so it isn't one of them.
  */
 class LoginTree {
   // As of the last listing; the login's own until there is one.
   private groups: number[];
+  // The members as last listed. The leader leads its own group (see
+  // runInherit), whatever it runs, until a listing shows its command line.
+  private known: Map<number, { pgid: number; text?: string }>;
   private readonly marker: string;
   failure: string | undefined;
 
   constructor(leader: number, home: string) {
     this.groups = [leader];
+    this.known = new Map([[leader, { pgid: leader }]]);
     this.marker = `CODEX_HOME=${home}`;
   }
 
@@ -384,6 +392,8 @@ class LoginTree {
   /** Kills the whole tree at once; whether it was seen to end. Bounded: nothing can wait during 'exit'. */
   killAll(): boolean {
     const end = Date.now() + 1500;
+    // Listed first, while a member without CODEX_HOME is still linked to its parent.
+    this.take(listProcsSync(1500));
     this.signal('SIGKILL');
     const pause = new Int32Array(new SharedArrayBuffer(4));
     for (let left = end - Date.now(); left > 0; left = end - Date.now()) {
@@ -404,12 +414,13 @@ class LoginTree {
     for (let grew = true; grew;) {
       grew = false;
       for (const proc of listing) {
-        if (tree.has(proc.pid) || !(tree.has(proc.ppid) || this.marks(proc))) continue;
+        if (tree.has(proc.pid) || !(tree.has(proc.ppid) || this.marks(proc) || this.knows(proc))) continue;
         tree.add(proc.pid);
         grew = true;
       }
     }
     const members = listing.filter((proc) => tree.has(proc.pid));
+    this.known = new Map(members.map((proc) => [proc.pid, { pgid: proc.pgid, text: proc.text }]));
     const groups = [...new Set(members.map((proc) => proc.pgid))].filter((group) => group > 1 && group !== own);
     const found = groups.filter((group) => !this.groups.includes(group));
     this.groups = groups;
@@ -417,11 +428,19 @@ class LoginTree {
     return members.length > 0;
   }
 
+  // A whole word: not OLD_CODEX_HOME=, nor another home that starts the same.
   private marks(proc: Proc): boolean {
-    const at = proc.text.indexOf(this.marker);
-    if (at < 0) return false;
-    const next = proc.text[at + this.marker.length];
-    return next === undefined || next === ' ';
+    const { text } = proc;
+    for (let at = text.indexOf(this.marker); at >= 0; at = text.indexOf(this.marker, at + 1)) {
+      const end = at + this.marker.length;
+      if ((at === 0 || text[at - 1] === ' ') && (end === text.length || text[end] === ' ')) return true;
+    }
+    return false;
+  }
+
+  private knows(proc: Proc): boolean {
+    const was = this.known.get(proc.pid);
+    return was !== undefined && was.pgid === proc.pgid && (was.text === undefined || was.text === proc.text);
   }
 }
 
