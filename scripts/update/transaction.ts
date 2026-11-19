@@ -1107,13 +1107,24 @@ export async function cutoverUpdate(
   if (git(runtime, state.projectRoot, ['rev-parse', 'HEAD']) !== state.originalHead) {
     throw new Error('Live checkout moved after the update was staged');
   }
-  // Re-check here too: validation may have run long ago, and this is the last
-  // point before the stop/drain cycle that the snapshot walk depends on.
-  assertMutableRootsResolvable(state.projectRoot);
-  // Refuse a snapshot that cannot fit while the service and agents still run,
-  // not after the stop and drain (#4478).
-  clearSnapshotLeftovers(path.join(state.transactionRoot, 'snapshot'));
-  assertSnapshotFits(state);
+  try {
+    // Re-check here too: validation may have run long ago, and this is the last
+    // point before the stop/drain cycle that the snapshot walk depends on.
+    assertMutableRootsResolvable(state.projectRoot);
+    // Refuse a snapshot that cannot fit while the service and agents still run,
+    // not after the stop and drain (#4478).
+    clearSnapshotLeftovers(path.join(state.transactionRoot, 'snapshot'));
+    assertSnapshotFits(state);
+  } catch (err) {
+    // Nothing stopped, so the phase stays; `status` still shows why it refused.
+    state.lastError = err instanceof Error ? err.message : String(err);
+    try {
+      saveState(state);
+    } catch {
+      // A full disk can fail this write too; the error thrown below names the cause.
+    }
+    throw err;
+  }
 
   state.service = runtime.detectService(state.projectRoot);
   // Service first, containers second: with the host down nothing can spawn a

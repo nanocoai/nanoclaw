@@ -1328,6 +1328,8 @@ describe('update-nanoclaw transaction end to end', () => {
       let state = loadState(fixture.install, prepared.id);
       expect(state.phase).toBe('validated');
       expect(state.snapshot).toBeUndefined();
+      // `status` says why it refused.
+      expect(state.lastError).toMatch(/^Not enough free space for mutable-state snapshot: /);
       expect(exec(fixture.install, 'git', ['rev-parse', 'HEAD'])).toBe(prepared.originalHead);
 
       // Enough room: the usual flow, checked once before the stop and again after the drain.
@@ -1335,6 +1337,7 @@ describe('update-nanoclaw transaction end to end', () => {
       const retry = events.length;
       state = await cutoverUpdate(fixture.install, prepared.id, runtime);
       expect(state.phase).toBe('cutover');
+      expect(state.lastError).toBeUndefined();
       expect(events.slice(retry, retry + 4)).toEqual([
         'space check',
         'service stop',
