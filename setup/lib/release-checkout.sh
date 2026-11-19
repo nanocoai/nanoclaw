@@ -17,7 +17,7 @@ release_checkout_saved_channel() {
   # `|| true`: no assignment is a normal answer, and callers run under pipefail.
   { grep -E '^[[:space:]]*NANOCLAW_UPDATE_CHANNEL[[:space:]]*=' "$1/.env" 2>/dev/null || true; } \
     | cut -d= -f2- \
-    | sed -E -e 's/^[[:space:]]+|[[:space:]]+$//g' -e 's/^"(.*)"$/\1/' -e "s/^'(.*)'\$/\\1/" \
+    | sed -E -e 's/^[[:space:]]+|[[:space:]]+$//g' -e "s/^\"(.*)\"\$|^'(.*)'\$/\\1\\2/" \
     | { grep -v '^$' || true; } | tail -1 \
     | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | tr 'A-Z' 'a-z'
 }
@@ -164,10 +164,14 @@ release_checkout_save_channel() {
   [ -r "$env" ] || return 1
   if [ "$(release_checkout_saved_channel "$1")" = "$2" ]; then return 0; fi
   last=$(tail -c 1 "$env") || return 1
-  {
-    if [ -n "$last" ]; then echo; fi
-    printf 'NANOCLAW_UPDATE_CHANNEL=%s\n' "$2"
-  } >> "$env"
+  # Private too, should .env vanish meanwhile and be created by the append.
+  (
+    umask 077
+    {
+      if [ -n "$last" ]; then echo; fi
+      printf 'NANOCLAW_UPDATE_CHANNEL=%s\n' "$2"
+    } >> "$env"
+  )
 }
 
 # release_checkout_switch <root> <channel> <tag> — put the install on a branch named

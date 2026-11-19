@@ -42,17 +42,17 @@ function commit(root: string, message: string): string {
 }
 
 /** Runs one helper function the way nanoclaw.sh does: sourced, under `set -euo pipefail`. */
-function helper(fn: string, ...args: string[]): { status: number; stdout: string; stderr: string } {
+function helper(fn: string, ...args: string[]): { status: number; stdout: string; raw: string; stderr: string } {
   try {
-    const stdout = execFileSync('bash', ['-c', 'set -euo pipefail; source "$0"; "$@"', HELPER, fn, ...args], {
+    const raw = execFileSync('bash', ['-c', 'set -euo pipefail; source "$0"; "$@"', HELPER, fn, ...args], {
       encoding: 'utf8',
       env: GIT_ENV,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    return { status: 0, stdout: stdout.trim(), stderr: '' };
+    return { status: 0, stdout: raw.trim(), raw, stderr: '' };
   } catch (err) {
     const failure = err as { status: number; stderr: string };
-    return { status: failure.status, stdout: '', stderr: failure.stderr };
+    return { status: failure.status, stdout: '', raw: '', stderr: failure.stderr };
   }
 }
 
@@ -166,14 +166,16 @@ describe('release checkout decision', () => {
   });
 
   it.each([
-    ['NANOCLAW_UPDATE_CHANNEL="ed ge"\n', 'ed ge'],
+    ['NANOCLAW_UPDATE_CHANNEL="ed ge"\n', 'ed ge\n'],
     // Not empty once unquoted, so it wins over beta, then trims to nothing.
-    ['NANOCLAW_UPDATE_CHANNEL=beta\nNANOCLAW_UPDATE_CHANNEL=" "\n', ''],
+    ['NANOCLAW_UPDATE_CHANNEL=beta\nNANOCLAW_UPDATE_CHANNEL=" "\n', '\n'],
+    // One pair of quotes comes off, as in the updater.
+    ['NANOCLAW_UPDATE_CHANNEL="\'edge\'"\n', "'edge'\n"],
   ])('asks again over %j, which the updater rejects', (env, read) => {
     const { install } = freshClone();
     fs.writeFileSync(path.join(install, '.env'), env);
     expect(() => readChannelSetting(install)).toThrow('Unknown update channel');
-    expect(helper('release_checkout_saved_channel', install).stdout).toBe(read);
+    expect(helper('release_checkout_saved_channel', install).raw).toBe(read);
     expect(decide(install)).toBe('offer v2.4.0 v2.5.0-rc.1');
     expect(helper('release_checkout_save_channel', install, 'beta').status).toBe(0);
     expect(readChannelSetting(install)).toBe('beta');
@@ -430,8 +432,12 @@ function entrypointClone() {
   fs.mkdirSync(path.join(seed, 'assets'));
   fs.writeFileSync(path.join(seed, 'assets/setup-splash.txt'), 'splash\n');
   fs.writeFileSync(path.join(seed, 'setup.sh'), 'touch bootstrap-ran\n');
+  // Marked, so a test can tell this release's nanoclaw.sh ran and not main's.
+  const real = fs.readFileSync(path.join(seed, 'nanoclaw.sh'), 'utf8');
+  fs.writeFileSync(path.join(seed, 'nanoclaw.sh'), real.replace('\n', '\necho "STARTED v2.5.0-rc.1"\n'));
   commit(seed, 'v2.5.0-rc.1');
   git(seed, ['tag', '-a', 'v2.5.0-rc.1', '-m', 'v2.5.0-rc.1']);
+  fs.writeFileSync(path.join(seed, 'nanoclaw.sh'), real);
   commit(seed, 'main tip');
 
   const install = path.join(temp('entry-install-'), 'nanoclaw');
@@ -604,6 +610,7 @@ describe.runIf(['linux', 'darwin'].includes(process.platform) && process.getuid?
       expect(status).toBe(0);
       expect(stdout.split('Choose [1/2/3]')).toHaveLength(2);
       expect(stdout).toContain('Installing v2.5.0-rc.1 (branch: beta).');
+      expect(stdout).toContain('STARTED v2.5.0-rc.1');
       expect(stdout).toContain('HANDOFF args=[--silent run setup:auto --template-path sales/sdr] channel=[beta]');
       expect(fs.existsSync(path.join(install, 'bootstrap-ran'))).toBe(true);
       expect(git(install, ['symbolic-ref', '--short', 'HEAD'])).toBe('beta');
