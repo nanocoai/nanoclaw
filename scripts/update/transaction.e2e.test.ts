@@ -15,6 +15,7 @@ import {
   prepareUpdate,
   pruneTransactions,
   rollbackUpdate,
+  summarizeState,
   validateUpdate,
   type UpdateRuntime,
 } from './transaction.js';
@@ -284,6 +285,19 @@ function recoveryChain(message: string): string {
   const chain = message.split('(safe to run again if a step fails):\n')[1] ?? '';
   return chain.split('\nWhen it succeeds, start NanoClaw: ')[0];
 }
+
+// Reports `free()` bytes free on every statfs; the snapshot space check is its only caller.
+function fakeFreeSpace(free: () => number): void {
+  const statfs = fs.statfsSync;
+  vi.spyOn(fs, 'statfsSync').mockImplementation(((target: fs.PathLike) => ({
+    ...statfs(target),
+    bsize: 1,
+    bavail: free(),
+  })) as typeof fs.statfsSync);
+}
+
+const MIB = 1024 ** 2;
+const GIB = 1024 ** 3;
 
 function failSnapshotCopy(file: string): void {
   const copyFile = fs.copyFileSync;
@@ -1285,6 +1299,217 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(after.phase).toBe('validated');
     expect(after.snapshot).toBeUndefined();
     expect(exec(stuck.install, 'git', ['rev-parse', 'HEAD'])).toBe(stuckPrepared.originalHead);
+  });
+
+  it('refuses a snapshot that will not fit before stopping the service or any agent, then cuts over once space is freed (#4478)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+    const prepared = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    await validateUpdate(fixture.install, prepared.id, runtime);
+    let free = 100 * MIB;
+    fakeFreeSpace(() => {
+      events.push('space check');
+      return free;
+    });
+    try {
+      const before = events.length;
+      await expect(cutoverUpdate(fixture.install, prepared.id, runtime)).rejects.toThrow(
+        new RegExp(
+          'Not enough free space for mutable-state snapshot: need 257 MiB \\(1 MiB of mutable state plus 256 MiB spare\\), ' +
+            `have 100 MiB free in .*Free at least 157 MiB more.*` +
+            `cd .+ && pnpm exec tsx .+/scripts/update-nanoclaw\\.ts'? prune --id ${prepared.id} --dry-run`,
+        ),
+      );
+      // Nothing stopped, drained, reset or built.
+      expect(events.slice(before)).toEqual(['space check']);
+      let state = loadState(fixture.install, prepared.id);
+      expect(state.phase).toBe('validated');
+      expect(state.snapshot).toBeUndefined();
+      expect(exec(fixture.install, 'git', ['rev-parse', 'HEAD'])).toBe(prepared.originalHead);
+
+      // Enough room: the usual flow, checked once before the stop and again after the drain.
+      free = 10 * GIB;
+      const retry = events.length;
+      state = await cutoverUpdate(fixture.install, prepared.id, runtime);
+      expect(state.phase).toBe('cutover');
+      expect(events.slice(retry, retry + 4)).toEqual([
+        'space check',
+        'service stop',
+        'containers drained',
+        'space check',
+      ]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('validate reports the snapshot size against free space, and a short disk never fails validation (#4478)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime } = fakeRuntime(fixture.install);
+    const prepared = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    // 40 MiB (sparse) the walk must count, on top of the fixture's few bytes.
+    const pad = path.join(prepared.projectRoot, 'data', 'pad.bin');
+    fs.writeFileSync(pad, '');
+    fs.truncateSync(pad, 40 * MIB);
+    let free = () => 10 * GIB;
+    fakeFreeSpace(() => free());
+    try {
+      let state = await validateUpdate(fixture.install, prepared.id, runtime);
+      expect(state.snapshotSpace).toMatchObject({ fits: true, freeBytes: 10 * GIB });
+      expect(state.snapshotSpace?.neededBytes).toBeGreaterThan(296 * MIB);
+      expect(state.snapshotSpace?.neededBytes).toBeLessThan(297 * MIB);
+      expect(state.snapshotSpace?.summary).toMatch(
+        /^Snapshot fits: need 297 MiB \(41 MiB of mutable state plus 256 MiB spare\), have 10\.0 GiB free in /,
+      );
+      expect(summarizeState(state).snapshotSpace).toEqual(state.snapshotSpace);
+
+      free = () => 100 * MIB;
+      state = await validateUpdate(fixture.install, prepared.id, runtime);
+      expect(state.phase).toBe('validated');
+      expect(state.snapshotSpace?.fits).toBe(false);
+      // The prune command comes last, so it can be copied as is.
+      expect(state.snapshotSpace?.summary).toMatch(
+        new RegExp(
+          `^Cutover will refuse before it stops anything\\. Not enough free space .*prune --id ${state.id} --dry-run$`,
+        ),
+      );
+
+      // A crashed copy holds 300 MiB (sparse) that cutover would clear first: it
+      // counts as free, but validate leaves it, as a cutover may be building it.
+      const partial = path.join(prepared.transactionRoot, 'snapshot.new', 'data', 'v2.db');
+      write(prepared.transactionRoot, 'snapshot.new/data/v2.db', '');
+      fs.truncateSync(partial, 300 * MIB);
+      state = await validateUpdate(fixture.install, prepared.id, runtime);
+      expect(state.snapshotSpace).toMatchObject({ fits: true, freeBytes: 400 * MIB });
+      expect(state.snapshotSpace?.summary).toMatch(
+        /^Snapshot fits: need 297 MiB .* have 400 MiB free in .*\. Free space counts 300 MiB a failed copy holds; cutover removes it first\.$/,
+      );
+      expect(fs.statSync(partial).size).toBe(300 * MIB);
+
+      // A crash between the renames: with `snapshot/` absent, `.prev` is the only
+      // complete copy and cutover keeps it, so it is not free. Beside `snapshot/`, it is.
+      fs.renameSync(
+        path.join(prepared.transactionRoot, 'snapshot.new'),
+        path.join(prepared.transactionRoot, 'snapshot.prev'),
+      );
+      state = await validateUpdate(fixture.install, prepared.id, runtime);
+      expect(state.snapshotSpace).toMatchObject({ fits: false, freeBytes: 100 * MIB });
+      fs.mkdirSync(path.join(prepared.transactionRoot, 'snapshot'));
+      state = await validateUpdate(fixture.install, prepared.id, runtime);
+      expect(state.snapshotSpace).toMatchObject({ fits: true, freeBytes: 400 * MIB });
+
+      vi.mocked(fs.statfsSync).mockImplementation(() => {
+        throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+      });
+      state = await validateUpdate(fixture.install, prepared.id, runtime);
+      expect(state.phase).toBe('validated');
+      expect(state.snapshotSpace).toEqual({
+        fits: false,
+        summary:
+          'Could not measure the snapshot: EIO: i/o error. Cutover runs the same check before it stops anything.',
+      });
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('still refuses when the disk fills between the pre-stop check and the snapshot, and restarts the service though state cannot be saved (#4478)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+    const prepared = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    await validateUpdate(fixture.install, prepared.id, runtime);
+    let free = 10 * GIB;
+    fakeFreeSpace(() => {
+      events.push('space check');
+      return free;
+    });
+    // Full after the drain: no free bytes, and the state file cannot be written.
+    runtime.drainContainers = async () => {
+      events.push('containers drained');
+      free = 0;
+    };
+    const writeFile = fs.writeFileSync;
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((file, data, options) => {
+      if (free === 0) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      writeFile(file, data, options);
+    });
+    try {
+      const before = events.length;
+      await expect(cutoverUpdate(fixture.install, prepared.id, runtime)).rejects.toThrow(
+        'Not enough free space for mutable-state snapshot',
+      );
+      expect(events.slice(before)).toEqual([
+        'space check',
+        'service stop',
+        'containers drained',
+        'space check',
+        'service start',
+      ]);
+      const state = loadState(fixture.install, prepared.id);
+      expect(state.phase).toBe('validated');
+      expect(state.snapshot).toBeUndefined();
+      expect(fs.existsSync(path.join(state.transactionRoot, 'snapshot.new'))).toBe(false);
+      expect(exec(fixture.install, 'git', ['rev-parse', 'HEAD'])).toBe(prepared.originalHead);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("does not count a crashed attempt's partial snapshot against the pre-stop space check (#4478)", async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime } = fakeRuntime(fixture.install);
+    const prepared = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    await validateUpdate(fixture.install, prepared.id, runtime);
+    // A copy that died mid-way. The disk only has room once it is gone.
+    const partial = path.join(prepared.transactionRoot, 'snapshot.new', 'data', 'v2.db');
+    write(prepared.transactionRoot, 'snapshot.new/data/v2.db', 'partial');
+    fakeFreeSpace(() =>
+      fs.existsSync(partial) && fs.readFileSync(partial, 'utf8') === 'partial' ? 100 * MIB : 10 * GIB,
+    );
+    try {
+      const state = await cutoverUpdate(fixture.install, prepared.id, runtime);
+      expect(state.phase).toBe('cutover');
+      expect(fs.readFileSync(path.join(state.transactionRoot, 'snapshot', 'data/v2.db'), 'utf8')).toBe('old-schema');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('the pre-stop space check skips entries a live agent deletes or replaces mid-walk (#4478)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime } = fakeRuntime(fixture.install);
+    const prepared = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    await validateUpdate(fixture.install, prepared.id, runtime);
+    // Until the service stops, data/ lists a journal that is gone by the time it is
+    // stat'ed (ENOENT), and a child of what is now a file (ENOTDIR).
+    let live = true;
+    const stop = runtime.stopService;
+    runtime.stopService = async (handle) => {
+      live = false;
+      await stop(handle);
+    };
+    const dataDir = path.join(prepared.projectRoot, 'data');
+    const readdir = fs.readdirSync;
+    vi.spyOn(fs, 'readdirSync').mockImplementation(((dir: fs.PathLike, options?: never) => {
+      const names = readdir(dir, options);
+      return live && String(dir) === dataDir ? [...names, 'inbound.db-journal', 'v2.db/child'] : names;
+    }) as typeof fs.readdirSync);
+    try {
+      const state = await cutoverUpdate(fixture.install, prepared.id, runtime);
+      expect(state.phase).toBe('cutover');
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it('a `docker stop` that stalls past its bound still lands cutover on the rollback path (review on #3873)', async () => {

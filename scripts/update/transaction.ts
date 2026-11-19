@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import type { GatewayCatalogEntry } from '../../setup/gateways/catalog.js';
 import { getInstallSlug } from '../../src/install-slug.js';
@@ -67,11 +67,21 @@ export interface UpdateState {
   service?: ServiceHandle;
   snapshot?: SnapshotEntry[];
   validation?: string[];
+  /** Snapshot size against free space, measured at the end of validate. */
+  snapshotSpace?: SnapshotSpaceReport;
   gatewaySelection?: string;
   lastError?: string;
   createdAt: string;
   completedAt?: string;
   stageCleanedAt?: string;
+}
+
+export interface SnapshotSpaceReport {
+  fits: boolean;
+  /** Snapshot plus the 256 MiB spare; absent when it could not be measured. */
+  neededBytes?: number;
+  freeBytes?: number;
+  summary: string;
 }
 
 export interface PruneReport {
@@ -563,6 +573,7 @@ export async function validateUpdate(
     }
 
     state.validation = checks;
+    state.snapshotSpace = reportSnapshotSpace(state);
     state.phase = 'validated';
     state.lastError = undefined;
     saveState(state);
@@ -612,6 +623,110 @@ function copyEntry(source: string, destination: string, dereferenceRoot = false)
   // Sockets and other ephemeral special files are intentionally omitted.
 }
 
+// Removes what an interrupted snapshot left next to `snapshot/`. Safe while
+// NanoClaw still runs: restores only ever read `snapshot/` itself.
+function clearSnapshotLeftovers(snapshotRoot: string): void {
+  const supersededRoot = `${snapshotRoot}.prev`;
+  fs.rmSync(`${snapshotRoot}.new`, { recursive: true, force: true });
+  // Self-heal the rename window: a crash between the two renames leaves
+  // `snapshot/` absent with the complete prior copy still in `.prev` — put it
+  // back rather than deleting the only complete copy on disk.
+  if (!fs.existsSync(snapshotRoot) && fs.existsSync(supersededRoot)) {
+    fs.renameSync(supersededRoot, snapshotRoot);
+  }
+  fs.rmSync(supersededRoot, { recursive: true, force: true });
+}
+
+const SNAPSHOT_RESERVE_BYTES = 256 * 1024 * 1024;
+// The controller running now: a live checkout older than v2.3.0 has no prune.
+// From import.meta.url, the only import.meta field older installs' tsx is known to set.
+const CONTROLLER_SCRIPT = fileURLToPath(new URL('../update-nanoclaw.ts', import.meta.url));
+
+// Rounds up by default, so freeing the printed amount is always enough.
+function formatBytes(bytes: number, round: (value: number) => number = Math.ceil): string {
+  const gib = bytes / 1024 ** 3;
+  return gib >= 1 ? `${(round(gib * 10) / 10).toFixed(1)} GiB` : `${round(bytes / 1024 ** 2)} MiB`;
+}
+
+interface SnapshotSpace {
+  snapshotBytes: number;
+  neededBytes: number;
+  freeBytes: number;
+}
+
+// One measure for every caller: validate reports it, cutover checks it before
+// it stops anything (#4478), and createSnapshot checks it again after the drain.
+function measureSnapshotSpace(state: UpdateState): SnapshotSpace {
+  const snapshotBytes = MUTABLE_PATHS.reduce(
+    (total, relativePath) => total + entrySize(path.join(state.projectRoot, relativePath), true),
+    0,
+  );
+  const disk = fs.statfsSync(state.transactionRoot);
+  return {
+    snapshotBytes,
+    neededBytes: snapshotBytes + SNAPSHOT_RESERVE_BYTES,
+    freeBytes: Number(disk.bavail) * Number(disk.bsize),
+  };
+}
+
+function describeSnapshotSpace(state: UpdateState, space: SnapshotSpace): string {
+  return (
+    `need ${formatBytes(space.neededBytes)} (${formatBytes(space.snapshotBytes)} of mutable state ` +
+    `plus ${formatBytes(SNAPSHOT_RESERVE_BYTES)} spare), have ${formatBytes(space.freeBytes, Math.floor)} free in ${state.transactionRoot}`
+  );
+}
+
+function snapshotSpaceShortfall(state: UpdateState, space: SnapshotSpace): string {
+  return (
+    `Not enough free space for mutable-state snapshot: ${describeSnapshotSpace(state, space)}. ` +
+    `Free at least ${formatBytes(space.neededBytes - space.freeBytes)} more, then run cutover. ` +
+    'To list the older finished updates that prune would remove, with their snapshots and backup refs: ' +
+    `cd ${shellQuote(state.projectRoot)} && pnpm exec tsx ${shellQuote(CONTROLLER_SCRIPT)} prune --id ${state.id} --dry-run`
+  );
+}
+
+function assertSnapshotFits(state: UpdateState): void {
+  const space = measureSnapshotSpace(state);
+  if (space.freeBytes < space.neededBytes) throw new Error(snapshotSpaceShortfall(state, space));
+}
+
+// What clearSnapshotLeftovers would free: `.new`, and `.prev` once `snapshot/` exists.
+function snapshotLeftoverBytes(snapshotRoot: string): number {
+  const superseded = fs.existsSync(snapshotRoot) ? entrySize(`${snapshotRoot}.prev`) : 0;
+  return entrySize(`${snapshotRoot}.new`) + superseded;
+}
+
+// For the operator before they agree to cutover. Never fails validation:
+// cutover runs the real check, before it stops anything. A crashed copy is
+// counted as free, since cutover clears it first, but never deleted here: a
+// cutover of this id may be building it.
+function reportSnapshotSpace(state: UpdateState): SnapshotSpaceReport {
+  try {
+    const leftover = snapshotLeftoverBytes(path.join(state.transactionRoot, 'snapshot'));
+    const space = measureSnapshotSpace(state);
+    space.freeBytes += leftover;
+    const fits = space.freeBytes >= space.neededBytes;
+    const note =
+      leftover > 0
+        ? `Free space counts ${formatBytes(leftover, Math.floor)} a failed copy holds; cutover removes it first. `
+        : '';
+    return {
+      fits,
+      neededBytes: space.neededBytes,
+      freeBytes: space.freeBytes,
+      // The shortfall ends with a command, so nothing may follow it.
+      summary: fits
+        ? `Snapshot fits: ${describeSnapshotSpace(state, space)}. ${note}`.trimEnd()
+        : `${note}Cutover will refuse before it stops anything. ${snapshotSpaceShortfall(state, space)}`,
+    };
+  } catch (err) {
+    return {
+      fits: false,
+      summary: `Could not measure the snapshot: ${errorText(err)}. Cutover runs the same check before it stops anything.`,
+    };
+  }
+}
+
 function createSnapshot(state: UpdateState): SnapshotEntry[] {
   const snapshotRoot = path.join(state.transactionRoot, 'snapshot');
   // Complete-or-old BY CONSTRUCTION: the copy builds into `snapshot.new` and
@@ -626,27 +741,10 @@ function createSnapshot(state: UpdateState): SnapshotEntry[] {
   // git pack files are 0444 — so copy-in-place died with EACCES.)
   const buildRoot = `${snapshotRoot}.new`;
   const supersededRoot = `${snapshotRoot}.prev`;
-  fs.rmSync(buildRoot, { recursive: true, force: true });
-  // Self-heal the rename window: a crash between the two renames leaves
-  // `snapshot/` absent with the complete prior copy still in `.prev` — put it
-  // back rather than deleting the only complete copy on disk.
-  if (!fs.existsSync(snapshotRoot) && fs.existsSync(supersededRoot)) {
-    fs.renameSync(supersededRoot, snapshotRoot);
-  }
-  fs.rmSync(supersededRoot, { recursive: true, force: true });
+  clearSnapshotLeftovers(snapshotRoot);
+  // Checked again here, after the drain: state can grow after the pre-stop check.
+  assertSnapshotFits(state);
   fs.mkdirSync(buildRoot, { recursive: true, mode: 0o700 });
-  const bytesNeeded = MUTABLE_PATHS.reduce((total, relativePath) => {
-    const source = path.join(state.projectRoot, relativePath);
-    return total + (lstatIfExists(source) ? entrySize(source, true) : 0);
-  }, 0);
-  const disk = fs.statfsSync(buildRoot);
-  const bytesAvailable = Number(disk.bavail) * Number(disk.bsize);
-  const reserve = 256 * 1024 * 1024;
-  if (bytesAvailable < bytesNeeded + reserve) {
-    throw new Error(
-      `Not enough free space for mutable-state snapshot: need ${bytesNeeded + reserve}, have ${bytesAvailable}`,
-    );
-  }
   const entries = MUTABLE_PATHS.map((relativePath) => {
     const source = path.join(state.projectRoot, relativePath);
     const sourceStat = lstatIfExists(source);
@@ -661,12 +759,21 @@ function createSnapshot(state: UpdateState): SnapshotEntry[] {
   return entries;
 }
 
+// The pre-stop space check walks state that live agents still write, so a
+// file (a SQLite journal, say) can vanish, or a directory become a file,
+// mid-walk. Such an entry counts as zero.
 function entrySize(source: string, dereferenceRoot = false): number {
-  const linkStat = fs.lstatSync(source);
-  const stat = dereferenceRoot && linkStat.isSymbolicLink() ? fs.statSync(source) : linkStat;
-  if (stat.isFile()) return stat.size;
-  if (!stat.isDirectory()) return 0;
-  return fs.readdirSync(source).reduce((total, entry) => total + entrySize(path.join(source, entry)), 0);
+  try {
+    const linkStat = fs.lstatSync(source);
+    const stat = dereferenceRoot && linkStat.isSymbolicLink() ? fs.statSync(source) : linkStat;
+    if (stat.isFile()) return stat.size;
+    if (!stat.isDirectory()) return 0;
+    return fs.readdirSync(source).reduce((total, entry) => total + entrySize(path.join(source, entry)), 0);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 0;
+    throw err;
+  }
 }
 
 // Every reason a restore cannot proceed, checked without touching live state.
@@ -1000,6 +1107,10 @@ export async function cutoverUpdate(
   // Re-check here too: validation may have run long ago, and this is the last
   // point before the stop/drain cycle that the snapshot walk depends on.
   assertMutableRootsResolvable(state.projectRoot);
+  // Refuse a snapshot that cannot fit while the service and agents still run,
+  // not after the stop and drain (#4478).
+  clearSnapshotLeftovers(path.join(state.transactionRoot, 'snapshot'));
+  assertSnapshotFits(state);
 
   state.service = runtime.detectService(state.projectRoot);
   // Service first, containers second: with the host down nothing can spawn a
@@ -1023,7 +1134,12 @@ export async function cutoverUpdate(
     return state;
   } catch (err) {
     state.lastError = err instanceof Error ? err.message : String(err);
-    saveState(state);
+    try {
+      saveState(state);
+    } catch {
+      // A full disk can fail this write too. The old service must still come
+      // back, and the error thrown below still names the cause.
+    }
     if (state.snapshot) await rollbackAfter(err, state, runtime);
     else if (state.service.active) runtime.startService(state.service, state.projectRoot);
     throw err;
@@ -1216,6 +1332,7 @@ export function summarizeState(state: UpdateState): Record<string, unknown> {
     skillRefresh: state.skillRefresh,
     service: state.service,
     validation: state.validation,
+    snapshotSpace: state.snapshotSpace,
     lastError: state.lastError,
     rollback: state.snapshot ? `pnpm exec tsx scripts/update-nanoclaw.ts rollback --id ${state.id}` : undefined,
   };
