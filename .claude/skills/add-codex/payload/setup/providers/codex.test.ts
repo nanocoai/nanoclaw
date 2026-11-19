@@ -514,9 +514,34 @@ describe('runCodexLoginAuth', () => {
     signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
 
     await expect(done).rejects.toThrow('setup stopped');
+    expect(realNow() - start).toBeGreaterThanOrEqual(2900);
     expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGKILL wrapper group', 'home removed']);
     expect(stop.removed).toEqual([{ treeRunning: false }]);
     expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false, home: false }]);
+  });
+
+  it('kills a login that ignores SIGTERM when the stop reaches its deadline before the kill could run', async () => {
+    const before = listeners();
+    const tree = playTree('', false);
+    const stop = watchStop(tree);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const { done, ready } = signInOn(tree);
+    await ready;
+    const [, login] = tree.pids();
+    const realNow = performance.now.bind(performance);
+    const start = realNow();
+    // Just before the 3 s kill is due, the stop's clock reads past its deadline.
+    vi.spyOn(performance, 'now').mockImplementation(() => realNow() + (realNow() - start > 2800 ? 5000 : 0));
+    signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(realNow() - start).toBeLessThan(2990);
+    expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGKILL wrapper group']);
+    await until(() => !isRunning(login));
+    // Not seen to end, so the home stays.
+    expect(stop.removed).toEqual([]);
+    expect(printed(log, stdout)).toContain("Couldn't confirm that the Codex sign-in stopped");
   });
 
   it('kills the whole login tree on a second signal, then cleans up', async () => {
@@ -831,11 +856,18 @@ describe('runCodexLoginAuth', () => {
     // Once the login has gone: its group's rows left out, and a row of the
     // login's in the wrapper's group, as if still being read.
     const partial = `while ps -o stat= -p ${login} | grep -qv Z; do sleep 0.01; done; "$0" "$@" | awk '$3 != ${login}'; echo "999999 1 ${wrapper} S node NANOCLAW_CODEX_LOGIN=${tree.id()}"`;
-    mockPs.run = (file, args, opts) =>
-      ++calls === 2 ? realSpawn('/bin/sh', ['-c', partial, file, ...args], opts) : realSpawn(file, args, opts);
+    let partialExit: number | null | undefined;
+    mockPs.run = (file, args, opts) => {
+      if (++calls !== 2) return realSpawn(file, args, opts);
+      const ps = realSpawn('/bin/sh', ['-c', partial, file, ...args], opts);
+      ps.on('exit', (code) => (partialExit = code));
+      return ps;
+    };
     signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
 
     await expect(done).rejects.toThrow('setup stopped');
+    // A listing, not a failed one.
+    expect(partialExit).toBe(0);
     expect(tree.pids()).toHaveLength(3);
     expect(stop.removed).toEqual([{ treeRunning: false }]);
   });

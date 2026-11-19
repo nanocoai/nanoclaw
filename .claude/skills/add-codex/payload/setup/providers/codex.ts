@@ -297,6 +297,11 @@ export async function runCodexLoginAuth(
       live = await login.look(() => level);
     }
     clearTimeout(timer);
+    // Past the deadline before the kill could run: kill now.
+    if (live !== false && level !== 'SIGKILL' && performance.now() >= end) {
+      level = 'SIGKILL';
+      login.signal(level);
+    }
     ended = live === false && !login.blind;
   }
   function onSignal(signal: NodeJS.Signals): void {
