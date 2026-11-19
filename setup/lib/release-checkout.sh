@@ -74,6 +74,8 @@ release_checkout_newest_tag() {
 #   switch <channel> <tag>    the channel is known (flag, env or .env): install its release
 #   notice <channel> <tag>    no channel and no terminal, or a fork, and main is past
 #                             the release: keep the checkout, print a hint
+#   shallow                   a shallow clone without the channel's release tags:
+#                             keep the checkout, print a hint
 #   invalid <raw>             the requested channel is not stable, beta or edge
 release_checkout_decide() {
   local root=$1 requested tty=${3:-0} channel remote stable beta tag
@@ -105,7 +107,11 @@ release_checkout_decide() {
   beta=$(release_checkout_newest_tag "$root" beta "$remote")
   tag=$stable
   if [ "$channel" = beta ]; then tag=$beta; fi
-  [ -n "$tag" ] || { echo none; return 0; }
+  if [ -z "$tag" ]; then
+    # `git clone --depth 1` fetches no tags, so there is no release to offer or compare with.
+    if [ "$(git -C "$root" rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then echo shallow; else echo none; fi
+    return 0
+  fi
 
   # A fork's main may carry its owner's changes, which a release would drop; with
   # no channel and no terminal there is no one to ask. Either way nothing moves,

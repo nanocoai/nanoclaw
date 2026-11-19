@@ -103,6 +103,9 @@ done
 source "$PROJECT_ROOT/setup/lib/release-checkout.sh"
 
 REQUESTED_CHANNEL="${NANOCLAW_UPDATE_CHANNEL:-}"
+# Where a channel nobody was asked about came from, to say so before the
+# checkout moves: an env var or a .env line is easy to forget.
+RELEASE_SOURCE=NANOCLAW_UPDATE_CHANNEL
 _release_args=()
 _take_channel=false
 _past_options=false
@@ -112,6 +115,7 @@ for arg in "$@"; do
     _release_args+=("$arg")
   elif [ "$_take_channel" = true ]; then
     REQUESTED_CHANNEL="$arg"
+    RELEASE_SOURCE=--update-channel
     _take_channel=false
   elif [ "$arg" = "--" ]; then
     _past_options=true
@@ -120,6 +124,7 @@ for arg in "$@"; do
     _take_channel=true
   elif [ "${arg#--update-channel=}" != "$arg" ]; then
     REQUESTED_CHANNEL="${arg#--update-channel=}"
+    RELEASE_SOURCE=--update-channel
   else
     _release_args+=("$arg")
   fi
@@ -129,6 +134,9 @@ if [ "$_take_channel" = true ]; then
   exit 1
 fi
 unset _take_channel _past_options
+
+# Neither a flag nor the env var gave one: a known channel can only be .env's.
+if [ -z "${REQUESTED_CHANNEL//[[:space:]]/}" ]; then RELEASE_SOURCE=.env; fi
 
 RELEASE_TTY=0
 if [ -t 0 ] && [ -t 1 ]; then RELEASE_TTY=1; fi
@@ -150,6 +158,7 @@ if [ "$RELEASE_ACTION" = offer ]; then
   done
   echo ""
   export NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL
+  RELEASE_SOURCE=
   read -r RELEASE_ACTION RELEASE_REST <<<"$(release_checkout_decide "$PROJECT_ROOT" "$RELEASE_CHANNEL" 1)"
   if [ "$RELEASE_ACTION" != switch ] && ! release_checkout_save_channel "$PROJECT_ROOT" "$RELEASE_CHANNEL"; then
     echo "error: couldn't save NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL to .env. Nothing was installed."
@@ -170,7 +179,7 @@ if [ "$RELEASE_ACTION" = switch ]; then
     echo "  Fix that and run bash nanoclaw.sh again, or pass --update-channel edge to install main."
     exit 1
   fi
-  echo "  Installing $RELEASE_TAG (branch: $RELEASE_CHANNEL)."
+  echo "  Installing $RELEASE_TAG (branch: $RELEASE_CHANNEL)${RELEASE_SOURCE:+, the channel set by $RELEASE_SOURCE}."
   # The release may predate --update-channel; .env and the env var carry the choice.
   export NANOCLAW_UPDATE_CHANNEL=$RELEASE_CHANNEL
   exec bash "$PROJECT_ROOT/nanoclaw.sh" ${_release_args[@]+"${_release_args[@]}"}
@@ -181,7 +190,12 @@ if [ "$RELEASE_ACTION" = notice ]; then
   echo "  This copy is on main, which is newer than the latest $RELEASE_CHANNEL release ($RELEASE_TAG). Updates follow releases."
   echo "  To follow main instead: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel edge"
 fi
-unset _release_args
+
+if [ "$RELEASE_ACTION" = shallow ]; then
+  echo "  This copy is a shallow clone with no release tags, so setup can't offer a release and installs main."
+  echo "  Updates follow releases. To follow main instead: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel edge"
+fi
+unset _release_args RELEASE_SOURCE
 
 LOGS_DIR="$PROJECT_ROOT/logs"
 STEPS_DIR="$LOGS_DIR/setup-steps"

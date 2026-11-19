@@ -237,6 +237,19 @@ describe('release checkout decision', () => {
     expect(decide(temp('release-plain-'))).toBe('none');
   });
 
+  it('says so when a shallow clone has no release tags to offer', () => {
+    const { seed } = freshClone();
+    const install = path.join(temp('release-install-'), 'nanoclaw');
+    git(path.dirname(install), ['clone', '-q', '--depth', '1', `file://${seed}`, install]);
+    git(install, ['config', `url.file://${seed}.insteadOf`, OFFICIAL_URL]);
+    git(install, ['config', 'remote.origin.url', OFFICIAL_URL]);
+    expect(git(install, ['tag', '--list', 'v2.*'])).toBe('');
+    expect(decide(install)).toBe('shallow');
+    expect(decide(install, '', '0')).toBe('shallow');
+    expect(decide(install, 'stable')).toBe('shallow');
+    expect(decide(install, 'edge')).toBe('none');
+  });
+
   it('reports an unknown channel instead of guessing', () => {
     expect(decide(freshClone().install, 'nightly')).toBe('invalid nightly');
     expect(decide(freshClone().install, 'sta ble')).toBe('invalid sta ble');
@@ -542,10 +555,28 @@ describe.skipIf(process.getuid?.() === 0)('nanoclaw.sh without a terminal', { ti
     const { install, run, tagCommit } = entrypointClone();
     const result = run(['--update-channel', 'stable', '--template-path', 'sales/sdr']);
     expect(result.status).toBe(0);
+    expect(result.stdout).toContain('Installing v2.4.0 (branch: stable), the channel set by --update-channel.');
     expect(result.stdout).toContain('RELEASE v2.4.0 args=[--template-path sales/sdr] channel=[stable]');
     expect(git(install, ['symbolic-ref', '--short', 'HEAD'])).toBe('stable');
     expect(git(install, ['rev-parse', 'HEAD'])).toBe(tagCommit('v2.4.0'));
     expect(savedChannel(install)).toBe('NANOCLAW_UPDATE_CHANNEL=stable\n');
+  });
+
+  it('names an env var or a .env line as the reason the checkout moved', () => {
+    const fromEnv = entrypointClone();
+    expect(fromEnv.run([], { NANOCLAW_UPDATE_CHANNEL: 'stable' }).stdout).toContain(
+      'Installing v2.4.0 (branch: stable), the channel set by NANOCLAW_UPDATE_CHANNEL.',
+    );
+
+    // The flag wins over the env var, and is the one named.
+    const both = entrypointClone();
+    expect(both.run(['--update-channel=stable'], { NANOCLAW_UPDATE_CHANNEL: 'stable' }).stdout).toContain(
+      'the channel set by --update-channel.',
+    );
+
+    const fromFile = entrypointClone();
+    fs.writeFileSync(path.join(fromFile.install, '.env'), 'NANOCLAW_UPDATE_CHANNEL=stable\n');
+    expect(fromFile.run([]).stdout).toContain('Installing v2.4.0 (branch: stable), the channel set by .env.');
   });
 
   it('stops before installing anything when the channel cannot be saved', () => {
@@ -606,6 +637,7 @@ describe.runIf(['linux', 'darwin'].includes(process.platform) && process.getuid?
       expect(stdout).toContain('Which updates should this install follow?');
       expect(stdout).toContain('1) stable  published releases, now v2.4.0 (recommended)');
       expect(stdout).toContain('2) beta    release candidates too, now v2.5.0-rc.1');
+      // Asked and answered here, so no source is named.
       expect(stdout).toContain('Installing v2.4.0 (branch: stable).');
       // The release's own nanoclaw.sh, which knows nothing about channels, got the rest.
       expect(stdout).toContain('RELEASE v2.4.0 args=[--template-path sales/sdr] channel=[stable]');
