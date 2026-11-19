@@ -206,11 +206,14 @@ afterEach(() => {
  * Plays the login with a real process tree: a wrapper in pnpm's place that
  * exits at once on SIGTERM, and a grandchild in Codex's place that runs
  * `onTerm` on SIGTERM. `ownGroup` starts the grandchild in a group of its own,
- * as pnpm 12 runs Codex. Both give up after 20 s, so a failing run leaves nothing.
+ * as pnpm 12 runs Codex. `late` starts it only on SIGTERM, 300 ms before the
+ * wrapper exits; `exitAfter` has the wrapper exit 0 by itself. Both give up
+ * after 20 s, so a failing run leaves nothing.
  */
 function playTree(
   onTerm: string,
   ownGroup: boolean,
+  { late = false, exitAfter }: { late?: boolean; exitAfter?: number } = {},
 ): { pids: () => number[]; running: () => boolean; home: () => string | undefined } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-login-tree-'));
   treeDirs.push(dir);
@@ -219,10 +222,15 @@ function playTree(
     `process.on('SIGTERM', () => { ${onTerm} });` +
     `require('fs').writeFileSync(${JSON.stringify(loginFile)}, String(process.pid));` +
     `setTimeout(() => {}, 20000);`;
+  const start = `require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(login)}], { stdio: 'ignore', detached: ${ownGroup} })`;
   const wrapper =
-    `require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(login)}], { stdio: 'ignore', detached: ${ownGroup} });` +
+    (late ? '' : `${start};`) +
     `require('fs').writeFileSync(${JSON.stringify(wrapperFile)}, String(process.pid));` +
-    `process.on('SIGTERM', () => process.exit(143));` +
+    (late
+      ? // The stop may signal it before it can say it runs, so the wrapper does.
+        `process.on('SIGTERM', () => { require('fs').writeFileSync(${JSON.stringify(loginFile)}, String(${start}.pid)); setTimeout(() => process.exit(143), 300); });`
+      : `process.on('SIGTERM', () => process.exit(143));`) +
+    (exitAfter === undefined ? '' : `setTimeout(() => process.exit(0), ${exitAfter});`) +
     `setTimeout(() => process.exit(1), 20000);`;
   let home: string | undefined;
   mockSpawn.mockImplementation((...args: unknown[]) => {
@@ -518,6 +526,65 @@ describe('runCodexLoginAuth', () => {
     expect(stop.reraised).toEqual([]);
     expect(printed(log, stdout)).toContain("Couldn't complete the Codex sign-in");
     expect(listeners()).toEqual(before);
+  });
+
+  it('on a signal while it stops what a killed wrapper left, ends setup after that, with no failure printed', async () => {
+    const before = listeners();
+    const tree = playTree('setTimeout(() => process.exit(0), 300)', true);
+    const stop = watchStop(tree);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const { done, ready } = signInOn(tree);
+    await ready;
+    const listed = mockPs.done;
+    await until(() => mockPs.done >= listed + 2);
+    process.kill(tree.pids()[0], 'SIGKILL');
+    // The leftovers' stop has begun.
+    await until(() => stop.order.length > 0);
+    signalSignIn(before[LOGIN_EVENTS.indexOf('SIGINT')], 'SIGINT');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(stop.order).toEqual(['SIGTERM other group', 'home removed']);
+    expect(stop.reraised).toEqual([{ signal: 'SIGINT', treeRunning: false, home: false }]);
+    expect(printed(log, stdout)).not.toContain("Couldn't");
+    expect(listeners()).toEqual(before);
+  });
+
+  // pnpm may start Codex while a stop is under way: a later look finds it,
+  // and it gets the same signal rather than waiting for the 3 s kill.
+  it('stops a login its wrapper starts only after the stop began', async () => {
+    const before = listeners();
+    const tree = playTree('setTimeout(() => process.exit(0), 300)', true, { late: true });
+    const stop = watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const done = runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
+    done.catch(() => {});
+    await until(() => tree.pids().length === 1 && tree.running());
+    const start = Date.now();
+    signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(tree.pids()).toHaveLength(2);
+    expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGTERM other group', 'home removed']);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+    expect(Date.now() - start).toBeLessThan(2500);
+  });
+
+  // A login that exits by itself took Codex with it; what it leaves running
+  // (a browser it opened) isn't setup's.
+  it('leaves what a login that exits by itself left running', async () => {
+    const tree = playTree('', true, { exitAfter: 500 });
+    const stop = watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    // It wrote no auth.json, so the sign-in fails.
+    await expect(runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root)).rejects.toThrow(
+      'setup stopped',
+    );
+    expect(tree.pids()).toHaveLength(2);
+    expect(isRunning(tree.pids()[1])).toBe(true);
+    expect(stop.order).toEqual(['home removed']);
   });
 
   // Without a listing, setup can't see a group Codex moved to: it stops what
