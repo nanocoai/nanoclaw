@@ -9,16 +9,17 @@
 # git and POSIX tools, since it runs before Node is installed.
 
 # release_checkout_saved_channel <root> — NANOCLAW_UPDATE_CHANNEL from .env, if any.
-# Read as the updater reads it: trimmed, one pair of outer quotes removed, last
-# non-empty assignment wins.
+# Read as the updater reads it: trimmed, one pair of outer quotes removed, the last
+# assignment not empty at that point wins, and its value is trimmed again. A quoted
+# blank therefore reads as empty here, where the updater rejects it.
 release_checkout_saved_channel() {
   [ -f "$1/.env" ] || return 0
   # `|| true`: no assignment is a normal answer, and callers run under pipefail.
   { grep -E '^[[:space:]]*NANOCLAW_UPDATE_CHANNEL[[:space:]]*=' "$1/.env" 2>/dev/null || true; } \
     | cut -d= -f2- \
     | sed -E -e 's/^[[:space:]]+|[[:space:]]+$//g' -e 's/^"(.*)"$/\1/' -e "s/^'(.*)'\$/\\1/" \
-      -e 's/^[[:space:]]+|[[:space:]]+$//g' \
-    | tr 'A-Z' 'a-z' | { grep -v '^$' || true; } | tail -1
+    | { grep -v '^$' || true; } | tail -1 \
+    | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | tr 'A-Z' 'a-z'
 }
 
 # release_checkout_official_remote <root> — the remote of the official repository
@@ -153,15 +154,18 @@ release_checkout_answer() {
 # rewritten: every reader takes the last assignment, the rest of .env is never at
 # risk, and setup's own writer later folds the lines into one.
 release_checkout_save_channel() {
-  local env="$1/.env"
-  if [ "$(release_checkout_saved_channel "$1")" = "$2" ]; then return 0; fi
-  if [ ! -e "$env" ]; then
-    # Private, like set-env.ts: later writes keep the mode, and setup stores secrets here.
-    (umask 077 && printf 'NANOCLAW_UPDATE_CHANNEL=%s\n' "$2" > "$env")
-    return
+  local env="$1/.env" last
+  # Private, like set-env.ts: later writes keep the mode, and setup stores secrets
+  # here. No-clobber, so a .env that appears meanwhile is appended to instead.
+  if [ ! -e "$env" ] && (umask 077 && set -C && printf 'NANOCLAW_UPDATE_CHANNEL=%s\n' "$2" > "$env") 2>/dev/null; then
+    return 0
   fi
+  # Unreadable: neither the saved value nor the last byte can be checked.
+  [ -r "$env" ] || return 1
+  if [ "$(release_checkout_saved_channel "$1")" = "$2" ]; then return 0; fi
+  last=$(tail -c 1 "$env") || return 1
   {
-    if [ -s "$env" ] && [ -n "$(tail -c 1 "$env")" ]; then echo; fi
+    if [ -n "$last" ]; then echo; fi
     printf 'NANOCLAW_UPDATE_CHANNEL=%s\n' "$2"
   } >> "$env"
 }
