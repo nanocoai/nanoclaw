@@ -242,6 +242,51 @@ describe('saved channel', () => {
     fs.writeFileSync(path.join(install, '.env'), 'OTHER=1\n');
     expect(decide(install)).toBe('record beta');
   });
+
+  /** The channel the updater follows from this .env as each reader sees it, or "rejected" for a value it refuses. */
+  const follows = {
+    updater(root: string): string {
+      try {
+        return readChannelSetting(root);
+      } catch {
+        return 'rejected';
+      }
+    },
+    shell(root: string): string {
+      const value = helper('update_channel_saved', root).stdout;
+      if (value === '') return 'stable'; // nothing saved: the updater's default
+      return ['stable', 'beta', 'edge'].includes(value) ? value : 'rejected';
+    },
+  };
+
+  // One known difference stays out: a quoted blank, which the updater rejects (see "records over" above).
+  it.each([
+    ['double quotes', 'NANOCLAW_UPDATE_CHANNEL="beta"\n', 'beta'],
+    ['single quotes', "NANOCLAW_UPDATE_CHANNEL='edge'\n", 'edge'],
+    ['mismatched quotes', 'NANOCLAW_UPDATE_CHANNEL="beta\'\n', 'rejected'],
+    ['spaces around =', 'NANOCLAW_UPDATE_CHANNEL = beta\n', 'beta'],
+    ['tabs, an indent and CRLF', '\tNANOCLAW_UPDATE_CHANNEL\t=\t Edge \r\n', 'edge'],
+    ['an empty value', 'NANOCLAW_UPDATE_CHANNEL=\n', 'stable'],
+    ['empty quotes', 'NANOCLAW_UPDATE_CHANNEL=""\n', 'stable'],
+    ['an empty value after a set one', 'NANOCLAW_UPDATE_CHANNEL=beta\nNANOCLAW_UPDATE_CHANNEL=\n', 'beta'],
+    [
+      'a duplicate key, where the last wins',
+      'NANOCLAW_UPDATE_CHANNEL=edge\nOTHER=1\nNANOCLAW_UPDATE_CHANNEL=beta\n',
+      'beta',
+    ],
+    ['a commented-out key', '# NANOCLAW_UPDATE_CHANNEL=edge\n', 'stable'],
+    ['an indented comment after the key', 'NANOCLAW_UPDATE_CHANNEL=beta\n  # NANOCLAW_UPDATE_CHANNEL=edge\n', 'beta'],
+    ['an inline comment', 'NANOCLAW_UPDATE_CHANNEL=beta # pinned\n', 'rejected'],
+    ['upper case', 'NANOCLAW_UPDATE_CHANNEL=BETA\n', 'beta'],
+    ['an export prefix', 'export NANOCLAW_UPDATE_CHANNEL=edge\n', 'stable'],
+    ['a longer key', 'NANOCLAW_UPDATE_CHANNEL_OLD=edge\n', 'stable'],
+    ['no final newline', 'OTHER=1\nNANOCLAW_UPDATE_CHANNEL=edge', 'edge'],
+  ])('reads the same channel as the updater for %s', (_name, env, channel) => {
+    const root = temp('channel-env-');
+    fs.writeFileSync(path.join(root, '.env'), env);
+    expect(follows.updater(root)).toBe(channel);
+    expect(follows.shell(root)).toBe(channel);
+  });
 });
 
 describe('the updater on a cloned channel branch', () => {
