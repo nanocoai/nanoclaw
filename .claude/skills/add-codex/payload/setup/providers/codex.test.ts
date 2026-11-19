@@ -169,7 +169,9 @@ afterEach(() => {
   for (const dir of treeDirs.splice(0)) {
     for (const file of ['wrapper.pid', 'login.pid'].map((name) => path.join(dir, name))) {
       try {
-        process.kill(Number(fs.readFileSync(file, 'utf-8')), 'SIGKILL');
+        // Never 0 (an empty file): that would kill the runner's own process group.
+        const pid = Number(fs.readFileSync(file, 'utf-8'));
+        if (pid > 1) process.kill(pid, 'SIGKILL');
       } catch {
         // Never started, or gone already.
       }
@@ -209,7 +211,8 @@ function playTree(
   const pids = (): number[] =>
     [wrapperFile, loginFile]
       .filter((file) => fs.existsSync(file))
-      .map((file) => Number(fs.readFileSync(file, 'utf-8')));
+      .map((file) => Number(fs.readFileSync(file, 'utf-8')))
+      .filter((pid) => pid > 1);
   return { pids, running: () => pids().some(isRunning), home: () => home };
 }
 
@@ -220,10 +223,14 @@ function playTree(
 function watchStop(tree: ReturnType<typeof playTree>): {
   reraised: Array<{ signal: unknown; treeRunning: boolean; home: boolean }>;
   removed: Array<{ treeRunning: boolean }>;
+  order: string[];
 } {
   const realKill = process.kill.bind(process);
   const reraised: Array<{ signal: unknown; treeRunning: boolean; home: boolean }> = [];
+  // Group signals (not liveness probes) and the home's removal, in order.
+  const order: string[] = [];
   vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+    if (pid < 0 && signal) order.push(`${String(signal)} ${pid === -tree.pids()[0] ? 'wrapper' : 'other'} group`);
     if (pid !== process.pid) return realKill(pid, signal);
     reraised.push({ signal, treeRunning: tree.running(), home: fs.existsSync(tree.home()!) });
     return true;
@@ -231,13 +238,16 @@ function watchStop(tree: ReturnType<typeof playTree>): {
   const removed: Array<{ treeRunning: boolean }> = [];
   const realRm = fs.rmSync.bind(fs);
   vi.spyOn(fs, 'rmSync').mockImplementation((target, opts) => {
-    if (target === tree.home() && fs.existsSync(target)) removed.push({ treeRunning: tree.running() });
+    if (target === tree.home() && fs.existsSync(target)) {
+      removed.push({ treeRunning: tree.running() });
+      order.push('home removed');
+    }
     realRm(target, opts);
   });
   vi.spyOn(process, 'exit').mockImplementation((() => {
     throw new Error('setup stopped');
   }) as typeof process.exit);
-  return { reraised, removed };
+  return { reraised, removed, order };
 }
 
 const LOGIN_EVENTS = ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP'] as const;
@@ -416,19 +426,57 @@ describe('runCodexLoginAuth', () => {
     expect(listeners()).toEqual(before);
   });
 
+  it('on a second signal before the tree is known, still finds and kills all of it', async () => {
+    const before = listeners();
+    const tree = playTree('', true);
+    const stop = watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { done, ready } = signInOn(tree);
+    await ready;
+    const sigterms = before[LOGIN_EVENTS.indexOf('SIGTERM')];
+    signalSignIn(sigterms, 'SIGTERM');
+    signalSignIn(sigterms, 'SIGTERM');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(stop.order[0]).toBe('SIGKILL wrapper group');
+    expect(stop.order).toContain('SIGKILL other group');
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+    expect(stop.reraised).toEqual([{ signal: 'SIGTERM', treeRunning: false, home: false }]);
+  });
+
   it('kills the login tree outright when setup exits mid-sign-in', async () => {
     const before = listeners();
     const tree = playTree('', false);
-    watchStop(tree);
+    const stop = watchStop(tree);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const { done, ready } = signInOn(tree);
     await ready;
     signalSignIn(before[0], 'exit');
-    expect(fs.existsSync(tree.home()!)).toBe(false);
+    // Nothing can wait during 'exit': the kill goes out before the home does.
+    expect(stop.order).toEqual(['SIGKILL wrapper group', 'home removed']);
     await until(() => !tree.running());
 
     await expect(done).rejects.toThrow('setup stopped');
+    expect(listeners()).toEqual(before);
+  });
+
+  // pnpm waits for Codex, so a wrapper that exits by itself leaves no login;
+  // one killed by a signal may, and setup kills it on the way out.
+  it('kills what a wrapper killed by a signal leaves behind, then removes the home', async () => {
+    const before = listeners();
+    const tree = playTree('', false);
+    const stop = watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const { done, ready } = signInOn(tree);
+    await ready;
+    const [wrapper, login] = tree.pids();
+    process.kill(wrapper, 'SIGKILL');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    expect(stop.order).toEqual(['SIGKILL wrapper group', 'home removed']);
+    await until(() => !isRunning(login));
     expect(listeners()).toEqual(before);
   });
 });

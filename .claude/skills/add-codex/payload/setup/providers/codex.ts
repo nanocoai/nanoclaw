@@ -227,6 +227,7 @@ export async function runCodexLoginAuth(
   // The login runs in a session of its own (see runInherit). These are its
   // process groups while setup owns it; a stop first finds all of them.
   let groups: number[] = [];
+  let known = false;
   let login: ChildProcess | undefined;
   let closed = false;
   let stopping: Promise<void> | undefined;
@@ -246,13 +247,14 @@ export async function runCodexLoginAuth(
     }
     return alive;
   };
-  // Nothing can wait during 'exit', so what is left of the login is killed outright.
-  const onExit = (): void => {
+  // On the way out what is left of the login is killed outright: nothing can
+  // wait during 'exit'.
+  const release = (): void => {
     signalGroups('SIGKILL');
     removeLoginHome();
   };
   const detach = (): void => {
-    process.off('exit', onExit);
+    process.off('exit', release);
     for (const signal of LOGIN_SIGNALS) process.off(signal, onSignal);
   };
   const finish = (signal: NodeJS.Signals): void => {
@@ -269,6 +271,7 @@ export async function runCodexLoginAuth(
   async function stopLogin(leader: number, signal: NodeJS.Signals): Promise<void> {
     // Before any signal: a member orphaned by its parent's exit can't be traced back.
     groups = await loginGroups(leader);
+    known = true;
     signalGroups(killNow ? 'SIGKILL' : 'SIGTERM');
     timer = setTimeout(() => signalGroups('SIGKILL'), STOP_GRACE_MS);
     // Bounded, in case a member is never reaped.
@@ -279,8 +282,9 @@ export async function runCodexLoginAuth(
   }
   function onSignal(signal: NodeJS.Signals): void {
     if (stopping) {
+      // Not before the tree is known: the kill would orphan members it then can't find.
       killNow = true;
-      signalGroups('SIGKILL');
+      if (known) signalGroups('SIGKILL');
       return;
     }
     if (!login?.pid || closed) return finish(signal);
@@ -289,19 +293,21 @@ export async function runCodexLoginAuth(
   const onSpawn = (child: ChildProcess): void => {
     login = child;
     if (child.pid) groups = [child.pid];
-    child.once('close', () => {
+    child.once('close', (_code, signal) => {
       closed = true;
-      // Ended by itself: anything it leaves running (a browser it opened) isn't setup's to stop.
-      if (!stopping) groups = [];
+      // A login that exited by itself took Codex with it; what it leaves (a
+      // browser it opened) isn't setup's. One killed by a signal may leave Codex,
+      // which goes on the way out.
+      if (!stopping && !signal) groups = [];
     });
   };
-  process.on('exit', onExit);
+  process.on('exit', release);
   for (const signal of LOGIN_SIGNALS) process.on(signal, onSignal);
   try {
     await signIn(method, store, root, loginHome, { onSpawn, stop: onSignal, stopping: () => stopping });
   } finally {
     detach();
-    removeLoginHome();
+    release();
   }
 }
 
