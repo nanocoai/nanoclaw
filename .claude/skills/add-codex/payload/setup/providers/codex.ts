@@ -266,8 +266,11 @@ export async function runCodexLoginAuth(
   };
   const finish = (signal: NodeJS.Signals): void => {
     detach();
-    cleanUp();
-    process.kill(process.pid, signal);
+    try {
+      cleanUp();
+    } finally {
+      process.kill(process.pid, signal);
+    }
   };
   // No signal reaches the login but this stop. Every group of its tree gets
   // SIGTERM, then SIGKILL after 3s or on a second signal; it has ended once a
@@ -284,8 +287,9 @@ export async function runCodexLoginAuth(
     // Bounded, in case a member never goes.
     const end = Date.now() + STOP_GRACE_MS + 1000;
     let live = await login.look(() => level);
-    // Without a listing nothing can be confirmed; once no group answers, waiting can't help.
-    while (live !== false && Date.now() < end && (live || login.signal(0))) {
+    // Without a listing nothing can be confirmed. With no ps at all, once no
+    // group answers, waiting can't help; another failure may pass.
+    while (live !== false && Date.now() < end && (live || login.signal(0) || login.failure !== 'ps not found')) {
       await new Promise((resolve) => setTimeout(resolve, 50));
       live = await login.look(() => level);
     }
@@ -354,7 +358,9 @@ type Proc = { pid: number; ppid: number; pgid: number; zombie: boolean; text: st
  * that as the same pid in the same group. Every process in the leader's group
  * is one: the login runs in a session of its own (see runInherit). Their
  * groups are the ones signalled: pnpm 12 runs Codex in a group of its own.
- * Zombies don't count.
+ * Zombies don't count. Whatever writes to the home is Codex, which shows
+ * CODEX_HOME; the one known process that shows neither and leaves the group
+ * is pnpm 12's `sh`, which kills Codex's group and exits once pnpm has gone.
  */
 class LoginTree {
   // As of the last listing; the login's own until there is one.
@@ -400,8 +406,9 @@ class LoginTree {
   /** Kills the whole tree at once; whether it was seen to end. Bounded: nothing can wait during 'exit'. */
   killAll(): boolean {
     const end = Date.now() + 1500;
-    // Listed first, while a member without CODEX_HOME is still linked to its parent.
-    this.take(listProcsSync(1500));
+    // Listed first, while a member without CODEX_HOME is still linked to its
+    // parent; in half the time, so another listing can follow a slow one.
+    this.take(listProcsSync(750));
     this.signal('SIGKILL');
     const pause = new Int32Array(new SharedArrayBuffer(4));
     for (let left = end - Date.now(); left > 0; left = end - Date.now()) {
