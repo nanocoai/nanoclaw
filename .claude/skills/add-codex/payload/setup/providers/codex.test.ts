@@ -277,6 +277,8 @@ function watchStop(tree: ReturnType<typeof playTree>): {
   reraised: Array<{ signal: unknown; treeRunning: boolean; home: boolean }>;
   removed: Array<{ treeRunning: boolean }>;
   order: string[];
+  // Whether the home held auth.json as it went.
+  authAtRemoval: boolean[];
 } {
   const realKill = process.kill.bind(process);
   const reraised: Array<{ signal: unknown; treeRunning: boolean; home: boolean }> = [];
@@ -289,10 +291,12 @@ function watchStop(tree: ReturnType<typeof playTree>): {
     return true;
   });
   const removed: Array<{ treeRunning: boolean }> = [];
+  const authAtRemoval: boolean[] = [];
   const realRm = fs.rmSync.bind(fs);
   vi.spyOn(fs, 'rmSync').mockImplementation((target, opts) => {
     if (target === tree.home() && fs.existsSync(target)) {
       removed.push({ treeRunning: tree.running() });
+      authAtRemoval.push(fs.existsSync(path.join(target as string, 'auth.json')));
       order.push('home removed');
     }
     realRm(target, opts);
@@ -300,7 +304,7 @@ function watchStop(tree: ReturnType<typeof playTree>): {
   vi.spyOn(process, 'exit').mockImplementation((() => {
     throw new Error('setup stopped');
   }) as typeof process.exit);
-  return { reraised, removed, order };
+  return { reraised, removed, order, authAtRemoval };
 }
 
 const LOGIN_EVENTS = ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP'] as const;
@@ -676,6 +680,7 @@ describe('runCodexLoginAuth', () => {
     await expect(runCodexLoginAuth('device', { has: async () => false, save }, root)).rejects.toThrow('setup stopped');
     expect(save).not.toHaveBeenCalled();
     expect(stop.order).toEqual(['SIGTERM other group', 'home removed']);
+    expect(stop.authAtRemoval).toEqual([true]);
     expect(printed(log, stdout)).toContain('no auth.json was written');
   });
 
@@ -837,6 +842,27 @@ describe('runCodexLoginAuth', () => {
     await expect(done).rejects.toThrow('setup stopped');
     expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGTERM other group', 'home removed']);
     expect(stop.removed).toEqual([{ treeRunning: false }]);
+  });
+
+  it('waits for a helper that a member starts in its own group on SIGTERM, with no CODEX_HOME, before exiting', async () => {
+    const before = listeners();
+    const helper = (file: string) =>
+      `require('fs').writeFileSync(${JSON.stringify(file)}, String(require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300)'], { stdio: 'ignore', env: {} }).pid)); process.exit(0);`;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-login-helper-'));
+    treeDirs.push(dir);
+    const helperFile = path.join(dir, 'helper.pid');
+    const tree = playTree(helper(helperFile), true);
+    const stop = watchStop(tree);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { done, ready } = signInOn(tree);
+    await ready;
+    signalSignIn(before[LOGIN_EVENTS.indexOf('SIGTERM')], 'SIGTERM');
+
+    await expect(done).rejects.toThrow('setup stopped');
+    const helperPid = Number(fs.readFileSync(helperFile, 'utf-8'));
+    expect(stop.order).toEqual(['SIGTERM wrapper group', 'SIGTERM other group', 'home removed']);
+    expect(stop.removed).toEqual([{ treeRunning: false }]);
+    expect(isRunning(helperPid)).toBe(false);
   });
 
   it("stops a login whose own environment ps can't show", async () => {

@@ -355,19 +355,17 @@ type Proc = { pid: number; ppid: number; pgid: number; zombie: boolean; text: st
 /**
  * The login's process tree. A listing finds its processes by the CODEX_HOME
  * each inherits, whatever became of its parent; one without it (macOS hides a
- * system binary's environment, such as pnpm 12's `sh`) by descent, and after
- * that as the same pid in the same group. Every process in the leader's group
- * is one: the login runs in a session of its own (see runInherit). Their
- * groups are the ones signalled: pnpm 12 runs Codex in a group of its own.
- * Zombies don't count. Whatever writes to the home is Codex, which shows
+ * system binary's environment, such as pnpm 12's `sh`) by descent, or as one
+ * in a group the tree held at the last listing. A group gains members only
+ * from its own session, so only from the login: it runs in a session of its
+ * own (see runInherit). Their groups are the ones signalled: pnpm 12 runs
+ * Codex in a group of its own. Zombies don't count. Whatever writes to the home is Codex, which shows
  * CODEX_HOME; the one known process that shows neither and leaves the group
  * is pnpm 12's `sh`, which kills Codex's group and exits once pnpm has gone.
  */
 class LoginTree {
   // As of the last listing; the login's own until there is one.
   private groups: number[];
-  // Each member's group as last listed.
-  private known = new Map<number, number>();
   private readonly marker: string;
   private signalled = false;
   failure: string | undefined;
@@ -375,10 +373,7 @@ class LoginTree {
   // through its parent may then have gone unseen, so the end can't be confirmed.
   blind: string | undefined;
 
-  constructor(
-    private readonly leader: number,
-    home: string,
-  ) {
+  constructor(leader: number, home: string) {
     this.groups = [leader];
     this.marker = `CODEX_HOME=${home}`;
   }
@@ -432,14 +427,13 @@ class LoginTree {
     for (let grew = true; grew;) {
       grew = false;
       for (const proc of live) {
-        const ours = proc.pgid === this.leader || this.known.get(proc.pid) === proc.pgid || this.marks(proc);
+        const ours = this.groups.includes(proc.pgid) || this.marks(proc);
         if (tree.has(proc.pid) || !(ours || tree.has(proc.ppid))) continue;
         tree.add(proc.pid);
         grew = true;
       }
     }
     const members = live.filter((proc) => tree.has(proc.pid));
-    this.known = new Map(members.map((proc) => [proc.pid, proc.pgid]));
     const groups = [...new Set(members.map((proc) => proc.pgid))].filter((group) => group > 1 && group !== own);
     const found = groups.filter((group) => !this.groups.includes(group));
     this.groups = groups;
