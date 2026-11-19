@@ -222,7 +222,8 @@ describe('the skill shows the hint', () => {
     }
   });
 
-  it('shows it without holding the wizard for a confirm', () => {
-    expect([...gatePolicy(md).values()].map((gate) => gate.needsConfirm)).toEqual([false]);
+  it('shows the notes without holding the wizard for a confirm', () => {
+    // The proxy note, then the database password note.
+    expect([...gatePolicy(md).values()].map((gate) => gate.needsConfirm)).toEqual([false, false]);
   });
 });
