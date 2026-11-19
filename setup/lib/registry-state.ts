@@ -116,6 +116,18 @@ export function clearImageSource(): void {
   removeEnvVar(HARDENED_IMAGE_ENV_KEY);
 }
 
+/** The `.env` line alone. A later run reads it back; the caller's env can mask it now. */
+export function savedImageSetting(): string | undefined {
+  return readEnvFile([HARDENED_IMAGE_ENV_KEY])[HARDENED_IMAGE_ENV_KEY];
+}
+
+/** Put the `.env` line back as `savedImageSetting()` found it, absent included. */
+export function restoreImageSetting(saved: string | undefined): void {
+  if (savedImageSetting() === saved) return;
+  if (saved === undefined) clearImageSource();
+  else upsertEnvVar(HARDENED_IMAGE_ENV_KEY, saved);
+}
+
 const RELEASE_IMAGE_SCRIPT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',

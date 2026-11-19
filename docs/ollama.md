@@ -78,6 +78,8 @@ import http from 'node:http';
 const TARGET_HOST = process.env.OLLAMA_HOST || '127.0.0.1';
 const TARGET_PORT = Number(process.env.OLLAMA_PORT || 11434);
 const LISTEN_PORT = Number(process.env.PROXY_PORT || 11999);
+// Loopback unless told otherwise: the proxy has no login, like Ollama behind it.
+const LISTEN_HOST = process.env.PROXY_HOST || '127.0.0.1';
 
 const server = http.createServer((req, res) => {
   const chunks = [];
@@ -99,8 +101,10 @@ const server = http.createServer((req, res) => {
     proxyReq.end(body);
   });
 });
-server.listen(LISTEN_PORT, '0.0.0.0', () => console.log(`cch-proxy :${LISTEN_PORT} -> ${TARGET_HOST}:${TARGET_PORT}`));
+server.listen(LISTEN_PORT, LISTEN_HOST, () => console.log(`cch-proxy ${LISTEN_HOST}:${LISTEN_PORT} -> ${TARGET_HOST}:${TARGET_PORT}`));
 ```
+
+The proxy has no authentication, so it listens only where containers need it. With Docker Desktop (macOS, Windows) `host.docker.internal` reaches the host's loopback, and the default `127.0.0.1` works. On Linux, containers reach the host at the Docker bridge address, so set `PROXY_HOST=172.17.0.1` (check yours with `docker network inspect bridge`). Do not use `0.0.0.0`: it opens your Ollama to every machine on the network.
 
 Run it durably so it survives reboots. On Linux, a systemd user service:
 
@@ -111,8 +115,12 @@ Description=Ollama cch-normalizing proxy for NanoClaw
 After=network-online.target
 
 [Service]
+Environment=PROXY_HOST=172.17.0.1
 ExecStart=/usr/bin/node %h/.config/nanoclaw/ollama-cch-proxy.mjs
+# After a reboot the bridge address may not exist yet and the proxy exits at once.
+# Wait between tries: with the default 100 ms, systemd gives up after five quick failures.
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=default.target

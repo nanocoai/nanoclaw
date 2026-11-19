@@ -37,6 +37,7 @@ src/channels/slack-raw-text.ts
 src/channels/slack-raw-text.test.ts
 src/channels/slack-registration.test.ts
 src/channels/slack-instances-registration.test.ts
+src/channels/slack-long-replies.test.ts
 src/provisioning/slack-app.ts
 src/provisioning/slack-app.test.ts
 container/skills/slack-formatting/SKILL.md
@@ -80,7 +81,7 @@ loop), the guard, the shared lib, and the provisioning core.
 pnpm run build
 ```
 ```nc:run effect:test
-pnpm exec vitest run src/channels/slack-registration.test.ts src/channels/slack-instances-registration.test.ts src/channels/slack-lib.test.ts src/channels/slack-a2a-guard.test.ts src/provisioning/slack-app.test.ts
+pnpm exec vitest run src/channels/slack-registration.test.ts src/channels/slack-instances-registration.test.ts src/channels/slack-long-replies.test.ts src/channels/slack-lib.test.ts src/channels/slack-a2a-guard.test.ts src/provisioning/slack-app.test.ts
 ```
 
 ## Credentials

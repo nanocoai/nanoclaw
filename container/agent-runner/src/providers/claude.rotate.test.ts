@@ -139,8 +139,51 @@ describe('claude maybeRotateContinuation', () => {
     expect(fs.existsSync(p)).toBe(false);
   });
 
-  it('returns null for an unknown session id', () => {
+  it('rotates a session whose transcript is gone, with nothing to archive or move', () => {
+    const other = writeTranscript('sess-other', 4096);
     const provider = createProvider('claude');
-    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBeNull();
+    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBe('transcript not found');
+    expect(fs.existsSync(path.join(tmp, 'conversations'))).toBe(false);
+    expect(fs.readdirSync(path.dirname(other))).toEqual(['sess-other.jsonl']);
+  });
+
+  it('rotates a session whose transcript is gone when a plain file sits in the projects dir', () => {
+    const projects = path.join(tmp, '.claude', 'projects');
+    fs.mkdirSync(projects, { recursive: true });
+    fs.writeFileSync(path.join(projects, '.DS_Store'), '');
+    const provider = createProvider('claude');
+    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBe('transcript not found');
+  });
+
+  it('rotates a session whose transcript is gone when the projects dir does not exist', () => {
+    expect(fs.existsSync(path.join(tmp, '.claude', 'projects'))).toBe(false);
+    const provider = createProvider('claude');
+    expect(provider.maybeRotateContinuation!('does-not-exist', CWD)).toBe('transcript not found');
+  });
+
+  it('keeps resuming when the projects dir cannot be listed', () => {
+    writeTranscript('sess-hidden', 4096);
+    const readdirSpy = spyOn(fs, 'readdirSync').mockImplementation(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    });
+    let reason: string | null;
+    try {
+      reason = createProvider('claude').maybeRotateContinuation!('sess-hidden', CWD);
+    } finally {
+      readdirSpy.mockRestore();
+    }
+    expect(reason!).toBeNull();
+  });
+
+  it.skipIf(process.getuid?.() === 0)('keeps resuming when a project dir cannot be searched', () => {
+    const dir = path.dirname(writeTranscript('sess-locked', 4096));
+    fs.chmodSync(dir, 0o600);
+    let reason: string | null;
+    try {
+      reason = createProvider('claude').maybeRotateContinuation!('sess-locked', CWD);
+    } finally {
+      fs.chmodSync(dir, 0o755);
+    }
+    expect(reason!).toBeNull();
   });
 });

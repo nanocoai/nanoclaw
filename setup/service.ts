@@ -1,6 +1,5 @@
 /**
  * Step: service — Generate and load service manager config.
- * Replaces 08-setup-service.sh
  *
  * Fixes: Root→system systemd, WSL nohup fallback, no `|| true` swallowing errors.
  */
@@ -12,8 +11,10 @@ import path from 'path';
 
 import { readEnvFile } from '../src/env.js';
 import { log } from '../src/log.js';
-import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
+import { getInstallSlug, getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { writeUpgradeState } from '../src/upgrade-state.js';
+import { sudoNonInteractive } from './lib/sudo-noninteractive.js';
+import { ensureUserLinger } from './lib/systemd-linger.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
 import { commandExists, getPlatform, getNodePath, getServiceManager, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
@@ -70,6 +71,12 @@ export async function run(_args: string[]): Promise<void> {
     log.warn('Removed dead peer NanoClaw registrations (target binary missing)', {
       count: peerReport.removed.length,
       labels: peerReport.removed.map((p) => p.label),
+    });
+  }
+  if (peerReport.retired.length > 0) {
+    log.warn('Retired other NanoClaw services for this checkout (install id changed)', {
+      count: peerReport.retired.length,
+      labels: peerReport.retired.map((p) => p.label),
     });
   }
 
@@ -289,6 +296,13 @@ function servicePath(nodePath: string, dirs: string[]): string {
   return (dirs.includes(nodeDir) ? dirs : [nodeDir, ...dirs]).join(':');
 }
 
+// The host names its image and container labels from the install id, and the
+// service does not inherit the setup shell's environment. Unset or empty adds
+// nothing; an invalid id throws. A valid id needs no quoting.
+function installIdEnv(projectRoot: string): [string, string][] {
+  return process.env.NANOCLAW_INSTALL_ID ? [['NANOCLAW_INSTALL_ID', getInstallSlug(projectRoot)]] : [];
+}
+
 export function renderLaunchdPlist(
   projectRoot: string,
   nodePath: string,
@@ -306,7 +320,7 @@ export function renderLaunchdPlist(
     '/bin',
     `${homeDir}/.local/bin`,
   ]);
-  const proxyEntries = proxyEnv
+  const extraEntries = [...installIdEnv(projectRoot), ...proxyEnv]
     .map(([key, value]) => `\n        <key>${key}</key>\n        <string>${xmlEscape(value)}</string>`)
     .join('');
 
@@ -332,7 +346,7 @@ export function renderLaunchdPlist(
         <key>PATH</key>
         <string>${envPath}</string>
         <key>HOME</key>
-        <string>${homeDir}</string>${proxyEntries}
+        <string>${homeDir}</string>${extraEntries}
     </dict>
     <key>StandardOutPath</key>
     <string>${projectRoot}/logs/nanoclaw.log</string>
@@ -479,19 +493,6 @@ const DOCKER_SOCKET = '/var/run/docker.sock';
 // A fresh VM's first-boot apt run can hold the dpkg lock for a while.
 const APT_INSTALL_ACL = 'env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o DPkg::Lock::Timeout=60 acl';
 
-// Steps run with stdin ignored, but sudo prompts on /dev/tty, which would hang
-// out of sight under the wizard spinner. -n uses a cached ticket or fails fast.
-function sudoNonInteractive(args: string[], timeout: number): boolean {
-  try {
-    execFileSync('sudo', ['-n', ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout });
-    return true;
-  } catch (err) {
-    const stderr = (err as { stderr?: Buffer }).stderr?.toString().trim();
-    log.warn('sudo command failed', { command: args.join(' '), stderr: stderr || String(err) });
-    return false;
-  }
-}
-
 interface DockerAccess {
   stale: boolean;
   setfaclMissing?: boolean;
@@ -533,6 +534,9 @@ export function renderSystemdUnit(
   const proxyLine = proxyEnvFile
     ? `\nEnvironmentFile=${proxyEnvFile.replace(/%/g, '%%').replace(/[[\]*?\\]/g, '\\$&')}`
     : '';
+  const idLine = installIdEnv(projectRoot)
+    .map(([key, value]) => `\nEnvironment=${key}=${value}`)
+    .join('');
 
   return `[Unit]
 Description=NanoClaw Personal Assistant
@@ -546,7 +550,7 @@ Restart=always
 RestartSec=5
 KillMode=process
 Environment=HOME=${homeDir}
-Environment=PATH=${servicePath(nodePath, ['/usr/local/bin', '/usr/bin', '/bin', `${homeDir}/.local/bin`])}${proxyLine}
+Environment=PATH=${servicePath(nodePath, ['/usr/local/bin', '/usr/bin', '/bin', `${homeDir}/.local/bin`])}${idLine}${proxyLine}
 StandardOutput=append:${projectRoot}/logs/nanoclaw.log
 StandardError=append:${projectRoot}/logs/nanoclaw.error.log
 
@@ -596,14 +600,7 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
 
   // Enable lingering so the user service survives SSH logout.
   // Without linger, systemd terminates all user processes when the last session closes.
-  if (!runningAsRoot) {
-    try {
-      execSync('loginctl enable-linger', { stdio: 'ignore' });
-      log.info('Enabled loginctl linger for current user');
-    } catch (err) {
-      log.warn('loginctl enable-linger failed — service may stop on SSH logout', { err });
-    }
-  }
+  const lingerEnabled = !runningAsRoot && ensureUserLinger(process.getuid!());
 
   // Enable and start
   try {
@@ -663,7 +660,7 @@ async function setupSystemd(projectRoot: string, nodePath: string, homeDir: stri
     ...(dockerAccess.stale ? { DOCKER_GROUP_STALE: true } : {}),
     ...(dockerAccess.setfaclMissing ? { SETFACL_MISSING: true } : {}),
     ...proxyStatusFields,
-    LINGER_ENABLED: !runningAsRoot,
+    LINGER_ENABLED: lingerEnabled,
     STATUS: 'success',
     LOG: 'logs/setup.log',
   });
@@ -706,14 +703,9 @@ export async function waitForNohupStartup(projectRoot: string, pid: number, time
   throw new Error('Timed out waiting for NanoClaw admin socket');
 }
 
-async function setupNohupFallback(projectRoot: string, nodePath: string): Promise<void> {
-  log.warn('No usable systemd service — starting with nohup');
-
-  const wrapperPath = path.join(projectRoot, 'start-nanoclaw.sh');
+export function renderNohupWrapper(projectRoot: string, nodePath: string, proxyEnvFile?: string): string {
   const pidFile = path.join(projectRoot, 'nanoclaw.pid');
   const entrypoint = path.join(projectRoot, 'dist', 'index.js');
-  const proxyEnvFile = writeServiceProxyEnv(projectRoot);
-
   const lines = [
     '#!/bin/bash',
     '# start-nanoclaw.sh — Start NanoClaw without systemd',
@@ -763,6 +755,8 @@ socket.setTimeout(1000, () => {
 `)} ${shellQuote(path.join(projectRoot, 'data', 'ncl.sock'))}`,
     '',
     ...(proxyEnvFile ? ['set -a', `. ${shellQuote(proxyEnvFile)}`, 'set +a'] : []),
+    // restart.sh and the updater run this from shells that may not set the id.
+    ...installIdEnv(projectRoot).map(([key, value]) => `export ${key}=${shellQuote(value)}`),
     'echo "Starting NanoClaw..."',
     // Node resets the inherited SIGHUP ignore; detach from the wizard terminal.
     `setsid nohup ${shellQuote(nodePath)} ${shellQuote(entrypoint)} \\`,
@@ -771,7 +765,16 @@ socket.setTimeout(1000, () => {
     `echo $! > ${shellQuote(pidFile)}`,
     'echo "NanoClaw launched (PID $!)"',
   ];
-  fs.writeFileSync(wrapperPath, lines.join('\n') + '\n', { mode: 0o755 });
+  return lines.join('\n') + '\n';
+}
+
+async function setupNohupFallback(projectRoot: string, nodePath: string): Promise<void> {
+  log.warn('No usable systemd service — starting with nohup');
+
+  const wrapperPath = path.join(projectRoot, 'start-nanoclaw.sh');
+  const pidFile = path.join(projectRoot, 'nanoclaw.pid');
+  const wrapper = renderNohupWrapper(projectRoot, nodePath, writeServiceProxyEnv(projectRoot));
+  fs.writeFileSync(wrapperPath, wrapper, { mode: 0o755 });
   log.info('Wrote nohup wrapper script', { wrapperPath });
 
   let failure: unknown;

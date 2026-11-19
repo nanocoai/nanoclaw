@@ -48,20 +48,19 @@ pinned package drifts away from the patch:
 patches/@chat-adapter__discord@4.41.1.patch
 ```
 
-The reinstall applies the patch to an install that already has the adapter,
-since the step below skips a package that is already present. It runs only
-then: pnpm refuses a patch for a package that isn't installed, so a fresh
-install gets the patch from the step below instead:
+Re-runs only: the step below skips an adapter that is already installed, so this
+`pnpm add` moves it to 4.41.1 with the patch. A fresh install gets the patch
+from the step below (pnpm rejects a patch for a package that isn't installed
+yet):
 
 ```nc:run effect:refresh
 pnpm pkg set 'pnpm.patchedDependencies[@chat-adapter/discord@4.41.1]=patches/@chat-adapter__discord@4.41.1.patch'
-if node -e 'process.exit(require("./package.json").dependencies?.["@chat-adapter/discord"] ? 0 : 1)'; then pnpm install --no-frozen-lockfile; fi
+if node -e 'const p = require("./package.json"); process.exit(p.dependencies?.["@chat-adapter/discord"] || p.devDependencies?.["@chat-adapter/discord"] ? 0 : 1)'; then pnpm add @chat-adapter/discord@4.41.1; fi
 ```
 
 Adapter 4.42.0 and later carry the fix. Installs keep this registration, so the
 bump past 4.41.1 must replace this step with an `effect:refresh` step that
-removes it before the install (see `ERR_PNPM_UNUSED_PATCH` under
-Troubleshooting).
+removes it before the install, or refreshes fail with `ERR_PNPM_UNUSED_PATCH`.
 
 ### 4. Install the adapter package
 
@@ -197,6 +196,6 @@ this channel with `/init-first-agent` (or `/manage-channels`).
 
 **The bot is online but never sees your messages.** Two usual causes: Message Content Intent is off (Bot tab → Privileged Gateway Intents), so message bodies arrive empty and nothing triggers; or the bot doesn't share a server with you — in which case `POST /users/@me/channels` also refuses. Open the invite URL and add the bot to a server you're in, then retry.
 
-**`pnpm install` fails with `ERR_PNPM_UNUSED_PATCH` for `@chat-adapter/discord@4.41.1`.** The adapter has moved past 4.41.1, which already carries the fix, but `package.json` still registers the old patch. Run `pnpm pkg delete 'pnpm.patchedDependencies[@chat-adapter/discord@4.41.1]'` and `rm -f patches/@chat-adapter__discord@4.41.1.patch`, then re-run the install.
+**`pnpm add`, `install` or `remove` fails with `ERR_PNPM_UNUSED_PATCH` for `@chat-adapter/discord@4.41.1`.** The adapter was moved off 4.41.1, the version the patch is for. Move it back with `pnpm add @chat-adapter/discord@4.41.1`, or re-run `/add-discord`. Don't drop the patch to keep a newer adapter: it needs a newer `chat` than the 4.41.1 that core pins, so the build fails with `TS2322`. To remove Discord, follow `REMOVE.md`, which deletes the patch registration first.
 
 **Adapter looks installed but Discord never connects.** Run `pnpm exec vitest run src/channels/discord-registration.test.ts` — red means the barrel import or the `@chat-adapter/discord` install drifted, so re-run the Apply steps. If it's green, the service probably hasn't restarted since the credentials were stored: `bash setup/lib/restart.sh`, then check `logs/nanoclaw.error.log` for missing `DISCORD_PUBLIC_KEY` / `DISCORD_APPLICATION_ID` complaints.

@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 
 import type { GatewayCatalogEntry } from '../../setup/gateways/catalog.js';
 import { getInstallSlug } from '../../src/install-slug.js';
+import { pinnedBunVersion } from '../provider-contract-verifier.js';
 import { refreshInstalledSkills, type SkillsRefreshReport } from '../update-skills.js';
 import { stampChannel, type UpdateChannel } from './channel.js';
 import { assertLockfilesUnmarked, lockfileNote, resolveLockfileConflicts } from './lockfiles.js';
@@ -427,6 +428,50 @@ function hasChanged(state: UpdateState, prefix: string): boolean {
   return state.changedFiles.some((file) => file === prefix || file.startsWith(`${prefix}/`));
 }
 
+const SKILL_ERROR_HEAD = 200;
+const SKILL_ERROR_TAIL = 300;
+
+// Long text keeps its start (which step failed) and its end: a failed command
+// reads "Command failed: <command>" and then its stderr, so the reason is last.
+function excerpt(text: string): string {
+  const chars = Array.from(text);
+  if (chars.length <= SKILL_ERROR_HEAD + SKILL_ERROR_TAIL) return text;
+  return `${chars.slice(0, SKILL_ERROR_HEAD).join('')}…${chars.slice(-SKILL_ERROR_TAIL).join('')}`;
+}
+
+// One flattened line per failed skill: a failed run can carry a whole build
+// log, and its own newlines must not read as another skill's line.
+// The full text stays in state.skillRefresh, which `status` prints.
+function skillRefreshFailure(report: SkillsRefreshReport, heading = 'Installed skills failed to refresh:'): string {
+  const lines = report.skills
+    .filter((skill) => skill.status === 'failed')
+    .map((skill) => `- ${skill.name}: ${excerpt(skill.errors.join('; ').replace(/\s*\n\s*/g, ' '))}`);
+  return [heading, ...lines].join('\n');
+}
+
+// Bounds only the Bun fetch, so a stalled registry skips the check instead of hanging validate.
+const BUN_FETCH_TIMEOUT_MS = 5 * 60 * 1000;
+
+type AgentRunnerBun = { command: string; prefix: string[]; label: string } | { skipped: string };
+
+// Host Bun first, else the Bun the image pins, through pnpm. Nothing else
+// typechecks agent-runner source (the image build only installs its deps), so
+// when neither runs the check line must say the source went unchecked.
+function agentRunnerBun(runner: CommandRunner, root: string): AgentRunnerBun {
+  if (runner.tryRun('bun', ['--version'], root).ok) return { command: 'bun', prefix: [], label: 'host Bun' };
+  let version: string;
+  try {
+    version = pinnedBunVersion(root);
+  } catch (err) {
+    return { skipped: `no Bun on the host, and ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const prefix = [`--package=bun@${version}`, 'dlx', 'bun'];
+  const probe = runner.tryRun('pnpm', [...prefix, '--version'], root, { timeoutMs: BUN_FETCH_TIMEOUT_MS });
+  if (probe.ok) return { command: 'pnpm', prefix, label: `bun@${version} via pnpm` };
+  const reason = excerpt(probe.stdout.replace(/\s*\n\s*/g, ' ') || 'no output');
+  return { skipped: `no Bun on the host, and pnpm could not run bun@${version}: ${reason}` };
+}
+
 export async function validateUpdate(
   projectRoot: string,
   id: string,
@@ -439,7 +484,7 @@ export async function validateUpdate(
 
   try {
     state.skillRefresh = await refreshInstalledSkills(state.stageRoot);
-    if (!state.skillRefresh.success) throw new Error('One or more installed skills failed to refresh');
+    if (!state.skillRefresh.success) throw new Error(skillRefreshFailure(state.skillRefresh));
     commitStageChanges(state, runtime, 'chore: refresh installed skill payloads');
     refreshPreparedState(state, runtime);
 
@@ -479,11 +524,7 @@ export async function validateUpdate(
         state.skillRefresh.skills.push(...report.skills);
         state.skillRefresh.selected.push(...report.selected);
         state.skillRefresh.success &&= report.success;
-        if (!report.success) {
-          throw new Error(
-            `Gateway skill did not fully apply: ${report.skills.flatMap((skill) => skill.errors).join('; ')}`,
-          );
-        }
+        if (!report.success) throw new Error(skillRefreshFailure(report, 'Gateway skill did not fully apply:'));
         commitStageChanges(state, runtime, 'chore: materialize selected gateway');
         refreshPreparedState(state, runtime);
       }
@@ -500,10 +541,16 @@ export async function validateUpdate(
     checks.push('host tests');
 
     if (hasChanged(state, 'container/agent-runner')) {
-      if (runtime.runner.tryRun('bun', ['--version'], state.stageRoot).ok) {
+      const bun = agentRunnerBun(runtime.runner, state.stageRoot);
+      if ('skipped' in bun) {
+        checks.push(
+          `agent-runner source NOT typechecked (${bun.skipped}). ` +
+            'Agents run it with Bun, which skips type checks, so nothing else will catch a type error there.',
+        );
+      } else {
         runtime.runner.run(
-          'bun',
-          ['install', '--frozen-lockfile'],
+          bun.command,
+          [...bun.prefix, 'install', '--frozen-lockfile'],
           path.join(state.stageRoot, 'container/agent-runner'),
         );
         runtime.runner.run(
@@ -511,9 +558,7 @@ export async function validateUpdate(
           ['exec', 'tsc', '-p', 'container/agent-runner/tsconfig.json', '--noEmit'],
           state.stageRoot,
         );
-        checks.push('container dependencies and typecheck');
-      } else {
-        checks.push('container typecheck deferred to image build (Bun unavailable on host)');
+        checks.push(`container dependencies and typecheck (${bun.label})`);
       }
     }
 

@@ -16,6 +16,7 @@ rm -f src/channels/slack.ts src/channels/slack-lib.ts src/channels/slack-lib.tes
   src/channels/slack-raw-text.ts src/channels/slack-raw-text.test.ts \
   src/channels/slack-registration.test.ts \
   src/channels/slack-instances-registration.test.ts \
+  src/channels/slack-long-replies.test.ts \
   src/provisioning/slack-app.ts src/provisioning/slack-app.test.ts \
   container/skills/slack-formatting/SKILL.md
 ```

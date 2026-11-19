@@ -26,6 +26,7 @@ vi.mock('@clack/prompts', () => ({
 const home = mkdtempSync(path.join(os.tmpdir(), 'nc-portal-e2e-home-'));
 process.env.HOME = home;
 const { runImagePortal } = await import('./portal.js');
+const { imageSourceDecided } = await import('./lib/registry-state.js');
 
 const DEVICE_ID = 'dev_0123456789abcdef01234567';
 const USER_CODE = 'ABCD-EFGH';
@@ -44,8 +45,15 @@ let stdout: string[];
 const seen: Seen[] = [];
 const fake = {
   tokenPolls: 0,
-  tokenOutcome: 'approve' as 'approve' | 'deny',
+  tokenOutcome: 'approve' as 'approve' | 'deny' | 'expire' | 'unavailable',
+  expiresIn: 300,
+  enrollStatus: 201,
+  enrollError: undefined as string | undefined,
+  authConfigStatus: 200,
+  deviceCodes: 0,
+  devicesStatus: 200,
   flowStatus: undefined as string | undefined,
+  flowEnd: 'approved',
   pinned: undefined as DevicePublicJwk | undefined,
   statusPolls: 0,
 };
@@ -77,12 +85,13 @@ async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // WorkOS (device authorization grant, form-encoded, RFC 8628)
   if (route === '/workos/device') {
     expect(body).toEqual({ client_id: 'client-test' });
+    fake.deviceCodes++;
     return reply(200, {
       device_code: 'device-code-secret',
       user_code: USER_CODE,
       verification_uri: ACTIVATE,
       verification_uri_complete: `${ACTIVATE}?user_code=${USER_CODE}`,
-      expires_in: 300,
+      expires_in: fake.expiresIn,
       interval: 1,
     });
   }
@@ -94,18 +103,26 @@ async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
     });
     fake.tokenPolls++;
     if (fake.tokenOutcome === 'deny') return reply(400, { error: 'access_denied' });
+    if (fake.tokenOutcome === 'expire') return reply(400, { error: 'expired_token' });
+    if (fake.tokenOutcome === 'unavailable') return reply(503, {});
     if (fake.tokenPolls < 3) return reply(400, { error: 'authorization_pending' });
     return reply(200, { access_token: 'idp-access-token' });
   }
   // Registry broker
   if (route === '/v1/auth-config')
-    return reply(200, {
-      device_flow_available: true,
-      client_id: 'client-test',
-      device_authorization_endpoint: `${origin}/workos/device`,
-      token_endpoint: `${origin}/workos/token`,
-    });
+    return reply(
+      fake.authConfigStatus,
+      fake.authConfigStatus !== 200
+        ? {}
+        : {
+            device_flow_available: true,
+            client_id: 'client-test',
+            device_authorization_endpoint: `${origin}/workos/device`,
+            token_endpoint: `${origin}/workos/token`,
+          },
+    );
   if (route === '/v1/enroll') {
+    if (fake.enrollStatus !== 201) return reply(fake.enrollStatus, { error: fake.enrollError });
     expect(body).toMatchObject({
       method: 'idp',
       provider: 'workos',
@@ -136,6 +153,7 @@ async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const publicKey = (body as { publicKey?: DevicePublicJwk }).publicKey;
     if (!signedIn) return reply(401, { error: 'invalid_token' });
     if (!proofAgainst(publicKey)) return reply(401, { error: 'invalid_proof' });
+    if (fake.devicesStatus !== 200) return reply(fake.devicesStatus, { error: 'device_limit' });
     fake.pinned = publicKey;
     return reply(200, { deviceId: DEVICE_ID, accountId: 'acct-e2e', installId: await hostId() });
   }
@@ -154,7 +172,7 @@ async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return reply(200, state());
   }
   if (route === '/api/v1/setup/code-1' && method === 'GET') {
-    if (++fake.statusPolls >= 2 && fake.flowStatus === 'pending') fake.flowStatus = 'approved';
+    if (++fake.statusPolls >= 2 && fake.flowStatus === 'pending') fake.flowStatus = fake.flowEnd;
     return reply(200, state());
   }
   if (route === '/api/v1/setup/code-1/complete') return reply(200, { ok: true });
@@ -170,7 +188,14 @@ beforeEach(async () => {
   Object.assign(fake, {
     tokenPolls: 0,
     tokenOutcome: 'approve',
+    expiresIn: 300,
+    enrollStatus: 201,
+    enrollError: undefined,
+    authConfigStatus: 200,
+    deviceCodes: 0,
+    devicesStatus: 200,
     flowStatus: undefined,
+    flowEnd: 'approved',
     pinned: undefined,
     statusPolls: 0,
   });
@@ -250,6 +275,7 @@ describe('single-visit enrollment', () => {
     const out = stdout.join('');
     expect(out).toContain(`\n${origin}/?setup=code-1\n`);
     expect(out).toContain(`Code: ${USER_CODE}`);
+    expect(out).toContain('It expires in about 5 minutes.');
     expect(out).not.toContain(ACTIVATE);
     expect(out).not.toContain('device-code-secret');
 
@@ -290,11 +316,111 @@ describe('single-visit enrollment', () => {
       '/workos/token',
     ]);
     expect(mock.open).toHaveBeenCalledOnce();
-    expect(mock.logs.mock.calls.map((c) => String(c[0]))).toContainEqual(expect.stringContaining('declined'));
+    // A decline is the answer, so the hint must not promise that a re-run asks again.
+    expect(mock.logs.mock.calls.map((c) => String(c[0]))).toContainEqual(
+      'The sign-in was declined in the browser. To change that, remove NANOCLAW_HARDENED_IMAGE from .env and re-run setup. Skipping this step for now.',
+    );
     await expect(readFile(path.join(home, '.config/nanoclaw/account.json'))).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(readFile(path.join(home, '.config/nanoclaw/device-key.json'))).rejects.toMatchObject({
       code: 'ENOENT',
     });
     expect(await readFile(path.join(root, '.env'), 'utf8')).toContain('NANOCLAW_HARDENED_IMAGE=false');
+    expect(imageSourceDecided()).toBe(true);
+  }, 20_000);
+
+  const FRESH = 'Re-run setup to get a fresh code. Skipping this step for now.';
+  it.each([
+    [
+      'the code expires before it is approved',
+      () => (fake.tokenOutcome = 'expire'),
+      `That sign-in code expired before it was approved. ${FRESH}`,
+    ],
+    ['the wait times out', () => (fake.expiresIn = 0), `Timed out waiting for the sign-in to be approved. ${FRESH}`],
+    [
+      'the sign-in provider fails mid-wait',
+      () => (fake.tokenOutcome = 'unavailable'),
+      'Sign-in failed: HTTP 503 Skipping this step for now.',
+    ],
+    [
+      'the account service is down after approval',
+      () => (fake.enrollStatus = 503),
+      'The account service is unavailable (HTTP 503). Try again shortly. Skipping this step for now.',
+    ],
+    [
+      'the account service finds the approval too old',
+      () => Object.assign(fake, { enrollStatus: 401, enrollError: 'token_expired' }),
+      'The account service rejected the sign-in (token_expired). The sign-in took too long. Run this again — the code is valid for 5 minutes. Skipping this step for now.',
+    ],
+    [
+      'the registry cannot be reached',
+      () => (process.env.NANOCLAW_REGISTRY_API = 'http://127.0.0.1:9'),
+      expect.stringMatching(/^No NanoClaw registry at http:\/\/127\.0\.0\.1:9 /),
+    ],
+    [
+      'the registry answers 503',
+      () => (fake.authConfigStatus = 503),
+      expect.stringContaining('(HTTP 503 with no NanoClaw registry response)'),
+    ],
+  ])(
+    'leaves the image question open when %s, and the re-run gets a fresh code',
+    async (_, arrange, warning) => {
+      arrange();
+      await runImagePortal();
+      expect(mock.logs.mock.calls.map((c) => String(c[0]))).toContainEqual(warning);
+      expect(seen.map((r) => r.route)).not.toContain('/api/v1/devices');
+      // Nobody answered, so `.env` holds no answer and setup asks again.
+      await expect(readFile(path.join(root, '.env'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(imageSourceDecided()).toBe(false);
+
+      Object.assign(fake, {
+        tokenOutcome: 'approve',
+        expiresIn: 300,
+        enrollStatus: 201,
+        enrollError: undefined,
+        authConfigStatus: 200,
+      });
+      process.env.NANOCLAW_REGISTRY_API = origin;
+      const before = fake.deviceCodes;
+      await runImagePortal();
+      expect(mock.confirm).toHaveBeenCalledTimes(2);
+      expect(fake.deviceCodes).toBe(before + 1);
+      expect(await readFile(path.join(root, '.env'), 'utf8')).toContain('NANOCLAW_HARDENED_IMAGE=true');
+    },
+    20_000,
+  );
+
+  it.each([
+    ['', undefined],
+    [', even with the setting exported as false', 'false'],
+  ])(
+    'takes back the saved "pull" when this device cannot be registered after the sign-in%s',
+    async (_, exported) => {
+      fake.devicesStatus = 409;
+      // An exported value must not hide the `.env` line a later run reads.
+      if (exported) process.env.NANOCLAW_HARDENED_IMAGE = exported;
+      try {
+        await runImagePortal();
+      } finally {
+        delete process.env.NANOCLAW_HARDENED_IMAGE;
+      }
+      expect(mock.logs.mock.calls.map((c) => String(c[0]))).toContainEqual(
+        expect.stringContaining('maximum number of devices'),
+      );
+      expect(seen.map((r) => r.route)).toContain('/api/v1/devices');
+      expect(seen.map((r) => r.route)).not.toContain('/api/v1/setup/code-1/claim');
+      // The sign-in itself is kept; only the image question is open again.
+      expect(await mode(path.join(home, '.config/nanoclaw/account.json'))).toBe(0o600);
+      expect(await readFile(path.join(root, '.env'), 'utf8')).not.toContain('NANOCLAW_HARDENED_IMAGE');
+      expect(imageSourceDecided()).toBe(false);
+    },
+    20_000,
+  );
+
+  it('takes back the saved "pull" when the browser step fails after the sign-in', async () => {
+    fake.flowEnd = 'failed';
+    await expect(runImagePortal()).rejects.toThrow('Setup was cancelled or failed. Restart this step.');
+    expect(seen.map((r) => r.route)).toContain('/api/v1/setup/code-1/claim');
+    expect(await readFile(path.join(root, '.env'), 'utf8')).not.toContain('NANOCLAW_HARDENED_IMAGE');
+    expect(imageSourceDecided()).toBe(false);
   }, 20_000);
 });

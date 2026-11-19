@@ -24,7 +24,7 @@
     "@grpc/proto-loader": "0.8.1",
     "@microsoft/teams.cli": "3.0.2",
     "@onecli-sh/sdk": "2.2.1",
-    "@openai/codex": "0.162.1",
+    "@openai/codex": "0.169.0",
     "@opencode-ai/sdk": "1.18.25",
     "@resend/chat-sdk-adapter": "0.3.0",
     "@types/qrcode": "1.5.6",
@@ -51,6 +51,7 @@
     "@beeper/chat-adapter-matrix": {
       "version": "0.2.0",
       "sources": [
+        ".claude/skills/add-matrix/SKILL.md nc:run",
         ".claude/skills/add-matrix/SKILL.md nc:dep"
       ]
     },
@@ -63,6 +64,7 @@
     "@chat-adapter/discord": {
       "version": "4.41.1",
       "sources": [
+        ".claude/skills/add-discord/SKILL.md nc:run",
         ".claude/skills/add-discord/SKILL.md nc:dep"
       ]
     },
@@ -158,7 +160,7 @@
       ]
     },
     "@openai/codex": {
-      "version": "0.162.1",
+      "version": "0.169.0",
       "sources": [
         ".claude/skills/add-codex/SKILL.md nc:json-merge"
       ]

@@ -235,8 +235,11 @@ describe('channel registry — instance keying', () => {
       JSON.stringify({ text: 'to the tester bot' }),
       undefined,
       'slack-tester',
+      'out-1',
     );
     expect(tester.delivered).toHaveLength(1);
+    // The row id reaches the adapter, so a split reply can resume on retry.
+    expect(tester.delivered[0].deliveryId).toBe('out-1');
   });
 });
 

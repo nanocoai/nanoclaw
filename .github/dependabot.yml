@@ -44,6 +44,10 @@ updates:
       # Typings follow the Node floor (engines >=22), not the newest Node.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+      # TypeScript 7 moved its compiler API under typescript/unstable/*, and
+      # typescript-eslint supports only <6.1. Stay on 6.x until both catch up.
+      - dependency-name: typescript
+        versions: [">=7.0.0"]
     labels: [dependencies, javascript]
     commit-message:
       prefix: chore

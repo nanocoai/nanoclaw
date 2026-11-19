@@ -137,9 +137,20 @@ from your phone. The adapter is installed and registered, but its factory return
 `null` (and the channel stays dark) until `store/auth/creds.json` exists.
 
 The number safety check above is still required even when credentials already
-exist. If `store/auth/creds.json` exists, skip ahead to "Dedicated vs personal
-number" after completing the safety check — the link step below reports the
-already-linked number and moves on.
+exist. If `store/auth/` already holds a linked device, skip ahead to "Dedicated
+vs personal number" after completing the safety check — the link step below
+reports the already-linked number and moves on. This prints `linked` only for a
+finished pairing:
+
+```bash
+node -e "let s='not linked';try{s=JSON.parse(require('fs').readFileSync('store/auth/creds.json','utf-8'))?.account?'linked':'not linked'}catch(e){if(e.code!=='ENOENT')s=e.code?'cannot open ('+e.code+')':'not valid JSON'};console.log(s)"
+```
+
+A `creds.json` without a finished pairing (a pairing code that was never entered
+leaves one behind) is not a link: clear `store/auth/` and link below. In the
+other two cases keep `store/auth/`: for `not valid JSON`, a running service may
+be rewriting it, so stop the NanoClaw service and check again; for `cannot open`,
+make the file readable by the user running setup.
 
 Pick how to link the device. `qr` shows a rotating QR you scan with your phone's
 camera; `pairing-code` shows an 8-character code you type into WhatsApp (no camera
@@ -187,6 +198,25 @@ pnpm exec tsx setup/index.ts --step whatsapp-auth -- --method pairing-code --pho
 
 If the handshake fails (`logged_out` or a timeout), the code expired — clear
 `store/auth/` and run the step again for a fresh one. See Troubleshooting.
+If it fails with `WhatsApp closed the connection before linking`, also clear
+`store/auth/` first: a requested pairing code leaves credentials behind. For
+the same reason, if it fails with `store/auth/ has WhatsApp credentials but no
+linked device`, clear `store/auth/` and run the step again.
+If it fails with `store/auth/creds.json is not valid JSON`, keep `store/auth/`:
+stop the NanoClaw service and run the step again. If it still says that with the
+service stopped, the file is damaged and Baileys can't read it either, so remove
+the device under Linked Devices, clear `store/auth/` and link again.
+If it fails with `store/auth/creds.json could not be opened`, keep `store/auth/`:
+make the file readable by the user running setup (it may belong to the service's
+user) and run the step again.
+If it fails with `WhatsApp closed the connection after pairing` and says the link
+is saved (or probably saved), keep `store/auth/`: the paired device is saved
+there, and running the step again reports it as already linked (it does not
+reconnect to check). If the phone does not list the device under Linked Devices,
+or the service later reports `logged_out`, clear `store/auth/` and link again.
+If it says the link was not saved, clear `store/auth/` and run the step again.
+If it says `store/auth/creds.json could not be read`, keep `store/auth/` and run
+the step again: it checks the saved link.
 
 A successful link reports the number back as `bot_phone`. If it came back empty,
 the device never confirmed (an expired QR or pairing code), so don't restart or
@@ -488,6 +518,17 @@ has a noticeably higher success rate:
 
 ```bash
 pnpm exec tsx .claude/skills/add-whatsapp/scripts/wa-qr-browser.ts --clean
+```
+
+### "WhatsApp closed the connection before linking"
+
+WhatsApp ended the connection before the device was linked, so the step stopped
+at once. The status code in brackets says why: `405` means WhatsApp refused this
+WhatsApp Web version. A requested pairing code leaves credentials behind, so
+clear the auth state before you run the step again:
+
+```bash
+rm -rf store/auth/ && pnpm exec tsx setup/index.ts --step whatsapp-auth -- --method qr
 ```
 
 ### "waiting for this message" on reactions

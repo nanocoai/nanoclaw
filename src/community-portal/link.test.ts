@@ -47,6 +47,10 @@ class FakeSocket implements LinkSocket {
     this.readyState = 3;
     this.emit('close', { data: undefined, ...(code === undefined ? {} : { code }) });
   }
+  /** An `error` event alone, as Node 22 fires it for a refused upgrade: no `close`, still CONNECTING. */
+  failed(): void {
+    this.emit('error');
+  }
   private seqs = new Map<number, number>();
   private emit(type: string, event: { data: unknown; code?: number } = { data: undefined }): void {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
@@ -247,6 +251,74 @@ it('gives up on a handshake that does not open in time and reconnects', async ()
   expect(FakeSocket.instances).toHaveLength(2);
   FakeSocket.instances[1].open();
   expect(link.connected).toBe(true);
+});
+
+// Node 22 fires only `error` for a refused upgrade; Node 26 fires `error`, then
+// `close` 1006. Both must end the dial at once, with one reconnect (#4427).
+it.each([
+  ['error alone (Node 22)', false],
+  ['error, then close 1006 (Node 26)', true],
+])('drops a dial that fails before it opens, on %s, with the usual backoff', async (_, thenClose) => {
+  vi.useFakeTimers();
+  const { link, log, getTicket } = connect({
+    handshakeMs: 10_000,
+    backoffBaseMs: 100,
+    backoffCapMs: 400,
+    random: () => 1,
+  });
+  link.start();
+  await settle();
+  const fail = (socket: FakeSocket) => {
+    socket.failed();
+    if (thenClose) socket.lost(1006);
+  };
+  const first = FakeSocket.instances[0];
+  fail(first);
+  expect(log).toHaveBeenCalledExactlyOnceWith({ event: 'dial_failed' });
+  expect(first.closed).toBe(true);
+  expect(link.connected).toBe(false);
+  await vi.advanceTimersByTimeAsync(99);
+  expect(FakeSocket.instances).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(FakeSocket.instances).toHaveLength(2);
+  expect(getTicket).toHaveBeenCalledTimes(2);
+  expect(FakeSocket.instances[1].protocols).toEqual(['nc-cell', 'ticket.tkt.2']);
+  // The backoff still grows: the second failure waits 200 ms, not 100.
+  fail(FakeSocket.instances[1]);
+  await vi.advanceTimersByTimeAsync(199);
+  expect(FakeSocket.instances).toHaveLength(2);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(FakeSocket.instances).toHaveLength(3);
+  // No handshake timer outlives a failed dial, and a late close changes nothing.
+  first.lost(1006);
+  await vi.advanceTimersByTimeAsync(9_999);
+  expect(FakeSocket.instances).toHaveLength(3);
+  expect(log).not.toHaveBeenCalledWith({ event: 'handshake_timeout' });
+  expect(log).not.toHaveBeenCalledWith(expect.objectContaining({ event: 'disconnected' }));
+  FakeSocket.instances[2].open();
+  expect(link.connected).toBe(true);
+});
+
+it.each([
+  ['1006', 1006],
+  ['4403', CLOSE_FORBIDDEN],
+])('leaves an error after open to the close that follows it (%s), dropping once', async (_, code) => {
+  vi.useFakeTimers();
+  const onForbidden = vi.fn();
+  const { link, log } = connect({ onForbidden, backoffBaseMs: 100, backoffCapMs: 100 });
+  link.start();
+  await settle();
+  const first = FakeSocket.instances[0];
+  first.open();
+  first.failed();
+  expect(link.connected).toBe(true);
+  expect(first.closed).toBe(false);
+  first.lost(code);
+  expect(log).toHaveBeenCalledWith({ event: 'disconnected', closeCode: code });
+  expect(log).not.toHaveBeenCalledWith({ event: 'dial_failed' });
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(FakeSocket.instances).toHaveLength(code === CLOSE_FORBIDDEN ? 1 : 2);
+  expect(onForbidden).toHaveBeenCalledTimes(code === CLOSE_FORBIDDEN ? 1 : 0);
 });
 
 it('reconnects after the cell closes the connection, resetting the backoff after a stable session', async () => {

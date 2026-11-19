@@ -24,7 +24,11 @@ import { spawnSync } from 'child_process';
 import path from 'path';
 
 import { log } from '../src/log.js';
-import { credentialHelperStatus, uninstallCredentialHelper } from './install-cred-helper.js';
+import {
+  credentialHelperStatus,
+  refreshInstalledCredentialHelper,
+  uninstallCredentialHelper,
+} from './install-cred-helper.js';
 import {
   AGENT_IMAGE_PIN,
   AGENT_IMAGE_REF_ENV_KEY,
@@ -248,6 +252,7 @@ async function refresh(say: (line?: string) => void): Promise<void> {
 
   const projectRoot = process.cwd();
   const before = inspectAgentImage(projectRoot).registryDigest ?? '';
+  refreshInstalledCredentialHelper();
   const pull = spawnSync('bash', [path.join(projectRoot, 'container', 'pull.sh')], {
     cwd: projectRoot,
     stdio: 'inherit',

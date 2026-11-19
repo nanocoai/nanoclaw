@@ -4,7 +4,8 @@
  * Responsibility: orchestrate the sequence of steps end-to-end and route
  * between them. The runner, spawning, status parsing, spinner, abort, and
  * prompt primitives live in `setup/lib/runner.ts`; theming in
- * `setup/lib/theme.ts`; Telegram's full flow in `setup/channels/telegram.ts`.
+ * `setup/lib/theme.ts`; channel flows in each channel skill's SKILL.md, run by
+ * `setup/channels/run-channel-skill.ts`.
  *
  * Config via env:
  *   NANOCLAW_DISPLAY_NAME  how the agents address the operator — skips the
@@ -33,7 +34,13 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
-import { withSetupLock, launchSlackJob, readSlackJob, slackJobStatus } from '../src/community-portal/slack-job.js';
+import {
+  withSetupLock,
+  launchSlackJob,
+  readSlackJob,
+  slackJobFailure,
+  slackJobStatus,
+} from '../src/community-portal/slack-job.js';
 // The pre-step-aware entry point consults each channel's registered wizard
 // extensions (setup/channels/companions.ts) before running its install skill
 // — the wizard itself stays free of channel-specific imports.
@@ -76,7 +83,7 @@ import {
 // Provider payloads self-register their picker entry + auth on import.
 import './providers/index.js';
 import { brightSelect } from './lib/bright-select.js';
-import { buildContainerImage } from './lib/container-build.js';
+import { buildContainerImageWindowed } from './lib/container-build.js';
 import { offerClaudeOnFailure } from './lib/claude-handoff.js';
 import { setPickedProvider } from './lib/picked-provider.js';
 import {
@@ -414,7 +421,7 @@ async function main(): Promise<void> {
 
     // A pulled image bakes /app/node_modules and the CLI manifest, and every
     // non-claude runtime changes one of them — so it needs an image this
-    // machine builds. Settle it here: buildContainerImage() below refuses on a
+    // machine builds. Settle it here: buildContainerImageWindowed() below refuses on a
     // pinned install, and reaching that refusal aborts setup with no way out
     // short of re-running it.
     const providerDescriptor = getInstallableProviderDescriptor(agentProvider);
@@ -464,16 +471,20 @@ async function main(): Promise<void> {
         await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, blockers.join('; '));
       }
       s.stop(`${agentProvider} installed.`);
-      p.log.info(brandBody('Rebuilding the container image with the new provider…'));
       // The rebuild is not optional here: the provider's CLI manifest is baked
       // into the image, so continuing past a failed build would authenticate a
       // runtime the container cannot actually start.
-      const rebuild = buildContainerImage();
+      const rebuild = await buildContainerImageWindowed({
+        running: `Rebuilding the sandbox with ${agentProvider}…`,
+        done: `Sandbox rebuilt with ${agentProvider}.`,
+        failed: `Couldn't rebuild the sandbox with ${agentProvider}.`,
+      });
       if (!rebuild.ok) {
         await fail(
           `add-${agentProvider}`,
           `Couldn't rebuild the container image for ${agentProvider}. ${rebuild.message}`,
           rebuild.hint,
+          rebuild.rawLog,
         );
       }
       // This process imported src/provider-contracts/index.ts at startup, and
@@ -522,12 +533,12 @@ async function main(): Promise<void> {
     }
   }
 
-  // Only for a run that never reached the sandbox-image question. Any answer
-  // to it — a browser choice, a declined handoff, a skipped or failed sign-in
-  // — is written to `.env`, and that is the one store every kind of re-entry
-  // (fail()'s retry, the sg-docker re-exec, a plain re-run) still sees. An
-  // in-memory skip entry would not survive the first two, and the question is
-  // not asked again on any of them.
+  // Only while the sandbox-image question is open: never reached, or its
+  // sign-in failed or ran out. Any answer to it — a browser choice, a
+  // declined handoff or sign-in — is written to `.env`, and that is the one
+  // store every kind of re-entry (fail()'s retry, the sg-docker re-exec, a
+  // plain re-run) still sees. An in-memory skip entry would not survive the
+  // first two, and an answered question is not asked again on any of them.
   if (
     portalEnabled() &&
     !skip.has('echo-reminder') &&
@@ -752,6 +763,8 @@ async function main(): Promise<void> {
   // changes too — the last box must be the one remaining action, not a
   // premature "your assistant is saying hi" (no welcome DM exists yet).
   let wiringPending = false;
+  // Verify passed without a Slack job: none, or one a later good Slack run replaced.
+  let verifyClearedSlackJob = false;
 
   if (
     portalEnabled() &&
@@ -794,9 +807,10 @@ async function main(): Promise<void> {
         );
       }
       const slackInstall = res.terminal?.fields.SLACK_INSTALL;
+      const slackReason = res.terminal?.fields.SLACK_INSTALL_REASON;
       if (slackInstall === 'failed') {
         notes.push(
-          '• Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+          `• Slack installation needs attention${slackReason ? ` (${slackReason})` : ''}. Check its progress in the portal, then resume with \`pnpm exec tsx setup/portal.ts --stage slack\`.`,
         );
       } else if (slackInstall === 'expired') {
         notes.push('• Slack approval expired. Review the existing app in the portal before restarting Slack setup.');
@@ -832,6 +846,7 @@ async function main(): Promise<void> {
       return;
     }
     wiringPending = res.terminal?.fields.WIRING === 'pending_first_dm';
+    verifyClearedSlackJob = !res.terminal?.fields.SLACK_INSTALL;
   }
 
   const rows: [string, string][] = [
@@ -853,12 +868,14 @@ async function main(): Promise<void> {
     'Heads up',
   );
 
-  const slackStatus = slackJobStatus(await readSlackJob());
+  const slackJob = await readSlackJob();
+  const slackStatus = verifyClearedSlackJob ? undefined : slackJobStatus(slackJob);
   if (slackStatus === 'failed' || slackStatus === 'expired') {
+    const reason = slackJobFailure(slackJob);
     note(
       slackStatus === 'expired'
         ? 'Slack approval expired. Review the existing app in the portal before restarting Slack setup.'
-        : 'Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+        : `Slack installation needs attention${reason ? ` (${reason})` : ''}. Check its progress in the portal, then resume with \`pnpm exec tsx setup/portal.ts --stage slack\`.`,
       'Slack setup',
     );
     p.outro(k.yellow('NanoClaw is running. Slack needs attention.'));
@@ -1380,7 +1397,10 @@ async function askNewTemplateAgentName(agents: readonly AgentGroup[], initialVal
  * operator would be asked again after already signing in.
  *
  * Returns having done nothing when the question is already settled, which also
- * covers `NANOCLAW_HARDENED_IMAGE=true` passed in by a packaged flow.
+ * covers `NANOCLAW_HARDENED_IMAGE=true` passed in by a packaged flow. A
+ * sign-in that fails or runs out settles nothing, so a plain re-run and
+ * fail()'s retry of the container step ask again; the sg-docker re-exec comes
+ * after the container step and skips this.
  */
 /** Resolves to the operator's pick when the question was asked, else undefined. */
 async function chooseImageSource(): Promise<ImageSource | undefined> {
