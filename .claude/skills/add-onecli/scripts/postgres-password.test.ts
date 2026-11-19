@@ -11,6 +11,7 @@ import {
   type Exec,
   type Paths,
   envValue,
+  passwordCheck,
   rotateDefaultPassword,
   scramVerifier,
   seedPassword,
@@ -562,6 +563,38 @@ describe('rotateDefaultPassword (existing installs)', () => {
     expect(docker.state).toMatchObject({ alters: 0, ups: 1, containerPassword: password });
     expect(rotateDefaultPassword(paths, docker.exec)).toEqual({ status: 'own-password' });
     expect(docker.state.ups).toBe(1);
+  });
+});
+
+describe('passwordCheck (after setup)', () => {
+  it('warns while the database still accepts the compose default, and changes nothing', () => {
+    const paths = tempPaths('ONECLI_VERSION=1.45.0\n');
+    const docker = fakeDocker(paths);
+    const result = passwordCheck(docker.exec);
+    expect(result.warn).toBe('yes');
+    expect(result.hint).toMatch(/still accepts the default password.*postgres-password\.ts/);
+    expect(fs.readFileSync(paths.envFile, 'utf8')).toBe('ONECLI_VERSION=1.45.0\n');
+    expect(docker.state).toMatchObject({ alters: 0, ups: 0 });
+  });
+
+  it('is quiet once the database has its own password', () => {
+    const docker = fakeDocker(tempPaths(), { verifier: scramVerifier('already-custom') });
+    expect(passwordCheck(docker.exec)).toEqual({ warn: 'no', hint: 'none' });
+  });
+
+  it.each([
+    ['no OneCLI database', {}],
+    ['a stopped one', { stopped: true }],
+  ])('is quiet with %s', (_label, opts) => {
+    const docker = fakeDocker(tempPaths(), { running: false, ...opts });
+    expect(passwordCheck(docker.exec)).toEqual({ warn: 'no', hint: 'none' });
+  });
+
+  it('says so when a running database cannot be read', () => {
+    const docker = fakeDocker(tempPaths(), { readFails: true });
+    const result = passwordCheck(docker.exec);
+    expect(result.warn).toBe('yes');
+    expect(result.hint).toMatch(/Could not check/);
   });
 });
 

@@ -429,6 +429,32 @@ export const REFUSED_HINT =
   'Save the settings OneCLI runs with in ~/.onecli/.env (for example ONECLI_VERSION; see docs/onecli-upgrades.md), ' +
   'then run: pnpm exec tsx .claude/skills/add-onecli/scripts/postgres-password.ts';
 
+export const DEFAULT_PASSWORD_HINT =
+  "OneCLI's database still accepts the default password, so any agent container can log in to it. " + REFUSED_HINT;
+
+/**
+ * Reads, and changes nothing: does a running local database still accept the
+ * compose default? Setup's own rotation can refuse and still succeed, so the
+ * skill asks this afterwards and tells the operator. Never throws.
+ */
+export function passwordCheck(exec: Exec = realExec): { warn: 'yes' | 'no'; hint: string } {
+  const container = postgresContainer(exec, false);
+  if (!container) return { warn: 'no', hint: 'none' };
+  try {
+    const { role, verifier } = readRole(exec, container);
+    return verifierMatches(verifier, COMPOSE_DEFAULT_PASSWORD, role)
+      ? { warn: 'yes', hint: DEFAULT_PASSWORD_HINT }
+      : { warn: 'no', hint: 'none' };
+  } catch {
+    return {
+      warn: 'yes',
+      hint:
+        "Could not check whether OneCLI's database still accepts the default password. " +
+        'Run: pnpm exec tsx .claude/skills/add-onecli/scripts/postgres-password.ts',
+    };
+  }
+}
+
 // Compare real file URLs, so a checkout path with a space or a symlink still runs.
 function runDirectly(): boolean {
   try {
