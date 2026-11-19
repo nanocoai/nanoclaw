@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 
 import { AheadOfReleaseError, readChannelSetting, resolveUpdateTarget } from '../../scripts/update/channel.js';
 import { isUpgradeCurrent, writeUpgradeState } from '../../src/upgrade-state.js';
@@ -41,10 +41,15 @@ function commit(root: string, message: string): string {
   return git(root, ['rev-parse', 'HEAD']);
 }
 
+// A script file, not `bash -c`: the paths stay plain arguments.
+const RUNNER = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'release-helper-')), 'run.sh');
+fs.writeFileSync(RUNNER, 'set -euo pipefail\nsource "$1"\nshift\n"$@"\n');
+afterAll(() => fs.rmSync(path.dirname(RUNNER), { recursive: true, force: true }));
+
 /** Runs one helper function the way nanoclaw.sh does: sourced, under `set -euo pipefail`. */
 function helper(fn: string, ...args: string[]): { status: number; stdout: string; raw: string; stderr: string } {
   try {
-    const raw = execFileSync('bash', ['-c', 'set -euo pipefail; source "$0"; "$@"', HELPER, fn, ...args], {
+    const raw = execFileSync('bash', [RUNNER, HELPER, fn, ...args], {
       encoding: 'utf8',
       env: GIT_ENV,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -434,7 +439,11 @@ function entrypointClone() {
   fs.writeFileSync(path.join(seed, 'setup.sh'), 'touch bootstrap-ran\n');
   // Marked, so a test can tell this release's nanoclaw.sh ran and not main's.
   const real = fs.readFileSync(path.join(seed, 'nanoclaw.sh'), 'utf8');
-  fs.writeFileSync(path.join(seed, 'nanoclaw.sh'), real.replace('\n', '\necho "STARTED v2.5.0-rc.1"\n'));
+  const afterShebang = real.indexOf('\n') + 1;
+  fs.writeFileSync(
+    path.join(seed, 'nanoclaw.sh'),
+    `${real.slice(0, afterShebang)}echo "STARTED v2.5.0-rc.1"\n${real.slice(afterShebang)}`,
+  );
   commit(seed, 'v2.5.0-rc.1');
   git(seed, ['tag', '-a', 'v2.5.0-rc.1', '-m', 'v2.5.0-rc.1']);
   fs.writeFileSync(path.join(seed, 'nanoclaw.sh'), real);
