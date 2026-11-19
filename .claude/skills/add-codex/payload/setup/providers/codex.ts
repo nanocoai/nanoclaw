@@ -467,19 +467,26 @@ class LoginTree {
 
   private marks(proc: Proc): boolean {
     const env = environment(proc);
-    return env !== undefined && carries(env, this.marker);
+    // One it can't read isn't counted, or the stop would wait on the user's
+    // systemd manager and the like; the sweep keeps old homes instead.
+    return Array.isArray(env) && carries(env, this.marker);
   }
 }
 
-/** A process's environment, with the separator between its variables; undefined if unreadable. */
-function environment(proc: Proc): [text: string, sep: string] | undefined {
+/**
+ * A process's environment, with the separator between its variables:
+ * undefined once it has exited, 'unreadable' if Linux won't show it.
+ */
+function environment(proc: Proc): [text: string, sep: string] | 'unreadable' | undefined {
   if (process.platform !== 'linux') return [proc.text, ' '];
   // The whole environment, from /proc: procps cuts it off at 128 KiB, and
   // pnpm's shell shim may put the login id after a long one.
   try {
     return [fs.readFileSync(`/proc/${proc.pid}/environ`, 'latin1'), '\0'];
-  } catch {
-    return undefined;
+  } catch (err) {
+    // ESRCH: it exited while being read.
+    const { code } = err as NodeJS.ErrnoException;
+    return code === 'ENOENT' || code === 'ESRCH' ? undefined : 'unreadable';
   }
 }
 
@@ -591,6 +598,10 @@ const STOP_GRACE_MS = 3000;
 const PS_TIMEOUT_MS = 2000;
 const STALE_LOGIN_MS = 60 * 60 * 1000;
 const LOGIN_HOME = /^login-[0-9a-f]{16}$/;
+// In a home on Linux: the boot it was made in and when the setup that made it
+// started, in clock ticks since boot (see removeUnused).
+const MADE_FILE = '.nanoclaw-made';
+const BOOT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * A private throwaway CODEX_HOME under the install's git-ignored data/, not the
@@ -610,7 +621,10 @@ function makeLoginHome(root: string, id: string): string {
     base,
     fs.readdirSync(base).filter((name) => {
       try {
-        return LOGIN_HOME.test(name) && Date.now() - fs.statSync(path.join(base, name)).mtimeMs > STALE_LOGIN_MS;
+        const stat = fs.statSync(path.join(base, name));
+        // Another user's (setup run once with sudo, say): its processes aren't listed.
+        const ours = stat.uid === (process.getuid?.() ?? stat.uid);
+        return LOGIN_HOME.test(name) && ours && Date.now() - stat.mtimeMs > STALE_LOGIN_MS;
       } catch {
         return false;
       }
@@ -618,6 +632,15 @@ function makeLoginHome(root: string, id: string): string {
   );
   const home = path.join(base, `login-${id}`);
   fs.mkdirSync(home, { mode: 0o700 });
+  const boot = bootId();
+  const ticks = startTicks('self');
+  if (boot && ticks !== undefined) {
+    try {
+      fs.writeFileSync(path.join(home, MADE_FILE), `${boot} ${ticks}\n`, { mode: 0o600 });
+    } catch {
+      // Then a process setup can't read keeps this home once it's old.
+    }
+  }
   return home;
 }
 
@@ -625,16 +648,29 @@ function makeLoginHome(root: string, id: string): string {
  * Removes the old homes that two listings in a row show no process carrying
  * the id of: as in the stop, one listing may miss a process forked just then.
  * Without a listing, none can be shown unused: they wait for a later sign-in.
+ * A process whose environment Linux won't show may be any login's, unless it
+ * started before the setup that made that login's home (the user's systemd
+ * manager, say). Start times are clock ticks since boot, not the wall clock,
+ * which may step; a home from an earlier boot has no login left.
  */
 function removeUnused(base: string, names: string[]): void {
+  const made = new Map(names.map((name) => [name, madeIn(path.join(base, name))]));
+  const boot = bootId();
   for (let listings = 0; listings < 2 && names.length > 0; listings++) {
     const listing = listProcsSync(PS_TIMEOUT_MS);
     if (typeof listing === 'string') return;
+    // A zombie uses nothing, and Linux won't show its environment.
+    const live = listing.filter((proc) => !proc.zombie);
     // Once per process: on Linux each is a read from /proc.
-    const envs = listing.map(environment);
+    const envs = live.map(environment);
+    const unread = live.filter((_, i) => envs[i] === 'unreadable').map((proc) => startTicks(proc.pid));
     names = names.filter((name) => {
       const marker = `${LOGIN_ID_VAR}=${name.slice('login-'.length)}`;
-      return !envs.some((env) => env && carries(env, marker));
+      if (envs.some((env) => Array.isArray(env) && carries(env, marker))) return false;
+      const home = made.get(name);
+      if (home && boot && home.boot !== boot) return true;
+      // Unknown either way: it counts.
+      return !unread.some((ticks) => ticks === undefined || !home || !boot || ticks >= home.ticks);
     });
   }
   for (const name of names) {
@@ -643,6 +679,41 @@ function removeUnused(base: string, names: string[]): void {
     } catch {
       // Gone already, or not ours to remove; the new home doesn't depend on it.
     }
+  }
+}
+
+/** What a home's MADE_FILE says; undefined without one (an older home, or not Linux). */
+function madeIn(dir: string): { boot: string; ticks: number } | undefined {
+  try {
+    const [boot = '', ticks = ''] = fs.readFileSync(path.join(dir, MADE_FILE), 'utf-8').trim().split(' ');
+    // Anything else is no record: a boot that only looks earlier mustn't clear the home.
+    return BOOT_ID.test(boot) && /^\d+$/.test(ticks) ? { boot, ticks: Number(ticks) } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** This boot's id on Linux (a container's own under LXC); undefined elsewhere. */
+function bootId(): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf-8').trim();
+    return BOOT_ID.test(boot) ? boot : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** When a Linux process started, in clock ticks since boot; undefined if unknown. */
+function startTicks(pid: number | 'self'): number | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'latin1');
+    // After the command name, which may hold spaces or ')': field 22.
+    const ticks = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] ?? '';
+    return /^\d+$/.test(ticks) ? Number(ticks) : undefined;
+  } catch {
+    return undefined;
   }
 }
 
