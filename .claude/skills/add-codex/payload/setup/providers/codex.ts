@@ -220,8 +220,8 @@ export async function runCodexLoginAuth(
   // Session-isolation invariant: the login runs under a
   // throwaway CODEX_HOME so the vaulted session is dedicated to the gateway
   // and never shared with the user's personal ~/.codex.
-  const loginHome = makeLoginHome(root);
   const loginId = randomBytes(8).toString('hex');
+  const loginHome = makeLoginHome(root, loginId);
   // Holds a live credential after login, so it goes on every exit path:
   // `finally` for returns and throws, the exit hook for process.exit (which
   // skips finally), and the signal hook for Ctrl-C, SIGTERM and a hangup.
@@ -244,15 +244,15 @@ export async function runCodexLoginAuth(
     if (cleaned) return;
     cleaned = true;
     if (!tree || !owned || ended) return removeLoginHome();
-    // Part of the login may still run and write to the home: it stays, and
-    // the next sign-in removes it once it's an hour old.
+    // Part of the login may still run and write to the home: it stays until a
+    // later sign-in sees nothing carry its id (see makeLoginHome).
     const failure = tree.failure ?? tree.blind;
     const why = failure
       ? `setup couldn't list its processes (${failure})`
       : 'part of it was still running after it was killed';
     p.log.warn(
       brandBody(
-        `Couldn't confirm that the Codex sign-in stopped: ${why}. Close any Codex sign-in still running. Its sign-in folder stays at ${path.relative(root, loginHome)}; the next Codex sign-in removes it once it's an hour old.`,
+        `Couldn't confirm that the Codex sign-in stopped: ${why}. Close any Codex sign-in still running. Its sign-in folder stays at ${path.relative(root, loginHome)}; a Codex sign-in an hour or more from now removes it if no Codex process still uses it.`,
       ),
     );
   };
@@ -465,26 +465,31 @@ class LoginTree {
     return this.empty < 2;
   }
 
-  // A whole word: not OLD_NANOCLAW_CODEX_LOGIN=, nor an id that starts the same.
   private marks(proc: Proc): boolean {
-    let { text } = proc;
-    let sep = ' ';
-    if (process.platform === 'linux') {
-      // The whole environment, from /proc: procps cuts it off at 128 KiB, and
-      // pnpm's shell shim may put the login id after a long one.
-      try {
-        text = fs.readFileSync(`/proc/${proc.pid}/environ`, 'latin1');
-        sep = '\0';
-      } catch {
-        return false;
-      }
-    }
-    for (let at = text.indexOf(this.marker); at >= 0; at = text.indexOf(this.marker, at + 1)) {
-      const end = at + this.marker.length;
-      if ((at === 0 || text[at - 1] === sep) && (end === text.length || text[end] === sep)) return true;
-    }
-    return false;
+    const env = environment(proc);
+    return env !== undefined && carries(env, this.marker);
   }
+}
+
+/** A process's environment, with the separator between its variables; undefined if unreadable. */
+function environment(proc: Proc): [text: string, sep: string] | undefined {
+  if (process.platform !== 'linux') return [proc.text, ' '];
+  // The whole environment, from /proc: procps cuts it off at 128 KiB, and
+  // pnpm's shell shim may put the login id after a long one.
+  try {
+    return [fs.readFileSync(`/proc/${proc.pid}/environ`, 'latin1'), '\0'];
+  } catch {
+    return undefined;
+  }
+}
+
+// A whole word: not OLD_NANOCLAW_CODEX_LOGIN=, nor an id that starts the same.
+function carries([text, sep]: [string, string], marker: string): boolean {
+  for (let at = text.indexOf(marker); at >= 0; at = text.indexOf(marker, at + 1)) {
+    const end = at + marker.length;
+    if ((at === 0 || text[at - 1] === sep) && (end === text.length || text[end] === sep)) return true;
+  }
+  return false;
 }
 
 // Each row with its state (Z for a zombie) and command line; on macOS, its
@@ -585,27 +590,46 @@ const LOGIN_ID_VAR = 'NANOCLAW_CODEX_LOGIN';
 const STOP_GRACE_MS = 3000;
 const PS_TIMEOUT_MS = 2000;
 const STALE_LOGIN_MS = 60 * 60 * 1000;
+const LOGIN_HOME = /^login-[0-9a-f]{16}$/;
 
 /**
  * A private throwaway CODEX_HOME under the install's git-ignored data/, not the
  * system temp dir: Codex won't set up its helper binaries there and warns on
- * every sign-in (#4449). A sign-in killed outright can't clean up and may leave
- * a token behind, so leftovers over an hour old go first.
+ * every sign-in (#4449). Named for the login id its processes carry. A sign-in
+ * killed outright, or one whose stop couldn't be confirmed, leaves its home,
+ * maybe with a token: one over an hour old goes once a listing shows no
+ * process carrying its id. Age alone doesn't say the login has ended.
  */
-function makeLoginHome(root: string): string {
+function makeLoginHome(root: string, id: string): string {
   const base = path.join(root, 'data', 'codex-login');
   fs.mkdirSync(path.join(root, 'data'), { recursive: true });
   fs.mkdirSync(base, { recursive: true, mode: 0o700 });
   fs.chmodSync(base, 0o700);
-  for (const name of fs.readdirSync(base)) {
-    const dir = path.join(base, name);
+  const old = fs.readdirSync(base).filter((name) => {
     try {
-      if (Date.now() - fs.statSync(dir).mtimeMs > STALE_LOGIN_MS) fs.rmSync(dir, { recursive: true, force: true });
+      return LOGIN_HOME.test(name) && Date.now() - fs.statSync(path.join(base, name)).mtimeMs > STALE_LOGIN_MS;
     } catch {
-      // Gone already, or not ours to remove; the new home doesn't depend on it.
+      return false;
+    }
+  });
+  const listing = old.length > 0 ? listProcsSync(PS_TIMEOUT_MS) : [];
+  // Without a listing, none can be shown unused: they wait for a later sign-in.
+  if (typeof listing !== 'string') {
+    // Once per process: on Linux each is a read from /proc.
+    const envs = listing.filter((proc) => !proc.zombie).map(environment);
+    for (const name of old) {
+      const marker = `${LOGIN_ID_VAR}=${name.slice('login-'.length)}`;
+      if (envs.some((env) => env && carries(env, marker))) continue;
+      try {
+        fs.rmSync(path.join(base, name), { recursive: true, force: true });
+      } catch {
+        // Gone already, or not ours to remove; the new home doesn't depend on it.
+      }
     }
   }
-  return fs.mkdtempSync(path.join(base, 'login-'));
+  const home = path.join(base, `login-${id}`);
+  fs.mkdirSync(home, { mode: 0o700 });
+  return home;
 }
 
 async function signIn(

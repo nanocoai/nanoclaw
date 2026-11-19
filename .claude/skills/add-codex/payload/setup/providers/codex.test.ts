@@ -379,6 +379,8 @@ describe('runCodexLoginAuth', () => {
     expect(codexHome).not.toBe(path.join(os.homedir(), '.codex'));
     // Its processes carry an id of the sign-in's own, for stopping them.
     expect(login.env()?.NANOCLAW_CODEX_LOGIN).toMatch(/^[0-9a-f]{16}$/);
+    // Its home is named for that id, so a later sign-in can tell whether it's in use.
+    expect(path.basename(codexHome!)).toBe(`login-${login.env()?.NANOCLAW_CODEX_LOGIN}`);
 
     // The vault snapshot was read from the isolated dir, not ~/.codex.
     expect(save).toHaveBeenCalledWith('codex', { kind: 'oauth', file: path.join(codexHome!, 'auth.json') });
@@ -409,19 +411,69 @@ describe('runCodexLoginAuth', () => {
     expect(fs.readdirSync(base)).toEqual([]);
   });
 
-  it('removes a home that a killed sign-in left over an hour ago, and keeps a newer one', async () => {
-    const base = path.join(root, 'data', 'codex-login');
-    const stale = path.join(base, 'login-stale');
-    fs.mkdirSync(stale, { recursive: true });
-    fs.writeFileSync(path.join(stale, 'auth.json'), '{}');
-    fs.mkdirSync(path.join(base, 'login-recent'));
+  /** A home a sign-in left behind; `old` puts it two hours back. */
+  function leftHome(name: string, old: boolean): string {
+    const dir = path.join(root, 'data', 'codex-login', name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'auth.json'), '{}');
     const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    fs.utimesSync(stale, twoHoursAgo, twoHoursAgo);
+    if (old) fs.utimesSync(dir, twoHoursAgo, twoHoursAgo);
+    return dir;
+  }
+
+  it('removes a home that a killed sign-in left over an hour ago, and keeps a newer one', async () => {
+    const stale = `login-${'a'.repeat(16)}`;
+    const recent = `login-${'b'.repeat(16)}`;
+    leftHome(stale, true);
+    leftHome(recent, false);
+    // Not named for a login id: not setup's to remove.
+    leftHome('notes', true);
     playLogin();
 
     await runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
 
-    expect(fs.readdirSync(base)).toEqual(['login-recent']);
+    expect(fs.readdirSync(path.join(root, 'data', 'codex-login')).sort()).toEqual([recent, 'notes']);
+  });
+
+  // An old home may be one whose stop couldn't be confirmed, or whose setup was
+  // killed outright while Codex ran on: its age doesn't say the login ended.
+  it('keeps an old home while a process carries its login id, and removes it once that ends', async () => {
+    const [liveId, otherId] = ['c'.repeat(16), 'd'.repeat(16)];
+    const live = leftHome(`login-${liveId}`, true);
+    const other = leftHome(`login-${otherId}`, true);
+    const holder = (env: NodeJS.ProcessEnv) =>
+      realSpawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], {
+        stdio: 'ignore',
+        env: { ...process.env, ...env },
+      });
+    // The login's Codex, and a look-alike that carries neither id.
+    const owner = holder({ NANOCLAW_CODEX_LOGIN: liveId });
+    const lookalike = holder({ OLD_NANOCLAW_CODEX_LOGIN: otherId, NANOCLAW_CODEX_LOGIN: `${otherId}0` });
+    try {
+      await until(() => isRunning(owner.pid!) && isRunning(lookalike.pid!));
+      playLogin();
+      await runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
+      expect(fs.existsSync(path.join(live, 'auth.json'))).toBe(true);
+      expect(fs.existsSync(other)).toBe(false);
+
+      owner.kill('SIGKILL');
+      await until(() => !isRunning(owner.pid!));
+      await runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
+      expect(fs.existsSync(live)).toBe(false);
+    } finally {
+      owner.kill('SIGKILL');
+      lookalike.kill('SIGKILL');
+    }
+  });
+
+  it("keeps an old home when ps can't list processes", async () => {
+    const old = leftHome(`login-${'e'.repeat(16)}`, true);
+    mockPs.sync = (_file, args, opts) => realSpawnSync('ps-missing-4455', args as string[], opts as object);
+    playLogin();
+
+    await runCodexLoginAuth('device', { has: async () => false, save: vi.fn() }, root);
+
+    expect(fs.existsSync(path.join(old, 'auth.json'))).toBe(true);
   });
 
   const listeners = () => LOGIN_EVENTS.map((event) => process.listeners(event as NodeJS.Signals));
