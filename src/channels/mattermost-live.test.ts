@@ -651,8 +651,7 @@ describe.skipIf(!HAS_LAB)('mattermost live round trip', () => {
     expect(received.message.id).toBe(sent.id);
     const content = received.message.content as Record<string, unknown>;
     const attachments = content.attachments as
-      | { data?: string; mimeType?: string; name?: string; size?: number; type?: string }[]
-      | undefined;
+      { data?: string; mimeType?: string; name?: string; size?: number; type?: string }[] | undefined;
     expect(attachments).toHaveLength(1);
     const attachment = attachments![0];
     expect(attachment.name).toBe(`inbound-${stamp}.txt`);

@@ -46,8 +46,7 @@ export interface CreateLocalWebAgentRequest {
 }
 
 export type ParseCreateLocalWebAgentRequestResult =
-  | { ok: true; value: CreateLocalWebAgentRequest }
-  | { ok: false; message: string };
+  { ok: true; value: CreateLocalWebAgentRequest } | { ok: false; message: string };
 
 type CreateStage = 'agent group' | 'runtime configuration' | 'web conversation' | 'web wiring';
 
