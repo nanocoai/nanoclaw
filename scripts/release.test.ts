@@ -662,6 +662,82 @@ describe('release workflow target check', () => {
   });
 });
 
+describe('release workflow main protection check', () => {
+  type Step = { name?: string; if?: string; run?: string };
+  const verify = parseYaml(releaseWorkflow).jobs.verify as { steps: Step[] };
+  const names = verify.steps.map((s) => s.name);
+  const step = verify.steps.find((s) => s.name === 'Verify main protects the release workflow')!;
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const teamRule = (patterns: string[], minimumApprovals = 1, type = 'Team') => ({
+    type: 'pull_request',
+    ruleset_id: 1,
+    parameters: {
+      required_approving_review_count: 1,
+      required_reviewers: [{ file_patterns: patterns, minimum_approvals: minimumApprovals, reviewer: { id: 7, type } }],
+    },
+  });
+
+  /** Runs the step's script with `gh` stubbed to print main's active rules, one per line, as `--jq '.[]'` does. */
+  function run(rules: unknown[], apiFails = false) {
+    const root = mkdtempSync(path.join(tmpdir(), 'release-main-rules-'));
+    dirs.push(root);
+    mkdirSync(path.join(root, 'bin'));
+    writeFileSync(path.join(root, 'rules.jsonl'), rules.map((rule) => JSON.stringify(rule)).join('\n'));
+    writeFileSync(
+      path.join(root, 'bin/gh'),
+      [
+        '#!/bin/sh',
+        `[ "$*" = "api --paginate repos/nanocoai/nanoclaw/rules/branches/main?per_page=100 --jq .[]" ] || exit 2`,
+        apiFails ? 'exit 1' : `cat '${path.join(root, 'rules.jsonl')}'`,
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    return spawnSync('bash', ['-c', step.run!], {
+      cwd: root,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${path.join(root, 'bin')}:${process.env.PATH}`,
+        GITHUB_REPOSITORY: 'nanocoai/nanoclaw',
+        RUNNER_TEMP: root,
+      },
+    });
+  }
+
+  it('runs for stable versions, after the environment check and before any target code', () => {
+    expect(step.if).toBe("${{ !contains(inputs.version, '-') }}");
+    expect(names.indexOf('Verify main protects the release workflow')).toBe(
+      names.indexOf('Verify protected release environment') + 1,
+    );
+  });
+
+  it('passes when a team must approve every change under .github/', { timeout: 30_000 }, () => {
+    expect(run([{ type: 'deletion' }, teamRule(['.github/**'])]).status).toBe(0);
+    // Another active ruleset may hold the rule.
+    expect(run([teamRule(['src/**']), teamRule(['.github/**', 'container/**'], 2)]).status).toBe(0);
+  });
+
+  it('fails closed without that rule or a readable rule list', { timeout: 30_000 }, () => {
+    for (const rules of [
+      [],
+      [{ type: 'pull_request', parameters: { required_approving_review_count: 1, required_reviewers: [] } }],
+      [{ type: 'pull_request', parameters: { required_approving_review_count: 1 } }],
+      [teamRule(['.github/**'], 0)],
+      [teamRule(['.github/workflows/**'])],
+      [teamRule(['.github/**', '!.github/workflows/release.yml'])],
+      [teamRule(['.github/**'], 1, 'User')],
+    ]) {
+      expect(run(rules).status).not.toBe(0);
+    }
+    expect(run([teamRule(['.github/**'])], true).status).not.toBe(0);
+    expect(run([]).stdout).toContain("::error::main must require a team's approval (at least 1) for .github/**");
+  });
+});
+
 describe('release workflow stable publish approval', () => {
   type Step = { name?: string; if?: string; env?: Record<string, string>; run?: string };
   const publish = parseYaml(releaseWorkflow).jobs.publish as { permissions: unknown; steps: Step[] };

@@ -56,6 +56,7 @@ what you keep under `## [Unreleased]`. The tool prints to stdout and never write
 Before any release run, a repository administrator must configure and re-check its external safety controls:
 
 - Create a `release` environment with `amit-shafnir`, `gavrielc`, `glifocat`, `omri-maya` and `zvi-fried` as its only required reviewers, allow self-review, prevent administrator bypass, and add a deployment branch policy that permits only `main`. The publish job, not the environment, refuses stable self-approvals by anyone not on its allowlist (see below). Create a `prerelease` environment the same way, but with `glifocat` as its only required reviewer (see [Pre-releases](#pre-releases)). Merely naming a missing environment in a workflow is not protection: GitHub creates it without protection rules on first use.
+- In a branch ruleset that targets `main`, add a required-reviewers rule: a team must approve (at least 1) every pull request that changes `.github/**`, with no negated patterns. The stable self-approval allowlist lives in `release.yml`, so stable `verify` fails without this rule.
 - Enable immutable releases under **Settings → General → Releases**. This locks the tag and assets after publication and applies only to releases published after the setting is enabled.
 
 Also create an active tag ruleset for `refs/tags/v*` that restricts updates and deletions, with no bypass. It closes the gap between the workflow pushing a tag and publishing the immutable release while still allowing a new tag to be created.

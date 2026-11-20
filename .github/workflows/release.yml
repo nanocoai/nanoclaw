@@ -141,6 +141,27 @@ jobs:
             exit 1
           fi
 
+      - name: Verify main protects the release workflow
+        if: ${{ !contains(inputs.version, '-') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The stable self-approval allowlist lives in this file, so a change under .github/ must
+          # need a team's approval on main: a ruleset "required reviewers" rule, nothing negated.
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100" --jq '.[]' \
+            | jq -s '.' > "$RUNNER_TEMP/main-rules.json"
+          if ! jq -e '
+            any(.[] | select(.type == "pull_request") | .parameters.required_reviewers[]?;
+              .reviewer.type == "Team" and .minimum_approvals >= 1
+              and any(.file_patterns[]; . == ".github/**")
+              and all(.file_patterns[]; startswith("!") | not))
+          ' "$RUNNER_TEMP/main-rules.json" >/dev/null; then
+            echo "::error::main must require a team's approval (at least 1) for .github/** through a ruleset's required-reviewers rule with no negated patterns. Stable self-approval is safe only under that rule."
+            exit 1
+          fi
+          echo "::notice::main requires a team's approval for .github/**."
+
       - name: Verify release metadata and target
         env:
           GH_TOKEN: ${{ github.token }}
