@@ -166,6 +166,11 @@ write_abort_entry() {
   echo "## ${ts} · aborted at ${step} (${error})" >> "$PROGRESS_LOG"
 }
 
+# An answer the setup path depends on, as its own entry (setup/logs.ts userInput).
+write_user_input() {
+  printf '=== [%s] user-input → %s ===\n  value: %s\n\n' "$(ts_utc)" "$1" "$2" >> "$PROGRESS_LOG"
+}
+
 # ─── bash-side "clack-alike" status line ────────────────────────────────
 
 use_ansi() { [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }
@@ -369,8 +374,10 @@ fi
 # The Node installer calls sudo behind the bootstrap spinner, where its
 # password prompt can't be seen. Ask here instead; setup:auto asks for Docker
 # before its own step. Root, passwordless sudo and non-terminal runs skip it.
+# A never-synced Arch is asked first whether jq may cost a full system upgrade.
 # shellcheck source=setup/lib/sudo-preflight.sh
 source "$PROJECT_ROOT/setup/lib/sudo-preflight.sh"
+pacman_upgrade_preflight
 if ! sudo_preflight; then
   ph_event setup_sudo_aborted
   write_abort_entry sudo-preflight sudo-refused
@@ -416,9 +423,9 @@ BOOTSTRAP_DUR=$(( $(date +%s) - BOOTSTRAP_START ))
 if [ "$BOOTSTRAP_RC" -eq 0 ]; then
   spinner_success "Basics ready" "$BOOTSTRAP_DUR"
   write_bootstrap_entry success "$BOOTSTRAP_DUR" "$BOOTSTRAP_RAW"
-  # Only channel skills need jq, so setup carries on; say it now, not at the first one.
+  # Only skills need jq, so setup carries on; say it now, not at the first one.
   if [ "$(grep_field JQ_OK "$BOOTSTRAP_RAW")" = "false" ]; then
-    printf '  %s\n' "$(dim "Couldn't install jq. Adding Slack, Discord, Telegram, Teams or Dial needs it, so install jq first.")"
+    printf '  %s\n' "$(dim "Couldn't install jq. Many skills need it, including Slack, Discord, Telegram, Teams and Dial, so install jq first.")"
   fi
 else
   spinner_failure "Couldn't install the basics" "$BOOTSTRAP_DUR"

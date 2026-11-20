@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 
 import type { GatewayCatalogEntry } from '../../setup/gateways/catalog.js';
 import { getInstallSlug } from '../../src/install-slug.js';
+import { pinnedBunVersion } from '../provider-contract-verifier.js';
 import { refreshInstalledSkills, type SkillsRefreshReport } from '../update-skills.js';
 import { stampChannel, type UpdateChannel } from './channel.js';
 import { assertLockfilesUnmarked, lockfileNote, resolveLockfileConflicts } from './lockfiles.js';
@@ -448,6 +449,29 @@ function skillRefreshFailure(report: SkillsRefreshReport, heading = 'Installed s
   return [heading, ...lines].join('\n');
 }
 
+// Bounds only the Bun fetch, so a stalled registry skips the check instead of hanging validate.
+const BUN_FETCH_TIMEOUT_MS = 5 * 60 * 1000;
+
+type AgentRunnerBun = { command: string; prefix: string[]; label: string } | { skipped: string };
+
+// Host Bun first, else the Bun the image pins, through pnpm. Nothing else
+// typechecks agent-runner source (the image build only installs its deps), so
+// when neither runs the check line must say the source went unchecked.
+function agentRunnerBun(runner: CommandRunner, root: string): AgentRunnerBun {
+  if (runner.tryRun('bun', ['--version'], root).ok) return { command: 'bun', prefix: [], label: 'host Bun' };
+  let version: string;
+  try {
+    version = pinnedBunVersion(root);
+  } catch (err) {
+    return { skipped: `no Bun on the host, and ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const prefix = [`--package=bun@${version}`, 'dlx', 'bun'];
+  const probe = runner.tryRun('pnpm', [...prefix, '--version'], root, { timeoutMs: BUN_FETCH_TIMEOUT_MS });
+  if (probe.ok) return { command: 'pnpm', prefix, label: `bun@${version} via pnpm` };
+  const reason = excerpt(probe.stdout.replace(/\s*\n\s*/g, ' ') || 'no output');
+  return { skipped: `no Bun on the host, and pnpm could not run bun@${version}: ${reason}` };
+}
+
 export async function validateUpdate(
   projectRoot: string,
   id: string,
@@ -517,10 +541,16 @@ export async function validateUpdate(
     checks.push('host tests');
 
     if (hasChanged(state, 'container/agent-runner')) {
-      if (runtime.runner.tryRun('bun', ['--version'], state.stageRoot).ok) {
+      const bun = agentRunnerBun(runtime.runner, state.stageRoot);
+      if ('skipped' in bun) {
+        checks.push(
+          `agent-runner source NOT typechecked (${bun.skipped}). ` +
+            'Agents run it with Bun, which skips type checks, so nothing else will catch a type error there.',
+        );
+      } else {
         runtime.runner.run(
-          'bun',
-          ['install', '--frozen-lockfile'],
+          bun.command,
+          [...bun.prefix, 'install', '--frozen-lockfile'],
           path.join(state.stageRoot, 'container/agent-runner'),
         );
         runtime.runner.run(
@@ -528,9 +558,7 @@ export async function validateUpdate(
           ['exec', 'tsc', '-p', 'container/agent-runner/tsconfig.json', '--noEmit'],
           state.stageRoot,
         );
-        checks.push('container dependencies and typecheck');
-      } else {
-        checks.push('container typecheck deferred to image build (Bun unavailable on host)');
+        checks.push(`container dependencies and typecheck (${bun.label})`);
       }
     }
 

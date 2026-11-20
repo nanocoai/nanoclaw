@@ -70,7 +70,8 @@ export async function verifyProviderContracts(
 
     await run('host dependencies', 'pnpm install --frozen-lockfile');
     await run('runtime dependencies', `${bun} install --frozen-lockfile`, runnerRoot);
-    await run('host build', 'pnpm run build');
+    // A type error must not leave new JS in dist/ for the service's next restart.
+    await run('host build', 'pnpm run build --noEmitOnError');
     const optionalHostTests = [
       'src/opencode-cli-tools.test.ts',
       ...(fs.existsSync(path.join(root, 'scripts'))

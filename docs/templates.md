@@ -160,8 +160,9 @@ Notes:
   empty). Without one, the stamped agent uses NanoClaw's default project doc.
   Keep `instructions.md` focused
   (under ~200 lines): it's always in the agent's prompt, and some providers
-  cap that doc (Codex ~32 KB), so an over-long persona gets truncated. Put
-  bulk material in `skills/` or extra context files instead.
+  cap that doc (Codex 64 KiB), so an over-long persona first crowds out
+  NanoClaw's own instruction sections, then gets cut itself. Put bulk
+  material in `skills/` or extra context files instead.
 - Skills are copied into the agent's own skills overlay, keyed to that group,
   never shared across groups.
 

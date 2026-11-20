@@ -53,52 +53,49 @@ detect_platform() {
 
 # --- Why a tool failed ---
 
-# first_error_line TEXT: sets ERROR_LINE to the first line of a tool's output
-# that names an error, else to its first line with anything on it. One line
-# fits the screen; callers put the whole output in the log. No subshell and no
-# here-string (bash 3.2 needs a temp file for one), so it cannot fail under
-# `set -e`.
-first_error_line() {
-  local rest="$1" line nl=$'\n'
+# Tools write straight to the log, and the one line for the screen is read
+# back from it.
+
+# log_end_line: a tool may end without a newline; what the log gets next
+# must start on a line of its own.
+log_end_line() {
+  [ -z "$(tail -c 1 "$LOG_FILE" 2>/dev/null)" ] || echo >> "$LOG_FILE"
+}
+
+# log_mark: LOG_MARK is how many lines the log holds now. It is left empty
+# when they cannot be counted, and log_error_line then gives nothing: better
+# no line than one from an earlier step.
+log_mark() {
+  log_end_line
+  if [ -e "$LOG_FILE" ]; then
+    LOG_MARK=$(wc -l 2>/dev/null < "$LOG_FILE") || LOG_MARK=""
+  else
+    LOG_MARK=0
+  fi
+  # BSD wc pads the count with spaces.
+  LOG_MARK="${LOG_MARK//[[:space:]]/}"
+  case "$LOG_MARK" in
+    *[!0-9]*) LOG_MARK="" ;;
+  esac
+}
+
+# log_error_line: sets ERROR_LINE to the first line the log gained since
+# log_mark that names an error, else to the first with anything on it.
+log_error_line() {
+  local line n=0
   ERROR_LINE=""
-  while [ -n "$rest" ]; do
-    line=${rest%%"$nl"*}
-    case "$rest" in
-      *"$nl"*) rest=${rest#*"$nl"} ;;
-      *) rest="" ;;
-    esac
+  [ -n "${LOG_MARK:-}" ] || return 0
+  [ -r "$LOG_FILE" ] || return 0
+  log_end_line
+  while IFS= read -r line; do
+    n=$((n + 1))
+    [ "$n" -gt "$LOG_MARK" ] || continue
     [ -n "$ERROR_LINE" ] || ERROR_LINE="$line"
     case "$line" in
       *[Ee]rror* | *ERR!*) ERROR_LINE="$line"; return 0 ;;
     esac
-  done
-}
-
-# folder_error DIR SAID: why mkdir could not make DIR, for the screen. mkdir's
-# own words differ by system and may name no path, so when a file or a link
-# that cannot be followed sits where DIR or one of its parents has to be,
-# ERROR_LINE names it. Otherwise it is mkdir's own error line from SAID.
-# ERROR_TODO says what to do.
-folder_error() {
-  local at="$1" said="$2"
-  first_error_line "$said"
-  ERROR_TODO="Fix that, then re-run setup."
-  # Up to the nearest part of the path that exists; -L also sees a link that
-  # -e cannot follow.
-  while [ ! -e "$at" ] && [ ! -L "$at" ]; do
-    case "$at" in
-      */*) at="${at%/*}" ;;
-      *) return 0 ;;
-    esac
-  done
-  if [ ! -e "$at" ]; then
-    # Its target is gone, or is somewhere this user may not look.
-    ERROR_LINE="$at is a link that cannot be followed"
-    ERROR_TODO="Fix or remove that link, then re-run setup."
-  elif [ ! -d "$at" ]; then
-    ERROR_LINE="$at is a file, not a folder"
-    ERROR_TODO="Move or rename that file, then re-run setup."
-  fi
+  done < "$LOG_FILE"
+  return 0
 }
 
 # --- Node.js check ---
@@ -113,20 +110,21 @@ check_node() {
     NODE_PATH_FOUND=$(command -v node)
     # Guarded: under `set -e` a Node that cannot start (built for another
     # libc, a broken download) would end the bootstrap here with nothing said.
-    if NODE_VERSION=$(node --version 2>/dev/null); then
+    # Run once: what it prints on stderr goes to the log.
+    log_mark
+    if NODE_VERSION=$(node --version 2>>"$LOG_FILE"); then
       NODE_VERSION="${NODE_VERSION#v}"
       if node_meets_minimum "$NODE_VERSION"; then
         NODE_OK="true"
       fi
       log "Node $NODE_VERSION at $NODE_PATH_FOUND (ok=$NODE_OK)"
     else
-      local said
+      # Its stdout may hold the error too.
+      [ -z "$NODE_VERSION" ] || printf '\n%s\n' "$NODE_VERSION" >> "$LOG_FILE"
       NODE_VERSION="cannot_start"
-      said=$(node --version 2>&1) || true
-      first_error_line "$said"
+      log_error_line
       NODE_START_ERROR="$ERROR_LINE"
       log "Node at $NODE_PATH_FOUND cannot start: ${NODE_START_ERROR:-it printed nothing}"
-      printf '%s\n' "$said" >> "$LOG_FILE"
     fi
   else
     log "Node not found"
@@ -178,7 +176,7 @@ install_deps() {
   NATIVE_OK="false"
   # Set where a try that needs no root fails: why pnpm is missing, the tool's
   # own error line and what to do. The message at the end prints the last one.
-  local said="" pnpm_why="" pnpm_error="" pnpm_todo=""
+  local pnpm_why="" pnpm_error="" pnpm_todo=""
 
   if [ "$NODE_OK" = "false" ]; then
     log "Skipping pnpm install — Node not available"
@@ -214,15 +212,14 @@ install_deps() {
     if ! command -v pnpm >/dev/null 2>&1; then
       local user_bin="$HOME/.local/bin"
       log "pnpm not on PATH after corepack enable — retrying into $user_bin"
-      if ! said=$(mkdir -p "$user_bin" 2>&1); then
-        printf '%s\n' "$said" >> "$LOG_FILE"
+      log_mark
+      if ! mkdir -p "$user_bin" >> "$LOG_FILE" 2>&1; then
         pnpm_why="$user_bin cannot be created"
-        folder_error "$user_bin" "$said"
+        log_error_line
         pnpm_error="$ERROR_LINE"
-        pnpm_todo="$ERROR_TODO"
+        pnpm_todo="Fix that, then re-run setup. mkdir's full output is in $LOG_FILE"
         log "Could not create $user_bin: $pnpm_error"
-      # tee: the log gets corepack's output as it comes, not when corepack ends.
-      elif said=$(corepack enable --install-directory "$user_bin" pnpm 2>&1 | tee -a "$LOG_FILE") \
+      elif corepack enable --install-directory "$user_bin" pnpm >> "$LOG_FILE" 2>&1 \
           && [ -x "$user_bin/pnpm" ]; then
         export PATH="$PATH:$user_bin"
         hash -r 2>/dev/null || true
@@ -230,7 +227,7 @@ install_deps() {
       else
         # This try needs no root, so what corepack said is why pnpm is missing.
         pnpm_why="corepack could not put pnpm into $user_bin"
-        first_error_line "$said"
+        log_error_line
         pnpm_error="$ERROR_LINE"
         pnpm_todo="Fix that, then re-run setup. corepack's full output is in $LOG_FILE"
         log "corepack enable into $user_bin failed"
@@ -270,20 +267,19 @@ install_deps() {
       # and the service unit already have on PATH.
       log "npm install -g failed — retrying with a user-owned prefix"
       NPM_LOCAL_PREFIX="$HOME/.local"
-      if ! said=$(mkdir -p "$NPM_LOCAL_PREFIX" 2>&1); then
-        printf '%s\n' "$said" >> "$LOG_FILE"
+      log_mark
+      if ! mkdir -p "$NPM_LOCAL_PREFIX" >> "$LOG_FILE" 2>&1; then
         pnpm_why="$NPM_LOCAL_PREFIX cannot be created"
-        folder_error "$NPM_LOCAL_PREFIX" "$said"
+        log_error_line
         pnpm_error="$ERROR_LINE"
-        pnpm_todo="$ERROR_TODO"
+        pnpm_todo="Fix that, then re-run setup. mkdir's full output is in $LOG_FILE"
         log "Could not create $NPM_LOCAL_PREFIX: $pnpm_error"
-      # tee: the log gets npm's output as it comes, not when npm ends.
-      elif said=$(npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" 2>&1 | tee -a "$LOG_FILE"); then
+      elif npm install -g "pnpm@${pinned}" --prefix "$NPM_LOCAL_PREFIX" >> "$LOG_FILE" 2>&1; then
         export PATH="$PATH:$NPM_LOCAL_PREFIX/bin"
         log "Installed pnpm@${pinned} to user-owned prefix: $NPM_LOCAL_PREFIX"
       else
         # This try needs no root, so what npm said is why pnpm is missing.
-        first_error_line "$said"
+        log_error_line
         pnpm_error="$ERROR_LINE"
         if npm --version >/dev/null 2>&1; then
           pnpm_why="npm failed, also when installing into ~/.local"

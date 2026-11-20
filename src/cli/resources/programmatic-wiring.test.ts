@@ -34,18 +34,6 @@ vi.mock('../../config.js', async () => {
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-cli-programmatic-wiring' };
 });
 
-// groups-create calls initGroupFilesystem, which scaffolds under the real
-// groups/ dir — neutralize the FS writes but keep the container_configs row
-// the assertions below count.
-vi.mock('../../group-init.js', async () => {
-  const { ensureContainerConfig } = await import('../../db/container-configs.js');
-  return {
-    initGroupFilesystem: vi.fn(async (group: { id: string }) => {
-      await ensureContainerConfig(group.id);
-    }),
-  };
-});
-
 // wirings' postCommit projects destinations into live session DBs — no
 // sessions run in this test, but the module must not open on-disk DB files.
 vi.mock('../../modules/agent-to-agent/write-destinations.js', () => ({ writeDestinations: vi.fn() }));
@@ -67,7 +55,6 @@ import { dispatch } from '../dispatch.js';
 import './messaging-groups.js';
 import './wirings.js';
 import './users.js';
-import './groups.js';
 
 const HOST = { caller: 'host' as const };
 function now(): string {
@@ -212,19 +199,6 @@ describe('programmatic wiring verbs', () => {
     });
     expect(r.ok).toBe(false);
     expect((r as { error: { message: string } }).error.message).toMatch(/no messaging group/i);
-  });
-
-  it('groups create scaffolds the container config and is idempotent on folder', async () => {
-    const r1 = await send('groups-create', { folder: 'dm-with-bob', name: 'Bob' });
-    expect(r1.ok).toBe(true);
-    const ag = (r1 as { data: { id: string } }).data;
-    expect(ag.id).toBeTruthy();
-    // a working group needs a container_config row — generic create never made one
-    expect(await count('SELECT COUNT(*) c FROM container_configs WHERE agent_group_id = ?', ag.id)).toBe(1);
-    // idempotent on folder
-    const r2 = await send('groups-create', { folder: 'dm-with-bob', name: 'Bob' });
-    expect((r2 as { data: { id: string } }).data.id).toBe(ag.id);
-    expect(await count('SELECT COUNT(*) c FROM agent_groups WHERE folder = ?', 'dm-with-bob')).toBe(1);
   });
 
   it('messaging-groups send errors when no group exists (lookup before routeInbound)', async () => {

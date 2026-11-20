@@ -32,7 +32,35 @@ jq_install_command() {
 jq_needs_sudo() {
   [ "$(uname -s 2>/dev/null)" = "Linux" ] || return 1
   [ "$(id -u 2>/dev/null)" != "0" ] || return 1
-  [ -n "$(jq_install_command)" ]
+  [ -n "$(jq_install_command)" ] && ! jq_waits_on_upgrade
+}
+
+# True when pacman can install jq only after a full system upgrade (-Syu).
+jq_needs_pacman_upgrade() {
+  case "$(jq_install_command)" in
+    pacman*) pacman_never_synced ;;
+    *) return 1 ;;
+  esac
+}
+
+# nanoclaw.sh asks before that upgrade and exports NANOCLAW_PACMAN_UPGRADE=1
+# on a yes. Without one, setup installs nothing and goes on without jq.
+jq_waits_on_upgrade() {
+  jq_needs_pacman_upgrade && [ "${NANOCLAW_PACMAN_UPGRADE:-}" != 1 ]
+}
+
+# True when pacman has never synced its package lists (container and cloud images).
+# False when pacman-conf can't say where they live, or this user can't list them,
+# so an odd host is never upgraded.
+pacman_never_synced() {
+  local db dir
+  dir=$(pacman-conf DBPath 2>/dev/null) && [ -n "$dir" ] || return 1
+  dir="${dir%/}/sync"
+  [ -r "$dir" ] && [ -x "$dir" ] || return 1
+  for db in "$dir"/*.db; do
+    [ -e "$db" ] && return 1
+  done
+  return 0
 }
 
 # Installs jq when missing; returns 1 when it is still missing. Never prompts:
@@ -43,6 +71,7 @@ ensure_jq() {
   jq_present && return 0
   cmd=$(jq_install_command)
   [ -n "$cmd" ] || return 1
+  jq_waits_on_upgrade && return 1
   if jq_needs_sudo; then
     command -v sudo >/dev/null 2>&1 || return 1
     sudo="sudo -n"
@@ -52,6 +81,12 @@ ensure_jq() {
     # A fresh distro can have empty package lists: refresh once and retry.
     case "$cmd" in
       apt-get*) $sudo apt-get update -qq && $sudo env DEBIAN_FRONTEND=noninteractive $cmd || return 1 ;;
+      # pacman -Sy alone is a partial upgrade, which Arch doesn't support: sync with a full -Syu,
+      # only after the user said yes, and only on a host that never synced. The yes is checked
+      # here too, since the lists can change after jq_waits_on_upgrade looked.
+      pacman*)
+        [ "${NANOCLAW_PACMAN_UPGRADE:-}" = 1 ] && pacman_never_synced &&
+          $sudo pacman -Syu --noconfirm --needed jq || return 1 ;;
       *) return 1 ;;
     esac
   fi

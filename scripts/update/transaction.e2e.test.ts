@@ -92,6 +92,7 @@ function writeOnecliSkill(root: string, payload: string): void {
 
 function createForkFixture(
   options: {
+    agentRunner?: boolean | 'type-error';
     breaking?: boolean;
     gatewayExtraction?: boolean;
     gatewayPayloadOnly?: boolean | 'other';
@@ -112,6 +113,14 @@ function createForkFixture(
   write(seed, 'versions.json', '{"agent-image":"example@sha256:old"}\n');
   write(seed, 'CHANGELOG.md', '# Changelog\n');
   write(seed, 'src/value.ts', 'export const value = "old";\n');
+  if (options.agentRunner) {
+    write(seed, 'container/Dockerfile', 'ARG BUN_VERSION=1.4.4\n');
+    write(
+      seed,
+      'container/agent-runner/tsconfig.json',
+      '{"compilerOptions":{"strict":true,"noEmit":true,"types":[]},"files":["src/value.ts"]}\n',
+    );
+  }
   if (options.gatewayPayloadOnly) {
     writeOnecliSkill(seed, "export const gateway = 'onecli-v1';\n");
     write(seed, 'src/gateway-providers/installed.ts', "// Installed gateway providers.\nimport './onecli.js';\n");
@@ -150,6 +159,10 @@ function createForkFixture(
     write(seed, '.claude/skills/customize/SKILL.md', '---\nname: customize\n---\n');
   } else {
     write(seed, 'src/value.ts', 'export const value = "new";\n');
+  }
+  if (options.agentRunner) {
+    const value = options.agentRunner === 'type-error' ? '123' : '"new"';
+    write(seed, 'container/agent-runner/src/value.ts', `export const value: string = ${value};\n`);
   }
   if (options.breaking) {
     fs.appendFileSync(
@@ -1410,5 +1423,126 @@ describe('update-nanoclaw transaction end to end', () => {
       const planted = path.join(fixture.install, 'data/aaa-unreadable');
       if (fs.existsSync(planted)) fs.chmodSync(planted, 0o644);
     }
+  });
+});
+
+describe('agent-runner typecheck during validate', () => {
+  interface Call {
+    command: string;
+    args: string[];
+    cwd?: string;
+    timeoutMs?: number;
+  }
+
+  // Which Bun can run on this host. The typecheck is the real tsc; every
+  // other command goes to the fake runtime.
+  function bunRuntime(install: string, bun: { host: boolean; pnpm: boolean }) {
+    const { runtime } = fakeRuntime(install);
+    const calls: Call[] = [];
+    const tsc = { output: '' };
+    const { run, tryRun } = runtime.runner;
+    runtime.runner.tryRun = (command, args, cwd, options) => {
+      if (command === 'bun' && args[0] === '--version') {
+        calls.push({ command, args, cwd });
+        return bun.host ? { ok: true, stdout: '1.4.4' } : { ok: false, stdout: 'ENOENT' };
+      }
+      if (command === 'pnpm' && args.includes('dlx')) {
+        calls.push({ command, args, cwd, timeoutMs: options?.timeoutMs });
+        return bun.pnpm
+          ? { ok: true, stdout: '1.4.4' }
+          : { ok: false, stdout: 'ERR_PNPM_META_FETCH_FAIL\n GET https://registry.npmjs.org/bun: request failed' };
+      }
+      return tryRun(command, args, cwd, options);
+    };
+    runtime.runner.run = (command, args, cwd, options) => {
+      if (command !== 'git') calls.push({ command, args, cwd });
+      if (command === 'pnpm' && args[0] === 'exec' && args[1] === 'tsc') {
+        try {
+          return exec(cwd ?? install, path.resolve(import.meta.dirname, '../../node_modules/.bin/tsc'), args.slice(2));
+        } catch (err) {
+          tsc.output = String((err as { stdout?: Buffer | string }).stdout ?? '');
+          throw err;
+        }
+      }
+      return run(command, args, cwd, options);
+    };
+    return { runtime, calls, tsc };
+  }
+
+  function agentRunnerFixture(agentRunner: true | 'type-error' = true): Fixture {
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    return createForkFixture({ agentRunner });
+  }
+
+  const runnerCalls = (calls: Call[]) =>
+    calls.filter((call) => call.args.includes('install') && call.cwd?.endsWith('container/agent-runner'));
+  const tscCalls = (calls: Call[]) => calls.filter((call) => call.args.includes('tsc'));
+
+  it('typechecks with host Bun when the host has it', async () => {
+    const fixture = agentRunnerFixture();
+    const { runtime, calls } = bunRuntime(fixture.install, { host: true, pnpm: true });
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+
+    expect(state.phase).toBe('validated');
+    expect(state.validation).toContain('container dependencies and typecheck (host Bun)');
+    expect(runnerCalls(calls).map((call) => [call.command, ...call.args].join(' '))).toEqual([
+      'bun install --frozen-lockfile',
+    ]);
+    expect(tscCalls(calls)).toHaveLength(1);
+    expect(calls.some((call) => call.args.includes('dlx'))).toBe(false);
+  });
+
+  it('typechecks with the pinned Bun through pnpm when the host has no Bun', async () => {
+    const fixture = agentRunnerFixture();
+    const { runtime, calls } = bunRuntime(fixture.install, { host: false, pnpm: true });
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+
+    expect(state.phase).toBe('validated');
+    expect(state.validation).toContain('container dependencies and typecheck (bun@1.4.4 via pnpm)');
+    const probe = calls.find((call) => call.args.at(-1) === '--version' && call.command === 'pnpm');
+    expect(probe?.args).toEqual(['--package=bun@1.4.4', 'dlx', 'bun', '--version']);
+    expect(probe?.timeoutMs).toBeGreaterThan(0);
+    expect(runnerCalls(calls).map((call) => [call.command, ...call.args].join(' '))).toEqual([
+      'pnpm --package=bun@1.4.4 dlx bun install --frozen-lockfile',
+    ]);
+    expect(tscCalls(calls)).toHaveLength(1);
+  });
+
+  it('does not block the update when no Bun can run, and says the source went unchecked', async () => {
+    const fixture = agentRunnerFixture();
+    const { runtime, calls } = bunRuntime(fixture.install, { host: false, pnpm: false });
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+
+    expect(state.phase).toBe('validated');
+    const line = state.validation?.find((check) => check.startsWith('agent-runner source NOT typechecked'));
+    expect(line).toContain('no Bun on the host, and pnpm could not run bun@1.4.4: ERR_PNPM_META_FETCH_FAIL GET');
+    expect(state.validation?.join('\n')).not.toMatch(/deferred|image build/);
+    expect(runnerCalls(calls)).toEqual([]);
+    expect(tscCalls(calls)).toEqual([]);
+  });
+
+  it.each([
+    ['host Bun', { host: true, pnpm: false }],
+    ['pnpm Bun', { host: false, pnpm: true }],
+  ])('fails validate on a real type error with %s', async (_name, bun) => {
+    const fixture = agentRunnerFixture('type-error');
+    const { runtime, tsc } = bunRuntime(fixture.install, bun);
+
+    const state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    await expect(validateUpdate(fixture.install, state.id, runtime)).rejects.toThrow(
+      /tsc -p container\/agent-runner\/tsconfig\.json --noEmit/,
+    );
+
+    expect(tsc.output).toContain("src/value.ts(1,14): error TS2322: Type 'number' is not assignable to type 'string'.");
+    const after = loadState(fixture.install, state.id);
+    expect(after.phase).toBe('prepared');
+    expect(after.lastError).toContain('tsc -p container/agent-runner/tsconfig.json');
   });
 });
