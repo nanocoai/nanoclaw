@@ -11,7 +11,7 @@ metadata:
 
 # Cursor agent provider
 
-> Shortcut: `pnpm exec tsx setup/index.ts --step provider-auth cursor` performs this whole install (payload files, barrels, SDK pin, image rebuild) plus auth in one command. The steps below are the same operations, for agent-driven or manual application.
+> Shortcut: `pnpm exec tsx setup/index.ts --step provider-auth cursor` performs this whole install (payload files, barrels, SDK pin, image rebuild, host rebuild and restart) plus auth in one command. The steps below are the same operations, for agent-driven or manual application.
 
 NanoClaw selects each group's agent backend from `container_configs.provider` (default `claude`). This skill installs the Cursor provider: copy the payload from this skill's `payload/`, append one import to each of the five provider and contract barrels, pin `@cursor/sdk` in the agent-runner tree, rebuild, then run the auth walk-through.
 
@@ -131,7 +131,7 @@ OAuth-minted keys default to 90 days; dashboard and service-account keys last un
 
 ## Use it
 
-After installing on a running NanoClaw host, restart the host service first so it loads the Cursor registration (Linux: `systemctl --user restart nanoclaw-v2-<install-slug>.service`; macOS: its launchd restart). A host that still runs the old build spawns Cursor groups without the Cursor state volume, so continuations would not survive a container restart.
+After installing on a running NanoClaw host, restart the host service first so it loads the Cursor registration: `bash setup/lib/restart.sh` (the provider-auth shortcut already did this). A host that still runs the old build spawns Cursor groups without the Cursor state volume, so continuations would not survive a container restart.
 
 Then, per group:
 

@@ -26,11 +26,7 @@ export interface SessionKey {
 export type ContainerRole = string;
 
 export type MountClass =
-  | 'group-state'
-  | 'install-surface'
-  | 'identity-material'
-  | 'gateway-trust'
-  | 'allowlisted-extra';
+  'group-state' | 'install-surface' | 'identity-material' | 'gateway-trust' | 'allowlisted-extra';
 
 export interface MountSpec {
   /**
@@ -462,7 +458,6 @@ export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilitie
     // to an ambiguous target.
     throw specInvalid('spec must carry exactly one agent container');
   }
-  const pluginsRoot = stampedPluginsRoot(spec, policy);
   for (const container of spec.containers) {
     const seenTargets = new Set<string>();
     for (const mount of container.mounts) {
@@ -486,9 +481,7 @@ export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilitie
         throw specInvalid(`duplicate containerPath ${mount.containerPath} on ${container.role}`);
       }
       seenTargets.add(mount.containerPath);
-      const required =
-        classRequiredByPath(mount.hostPath, policy) ??
-        (pluginsRoot && underRoot(mount.hostPath, pluginsRoot) ? 'install-surface' : null);
+      const required = requiredMountClass(mount.hostPath, spec, policy);
       if (required && mount.class !== required) {
         // Where a file lives decides what it IS, so the class is not the
         // composer's to choose for these roots. Without this the taxonomy is
@@ -611,6 +604,23 @@ export function classRequiredByPath(hostPath: string, policy: MountPolicy): Moun
 }
 
 /**
+ * The class a mount at this path must carry in this session, or null when it is
+ * the composer's choice. The one rule `validateSpec` enforces, exported so a mount
+ * can be refused when it is added instead of at every start.
+ */
+export function requiredMountClass(
+  hostPath: string,
+  spec: Pick<SessionSpec, 'labels'>,
+  policy: MountPolicy,
+): MountClass | null {
+  const pluginsRoot = stampedPluginsRoot(spec, policy);
+  return (
+    classRequiredByPath(hostPath, policy) ??
+    (pluginsRoot && underRoot(hostPath, pluginsRoot) ? 'install-surface' : null)
+  );
+}
+
+/**
  * `groups/<folder>/plugins` — the one install surface that does not live under
  * an install root.
  *
@@ -637,7 +647,7 @@ export function classRequiredByPath(hostPath: string, policy: MountPolicy): Moun
  * gets no plugins root, and a `groups/<folder>/plugins` mount on it is judged by
  * the ordinary class rules.
  */
-export function stampedPluginsRoot(spec: SessionSpec, policy: MountPolicy): string | null {
+export function stampedPluginsRoot(spec: Pick<SessionSpec, 'labels'>, policy: MountPolicy): string | null {
   const folder = spec.labels[GROUP_FOLDER_LABEL];
   if (!folder || !labelValueLegal(folder)) return null;
   return `${policy.groupsRoot}/${folder}/plugins`;

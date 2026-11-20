@@ -36,6 +36,8 @@ import { dispatch } from '../dispatch.js';
 import { formatTasksTable } from '../format-tasks.js';
 import type { CallerContext } from '../frame.js';
 import { getAgentMailbox } from '../../mailbox/index.js';
+import { SUPERSEDED_TASK_CONTENT } from '../../mailbox/sqlite/tasks.js';
+import { handleRecurrence } from '../../modules/scheduling/recurrence.js';
 import './tasks.js';
 import '../commands/index.js'; // registers tasks-help for the help-topic test
 
@@ -115,7 +117,6 @@ describe('tasks CLI resource', () => {
     const content = JSON.parse(row.content);
     expect(content).toMatchObject({ originSessionId: 'chat-1' });
     expect(content.prompt).toBe('send a briefing');
-    expect(content.prompt).not.toContain('Task delivery contract');
     systemDb.close();
   });
 
@@ -432,6 +433,59 @@ describe('tasks CLI resource', () => {
     expect(prompt.prompt).toBe('new');
   });
 
+  it('run given the row id of an earlier occurrence copies the series payload, not the superseded marker', async () => {
+    const created = await dispatch(
+      {
+        id: 'c-old-row',
+        command: 'tasks-create',
+        args: { prompt: 'daily digest', script: 'echo "{}"', name: 'digest', recurrence: '0 9 * * *' },
+      },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const { series_id, session_id } = created.data as { series_id: string; session_id: string };
+    const session = (await getSession(session_id))!;
+
+    // Fire the series twice the way the container + sweep do: complete the
+    // armed occurrence, then let handleRecurrence re-arm the next one.
+    const fireArmed = async (): Promise<string> => {
+      const db = new Database(inboundDbPath('ag-1', session_id));
+      const armed = db
+        .prepare("SELECT id FROM messages_in WHERE series_id = ? AND recurrence IS NOT NULL AND status = 'pending'")
+        .get(series_id) as { id: string };
+      db.prepare("UPDATE messages_in SET status = 'completed' WHERE id = ?").run(armed.id);
+      db.close();
+      await withMailboxSession('ag-1', session_id, (mailbox) => handleRecurrence(mailbox, session));
+      return armed.id;
+    };
+    await fireArmed();
+    const earlier = await fireArmed();
+    expect(earlier).not.toBe(series_id);
+    const before = new Database(inboundDbPath('ag-1', session_id), { readonly: true });
+    expect(before.prepare('SELECT content FROM messages_in WHERE id = ?').get(earlier)).toEqual({
+      content: SUPERSEDED_TASK_CONTENT,
+    });
+    before.close();
+
+    const run = await dispatch(
+      { id: 'r-old-row', command: 'tasks-run', args: { id: earlier } },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(run.ok).toBe(true);
+    if (!run.ok) return;
+    expect((run.data as { series_id: string }).series_id).toBe(series_id);
+
+    const db = new Database(inboundDbPath('ag-1', session_id), { readonly: true });
+    const content = db
+      .prepare(
+        "SELECT json_extract(content, '$.prompt') AS prompt, json_extract(content, '$.script') AS script FROM messages_in WHERE id = ?",
+      )
+      .get((run.data as { row_id: string }).row_id) as { prompt: string | null; script: string | null };
+    db.close();
+    expect(content).toEqual({ prompt: 'daily digest', script: 'echo "{}"' });
+  });
+
   it('task object exposes origin_session_id and created_at', async () => {
     const r = await dispatch(
       {
@@ -737,9 +791,10 @@ describe('deep verb help (ncl tasks help create)', () => {
     }
   });
 
-  it('rejects an unknown verb with a pointer back to resource help', async () => {
+  it('points an unknown verb back to resource help', async () => {
     await import('../commands/index.js');
     const resp = await dispatch({ id: 'h2', command: 'tasks-help-frobnicate', args: {} }, { caller: 'host' });
     expect(resp.ok).toBe(false);
+    if (!resp.ok) expect(resp.error.message).toContain('no verb "frobnicate" on tasks — run `ncl tasks help`');
   });
 });

@@ -23,8 +23,18 @@
 // Usage: pnpm exec tsx scripts/skill-apply.ts <skillDir>     # plan (no writes)
 
 import { execSync } from 'node:child_process';
-import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import {
+  readFileSync,
+  existsSync,
+  writeFileSync,
+  appendFileSync,
+  copyFileSync,
+  mkdirSync,
+  rmSync,
+  realpathSync,
+} from 'node:fs';
 import { join, dirname } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { gitFetchBranchCommand } from './git-fetch-branch.js';
 import { gitShowToFileCommand } from './git-show-to-file.js';
 import { parseDirectives, promptVar, type Directive } from './skill-directives.js';
@@ -118,6 +128,15 @@ function fileHasLine(root: string, rel: string, line: string): boolean {
     .split('\n')
     .some((l) => l.trim() === line.trim());
 }
+// The lines an nc:append still has to add. A file without the block's first line
+// gets the whole block as written; one with it gets only the later lines it lacks,
+// so a block that gained a line since the install still adds it.
+function linesToAppend(root: string, d: Directive): string[] {
+  const to = String(d.attrs.to ?? '');
+  const [first, ...rest] = d.body;
+  if (first === undefined || !fileHasLine(root, to, first)) return d.body;
+  return rest.filter((line) => !fileHasLine(root, to, line));
+}
 function pkgHasDep(root: string, name: string, cwd = ''): boolean {
   try {
     const pkg = JSON.parse(read(join(root, cwd, 'package.json')) || '{}');
@@ -168,10 +187,10 @@ function selfStatus(
     }
     case 'append': {
       const to = String(d.attrs.to ?? '');
-      const line = d.body[0] ?? '';
-      return fileHasLine(root, to, line)
-        ? { status: 'skip', detail: `${to} already has the line` }
-        : { status: 'apply', detail: `add to ${to}: ${line}` };
+      const missing = linesToAppend(root, d);
+      return missing.length
+        ? { status: 'apply', detail: `add to ${to}: ${missing.join(' ')}` }
+        : { status: 'skip', detail: `${to} already has ${d.body.length > 1 ? 'every line' : 'the line'}` };
     }
     case 'dep': {
       if (mode === 'refresh') {
@@ -706,12 +725,13 @@ async function applyOne(
       const to = String(d.attrs.to);
       const marker = typeof d.attrs.at === 'string' ? d.attrs.at : undefined;
       const target = join(root, to);
+      const missing = linesToAppend(root, d);
       if (marker) {
         // Insert before the `// <<< <marker>` closing line of a dormant marker
         // region, matching that line's indentation. removeSkill still deletes
         // by line (position-agnostic), so the journal entry is unchanged.
         const close = `<<< ${marker}`;
-        for (const line of d.body) {
+        for (const line of missing) {
           const lines = read(target).split('\n');
           const idx = lines.findIndex((l) => l.includes(close));
           if (idx === -1) throw new Error(`append marker "${marker}" not found in ${to}`);
@@ -721,7 +741,7 @@ async function applyOne(
           journal.push({ op: 'appended', path: to, line });
         }
       } else {
-        for (const line of d.body) {
+        for (const line of missing) {
           appendFileSync(target, (read(target).endsWith('\n') || read(target) === '' ? '' : '\n') + line + '\n');
           journal.push({ op: 'appended', path: to, line });
         }
@@ -1121,7 +1141,11 @@ export async function removeSkill(
 }
 
 // CLI — the planner (no writes)
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (
+  process.argv[1] &&
+  existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+) {
   const skillDir = process.argv[2];
   if (!skillDir) {
     console.error('usage: pnpm exec tsx scripts/skill-apply.ts <skillDir>');

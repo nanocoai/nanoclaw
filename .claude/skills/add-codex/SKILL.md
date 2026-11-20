@@ -11,7 +11,7 @@ metadata:
 
 # Codex agent provider
 
-> Shortcut: `pnpm exec tsx setup/index.ts --step provider-auth codex` performs this whole install (manifest-driven from this skill's payload: files, barrels, CLI manifest entry, image rebuild) plus auth in one command. The steps below are the same operations, for agent-driven or manual application.
+> Shortcut: `pnpm exec tsx setup/index.ts --step provider-auth codex` performs this whole install (manifest-driven from this skill's payload: files, barrels, CLI manifest entry, image rebuild, host rebuild and restart) plus auth in one command. The steps below are the same operations, for agent-driven or manual application.
 
 NanoClaw selects each group's agent backend from `container_configs.provider` (default `claude`). This skill installs the Codex provider: copy this skill's payload, append one import to each of the three provider barrels, add the pinned Codex CLI to the container manifest (`container/cli-tools.json`), rebuild, then run the vault auth walk-through.
 
@@ -101,10 +101,10 @@ import './codex.js';
 The agent's global Node CLIs install from `container/cli-tools.json` (a json-merge seam), not hand-edited Dockerfile layers. Add Codex by appending one entry — idempotent on `name`, so a re-run is a no-op. `@openai/codex` has no native postinstall, so no `onlyBuilt`. The Dockerfile already installs every manifest entry via pinned `pnpm install -g`; no Dockerfile edit is needed.
 
 ```nc:json-merge into:container/cli-tools.json key:name
-{ "name": "@openai/codex", "version": "0.162.1" }
+{ "name": "@openai/codex", "version": "0.169.0" }
 ```
 
-The version (`0.162.1`) is the canonical pin — this SKILL.md is the source of truth.
+The version (`0.169.0`) is the canonical pin — this SKILL.md is the source of truth.
 Codex 0.156.0 and later look up the login's workspace id before any model request, so a ChatGPT login needs the credential gateway skill from the same NanoClaw release, which puts that id in the agent's stand-in login. `/update-nanoclaw` refreshes both together; do not refresh this skill alone on an older gateway.
 
 ### 4. Build
@@ -131,9 +131,13 @@ pnpm exec tsx setup/index.ts --step provider-auth codex
 
 The same walk-through fresh installs get from the setup picker: ChatGPT subscription (browser login or device pairing) or an OpenAI API key, landed in the selected gateway’s vault. Idempotent — it short-circuits when a matching secret already exists. It finishes with the install check.
 
+The ChatGPT sign-in needs no Codex CLI on the host: it uses the host's `codex` when one runs, and otherwise runs the exact version pinned in `container/cli-tools.json` through `pnpm dlx`, from pnpm's cache, with no global install. The sign-in runs under a throwaway Codex home in `data/codex-login/`, removed when it ends; the user's own `~/.codex` is never used.
+
 ## Use it
 
-Per group:
+After applying the steps above by hand on a running NanoClaw host, restart it first so it loads the Codex registration: `bash setup/lib/restart.sh`. The provider-auth shortcut already did this. A host still on the old build doesn't know Codex, and Codex groups fail on their first message.
+
+Then, per group:
 
 ```bash
 ncl groups config update --id <group-id> --provider codex

@@ -345,13 +345,14 @@ describe.each(SKILLS)('%s', (name) => {
   // A `pnpm pkg set 'pnpm.…'` changes how pnpm resolves the skill's deps. Set
   // after a dep, it misses that install; missing from REMOVE.md, it outlives
   // the skill. Only guards on the same var with different values never co-run.
+  const exclusive = (a: Directive, b: Directive) =>
+    isString(a.attrs.when) &&
+    isString(b.attrs.when) &&
+    a.attrs.when !== b.attrs.when &&
+    a.attrs.when.split('=')[0] === b.attrs.when.split('=')[0];
+
   it('pnpm settings precede the deps they shape and REMOVE.md deletes them', () => {
     const removeMd = existsSync(join(dir, 'REMOVE.md')) ? readFileSync(join(dir, 'REMOVE.md'), 'utf8') : '';
-    const exclusive = (a: Directive, b: Directive) =>
-      isString(a.attrs.when) &&
-      isString(b.attrs.when) &&
-      a.attrs.when !== b.attrs.when &&
-      a.attrs.when.split('=')[0] === b.attrs.when.split('=')[0];
     directives.forEach((d, i) => {
       if (d.kind !== 'run') return;
       for (const cmd of d.body) {
@@ -366,6 +367,24 @@ describe.each(SKILLS)('%s', (name) => {
         });
       }
     });
+  });
+
+  // nc:dep skips an installed package, so on a re-run a new pnpm setting is never
+  // applied. The run that sets it must reinstall; a patch must `pnpm add` its version.
+  it('pnpm settings reinstall, so a re-run applies them to a dep already present', () => {
+    for (const d of directives) {
+      if (d.kind !== 'run') continue;
+      const at = d.body.findIndex((cmd) => /\bpnpm pkg set ["']?pnpm\./.test(cmd));
+      if (at < 0 || !directives.some((dep) => dep.kind === 'dep' && !exclusive(d, dep))) continue;
+      const patched = d.body[at].match(/pnpm\.patchedDependencies\[([^\]]+)\]/)?.[1];
+      const later = d.body.slice(at + 1);
+      expect(
+        patched
+          ? later.some((cmd) => cmd.includes(`pnpm add ${patched}`))
+          : later.some((cmd) => /\bpnpm (install|add)\b/.test(cmd)),
+        `nc:run at line ${d.line} sets a pnpm setting but never ${patched ? `runs pnpm add ${patched}` : 'reinstalls'}`,
+      ).toBe(true);
+    }
   });
 
   // A restart-shaped command on a bare `nc:run` (no effect:) would silently

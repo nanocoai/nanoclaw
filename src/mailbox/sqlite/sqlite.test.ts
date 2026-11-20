@@ -234,4 +234,34 @@ describe('SQLite mailbox canonical serialization', () => {
       { timestamp: '2026-01-01T00:00:04.000Z', content: '{"text":"top level"}' },
     ]);
   });
+
+  it("gives an outbound post the platform's message id from the delivered table", () => {
+    const inboundDb = new Database(':memory:');
+    const outboundDb = new Database(':memory:');
+    databases.push(inboundDb, outboundDb);
+    inboundDb.exec(INBOUND_SCHEMA);
+    outboundDb.exec(OUTBOUND_SCHEMA);
+    const post = outboundDb.prepare(
+      `INSERT INTO messages_out (id, seq, timestamp, kind, channel_type, thread_id, content)
+       VALUES (?, ?, ?, 'chat', 'slack', NULL, ?)`,
+    );
+    post.run('delivered-post', 1, '2026-01-01T00:00:01.000Z', '{"text":"delivered"}');
+    post.run('pending-post', 3, '2026-01-01T00:00:02.000Z', '{"text":"not delivered yet"}');
+    inboundDb
+      .prepare(
+        "INSERT INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, ?, 'delivered', ?)",
+      )
+      .run('delivered-post', '1767225601.000100', '2026-01-01T00:00:01.500Z');
+
+    expect(wrapSqliteOutbound(outboundDb, undefined, undefined, inboundDb).getTopLevelOutbound(10)).toEqual([
+      { timestamp: '2026-01-01T00:00:02.000Z', content: '{"text":"not delivered yet"}' },
+      {
+        timestamp: '2026-01-01T00:00:01.000Z',
+        content: '{"text":"delivered"}',
+        platformMessageId: '1767225601.000100',
+      },
+    ]);
+    const history = wrapSqliteOutbound(outboundDb, undefined, undefined, inboundDb).getOutboundHistory(10);
+    expect(history.map((row) => row.platformMessageId)).toEqual([undefined, '1767225601.000100']);
+  });
 });

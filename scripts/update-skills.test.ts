@@ -135,6 +135,42 @@ describe('installed skill detection', () => {
 
     expect(detectInstalledSkills(root)).toEqual([{ name: 'discord', skillName: 'add-discord', kind: 'channel' }]);
   });
+
+  it('finds a channels-branch companion with no barrel import through a line only it appends', () => {
+    const root = temp('nanoclaw-skills-detect-branch-companion-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './slack.js';\n");
+    write(root, 'src/modules/index.ts', "import './shared.js';\nimport './slack-agent-flow/index.js';\n");
+    const companion = (line: string) =>
+      `\`\`\`nc:copy from-branch:channels\nsrc/modules/x.ts\n\`\`\`\n\`\`\`nc:append to:src/modules/index.ts\nimport './shared.js';\n${line}\n\`\`\`\n`;
+    write(root, '.claude/skills/slack-agent-flow/SKILL.md', companion("import './slack-agent-flow/index.js';"));
+    // Not installed: the one line it shares with slack-agent-flow is no proof.
+    write(root, '.claude/skills/other-flow/SKILL.md', companion("import './other-flow/index.js';"));
+
+    expect(detectInstalledSkills(root)).toEqual([
+      { name: 'slack', skillName: 'add-slack', kind: 'channel' },
+      { name: 'slack-agent-flow', skillName: 'slack-agent-flow', kind: 'channel' },
+    ]);
+  });
+
+  it('reports no channel skill on a clean checkout, though trunk has add-dial and add-telegram setup lines', () => {
+    // The real skills and setup/index.ts, with the barrel as trunk ships it.
+    const repo = path.resolve(import.meta.dirname, '..');
+    const root = temp('nanoclaw-skills-detect-clean-');
+    fs.cpSync(path.join(repo, '.claude/skills'), path.join(root, '.claude/skills'), {
+      recursive: true,
+      filter: (src) => fs.statSync(src).isDirectory() || path.basename(src) === 'SKILL.md',
+    });
+    fs.cpSync(path.join(repo, 'setup/index.ts'), path.join(root, 'setup/index.ts'));
+    write(root, 'src/channels/index.ts', "import './cli.js';\n");
+    // Each skill appends a setup line trunk already has, so only the missing barrel import says it is not installed.
+    for (const name of ['dial', 'telegram']) {
+      const line = `'pair-${name}': () => import('./pair-${name}.js'),`;
+      expect(fs.readFileSync(path.join(root, `.claude/skills/add-${name}/SKILL.md`), 'utf8')).toContain(line);
+      expect(fs.readFileSync(path.join(root, 'setup/index.ts'), 'utf8')).toContain(line);
+    }
+
+    expect(detectInstalledSkills(root)).toEqual([]);
+  });
 });
 
 describe('registry refresh end to end', () => {

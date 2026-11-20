@@ -1,6 +1,5 @@
 /**
  * Step: container — Build container image and verify with test run.
- * Replaces 03-setup-container.sh
  */
 import { execSync, spawnSync } from 'child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';
@@ -9,6 +8,7 @@ import { setTimeout as sleep } from 'timers/promises';
 
 import { log } from '../src/log.js';
 import { getDefaultContainerImage } from '../src/install-slug.js';
+import { refreshInstalledCredentialHelper } from './install-cred-helper.js';
 import { commandExists, getPlatform } from './platform.js';
 import { emitStatus } from './status.js';
 
@@ -21,10 +21,6 @@ function dockerStatus(): DockerStatus {
   if (/permission denied/i.test(err)) return 'no-permission';
   if (/cannot connect|is the docker daemon running|no such file/i.test(err)) return 'no-daemon';
   return 'other';
-}
-
-function dockerRunning(): boolean {
-  return dockerStatus() === 'ok';
 }
 
 /**
@@ -175,7 +171,6 @@ export async function run(args: string[]): Promise<void> {
   const projectRoot = process.cwd();
   const { runtime } = parseArgs(args);
   const image = getDefaultContainerImage(projectRoot);
-  const logFile = path.join(projectRoot, 'logs', 'setup.log');
 
   if (runtime !== 'docker') {
     emitStatus('SETUP_CONTAINER', {
@@ -295,6 +290,7 @@ export async function run(args: string[]): Promise<void> {
   let errorCode = '';
   if (source === 'pull') {
     log.info('Acquiring container image from registry', { image });
+    refreshInstalledCredentialHelper();
     const pullRes = spawnSync('bash', [path.join(projectRoot, 'container', 'pull.sh')], {
       cwd: projectRoot,
       stdio: 'inherit',
