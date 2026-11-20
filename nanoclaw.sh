@@ -47,6 +47,7 @@ for arg in "$@"; do
     echo ""
     echo "  --template-path <ref>  Create or update an agent from templates/<ref>"
     echo "  --gateway-provider <kind>  Select the credential gateway"
+    echo "  --update-channel <name>  Updates follow stable, beta, or edge"
     echo "  --uninstall            Uninstall this NanoClaw copy"
     echo "  --help, -h             Show this help without installing dependencies"
     exit 0
@@ -94,6 +95,62 @@ for arg in "$@"; do
     exit 1
   fi
 done
+
+# ─── new install: follow the channel of the cloned branch ──────────────
+# The official repository publishes stable and beta branches next to main.
+# Whichever one was cloned names the update channel; nothing is checked out.
+# shellcheck source=setup/lib/update-channel.sh
+source "$PROJECT_ROOT/setup/lib/update-channel.sh"
+
+REQUESTED_CHANNEL="${NANOCLAW_UPDATE_CHANNEL:-}"
+_take_channel=false
+for arg in "$@"; do
+  if [ "$_take_channel" = true ]; then
+    REQUESTED_CHANNEL="$arg"
+    _take_channel=false
+  elif [ "$arg" = "--" ]; then
+    # After `--` setup treats everything as positional, so this must too.
+    break
+  elif [ "$arg" = "--update-channel" ]; then
+    _take_channel=true
+  elif [ "${arg#--update-channel=}" != "$arg" ]; then
+    REQUESTED_CHANNEL="${arg#--update-channel=}"
+  fi
+done
+if [ "$_take_channel" = true ]; then
+  echo "error: Missing value for --update-channel"
+  exit 1
+fi
+unset _take_channel
+
+read -r CHANNEL_ACTION CHANNEL_NAME <<<"$(update_channel_decide "$PROJECT_ROOT" "$REQUESTED_CHANNEL")"
+CHANNEL_NOTE=""
+CHANNEL_HINT=""
+case "$CHANNEL_ACTION" in
+  invalid)
+    echo "error: unknown update channel \"$CHANNEL_NAME\". Use one of: stable, beta, edge"
+    exit 1
+    ;;
+  record|record-main|record-ahead)
+    # Setup saves it to .env before its first step.
+    export NANOCLAW_UPDATE_CHANNEL=$CHANNEL_NAME
+    ;;
+esac
+EDGE_HINT="To follow main instead, set up with: bash nanoclaw.sh --update-channel edge"
+case "$CHANNEL_ACTION" in
+  record)
+    CHANNEL_NOTE="This copy is the $CHANNEL_NAME branch, so updates follow the $CHANNEL_NAME channel."
+    ;;
+  record-main)
+    CHANNEL_NOTE="This copy is main on a release, so updates follow the stable channel."
+    CHANNEL_HINT=$EDGE_HINT
+    ;;
+  record-ahead|ahead)
+    CHANNEL_NOTE="This copy is main, which is newer than the $CHANNEL_NAME channel's releases: its first update waits for one that includes it."
+    CHANNEL_HINT=$EDGE_HINT
+    ;;
+esac
+unset EDGE_HINT
 
 LOGS_DIR="$PROJECT_ROOT/logs"
 STEPS_DIR="$LOGS_DIR/setup-steps"
@@ -212,6 +269,17 @@ write_header
 # NANOCLAW_BOOTSTRAPPED=1 and skips re-printing the wordmark.
 cat "$PROJECT_ROOT/assets/setup-splash.txt"
 
+# Decided before diagnostics creates data/, but shown here: printed earlier, the
+# splash scrolls it away, and setup.log only starts above.
+if [ -n "$CHANNEL_NOTE" ]; then
+  printf '  %s\n' "$CHANNEL_NOTE"
+  [ -z "$CHANNEL_HINT" ] || printf '  %s\n' "$(dim "$CHANNEL_HINT")"
+  printf '  %s\n\n' "$(dim "Switching branches later does not change the channel. To change it: pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel <stable|beta|edge>")"
+  printf '=== [%s] update-channel → %s ===\n  channel: %s\n  note: %s\n  hint: %s\n\n' \
+    "$(ts_utc)" "$CHANNEL_ACTION" "$CHANNEL_NAME" "$CHANNEL_NOTE" "${CHANNEL_HINT:-none}" >> "$PROGRESS_LOG"
+fi
+unset CHANNEL_ACTION CHANNEL_NAME CHANNEL_NOTE CHANNEL_HINT
+
 # ─── pre-flight: minimum hardware specs ────────────────────────────────
 # NanoClaw runs an agent container per session. Below this threshold the
 # host + container + agent will struggle (OOM under load). Soft warn — the
@@ -315,7 +383,7 @@ if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" -eq 0 ]; then
       printf '  %s\n' "$(dim '3. Enable passwordless sudo:    echo "nanoclaw ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/nanoclaw')"
       printf '  %s\n' "$(dim '4. Log out:                     exit')"
       printf '  %s\n' "$(dim '5. Log back in as the new user: ssh nanoclaw@your-server')"
-      printf '  %s\n' "$(dim '6. Clone the repo:              git clone https://github.com/nanocoai/nanoclaw.git && cd nanoclaw')"
+      printf '  %s\n' "$(dim '6. Clone the repo:              git clone --branch stable https://github.com/nanocoai/nanoclaw.git && cd nanoclaw')"
       printf '  %s\n\n' "$(dim '7. Re-run setup:               bash nanoclaw.sh')"
       exit 1
       ;;

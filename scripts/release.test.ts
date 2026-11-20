@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   assembleReleaseBody,
   changelogSection,
+  channelBranches,
   compareTags,
   isPrerelease,
   publicationPlan,
@@ -435,6 +436,44 @@ describe('release.mjs verify command', () => {
   );
 });
 
+describe('channel branches', () => {
+  const existing = ['v2026.10.0', 'v2026.10.1-rc.1', 'v2026.11.0-beta.1', 'pre-update-1'];
+
+  it('moves stable and beta to a release that is the newest tag', () => {
+    expect(channelBranches('2026.11.0', existing)).toEqual(['stable', 'beta']);
+    // A publish rerun finds its own tag already in the list.
+    expect(channelBranches('2026.11.0', [...existing, 'v2026.11.0'])).toEqual(['stable', 'beta']);
+  });
+
+  it('moves only beta for the newest pre-release', () => {
+    expect(channelBranches('2026.11.0-beta.2', existing)).toEqual(['beta']);
+    expect(channelBranches('2026.11.0-rc.1', existing)).toEqual(['beta']);
+  });
+
+  it('moves only stable for a release older than the newest pre-release', () => {
+    expect(channelBranches('2026.10.1', existing)).toEqual(['stable']);
+  });
+
+  it('moves nothing for a patch or pre-release of an older line', () => {
+    expect(channelBranches('2026.9.5', existing)).toEqual([]);
+    expect(channelBranches('2026.10.1-rc.2', existing)).toEqual([]);
+  });
+
+  it('picks the tags the updater picks, and the workflow moves the branches last', () => {
+    const tags = ['v2026.10.0', 'v2026.11.0-rc.2', 'v2026.11.0-beta.4'];
+    expect([...tags].sort(compareReleaseTags).at(-1)).toBe('v2026.11.0-rc.2');
+    expect(channelBranches('2026.11.0-rc.2', tags)).toEqual(['beta']);
+    expect(releaseWorkflow).toContain('release-order.mjs" branches "$RELEASE_VERSION"');
+    expect(releaseWorkflow).toContain('-f sha="$TARGET_SHA" -F force=false');
+    // The default token cannot pass the branches' ruleset: without the app token the step says what to push, then fails.
+    expect(releaseWorkflow).toContain('GH_TOKEN: ${{ secrets.CHANNEL_BRANCH_TOKEN }}');
+    expect(releaseWorkflow).toContain('An admin must run: \\`git push origin ${TARGET_SHA}:refs/heads/${BRANCH}\\`');
+    expect(releaseWorkflow.indexOf('- name: Move the channel branches')).toBeGreaterThan(
+      releaseWorkflow.indexOf('node scripts/release.mjs readback'),
+    );
+  });
+});
+
 describe('release order check', () => {
   const existing = ['v2026.10.0', 'v2026.10.1-rc.1', 'v2026.10.1-rc.2', 'pre-update-x', 'v99.0.0-junk'];
 
@@ -751,5 +790,167 @@ describe('release workflow order check', () => {
     git(f.checkout, 'remote', 'set-url', 'origin', path.join(f.runnerTemp, 'missing.git'));
     expect(() => run(f, '2026.11.0-beta.1')).toThrow();
     expect(readFileSync(path.join(f.runnerTemp, 'release-tags.txt'), 'utf8')).toBe('');
+  });
+});
+
+describe('release workflow channel branch step', () => {
+  const lines = releaseWorkflow.split('\n');
+  const name = lines.findIndex((line) => line.includes('- name: Move the channel branches'));
+  const runAt = lines.findIndex((line, i) => i > name && line.trim() === 'run: |');
+  const end = lines.findIndex((line, i) => i > runAt && line.trim() !== '' && !line.startsWith('          '));
+  const script = lines
+    .slice(runAt + 1, end === -1 ? undefined : end)
+    .map((line) => line.trim())
+    .join('\n');
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** origin has v2026.10.0 and `existing` branches on it; the target is the next commit, with the channel helper unless `helper` is false. */
+  function fixture(options: { helper?: boolean; existing?: string[] } = {}) {
+    const root = mkdtempSync(path.join(tmpdir(), 'release-branches-workflow-'));
+    dirs.push(root);
+    const work = path.join(root, 'work');
+    const runnerTemp = path.join(root, 'runner-temp');
+    const bin = path.join(root, 'bin');
+    mkdirSync(runnerTemp);
+    mkdirSync(bin);
+    git(root, 'init', '-q', '-b', 'main', work);
+    git(work, 'commit', '-q', '--allow-empty', '-m', 'v2026.10.0');
+    git(work, 'tag', '-a', 'v2026.10.0', '-m', 'v2026.10.0');
+    if (options.helper ?? true) {
+      mkdirSync(path.join(work, 'setup/lib'), { recursive: true });
+      writeFileSync(path.join(work, 'setup/lib/update-channel.sh'), '# helper\n');
+      git(work, 'add', '.');
+    }
+    git(work, 'commit', '-q', '--allow-empty', '-m', 'target');
+    const target = git(work, 'rev-parse', 'HEAD');
+    for (const branch of options.existing ?? []) git(work, 'branch', branch, 'v2026.10.0');
+    const origin = path.join(root, 'origin.git');
+    git(root, 'clone', '-q', '--bare', work, origin);
+    const checkout = path.join(root, 'checkout');
+    git(root, 'clone', '-q', origin, checkout);
+    git(checkout, 'checkout', '-q', '--detach', target);
+    writeFileSync(
+      path.join(runnerTemp, 'release-order.mjs'),
+      readFileSync(fileURLToPath(new URL('./release.mjs', import.meta.url)), 'utf8'),
+    );
+    // gh records each call; the call matching GH_FAIL fails like a refused API request.
+    writeFileSync(
+      path.join(bin, 'gh'),
+      '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_LOG"\n' +
+        'if [ -n "${GH_FAIL:-}" ]; then case "$*" in *"$GH_FAIL"*) echo "gh: refused (HTTP 422)" >&2; exit 1 ;; esac; fi\n',
+      { mode: 0o755 },
+    );
+    // Real git, except that looking up LOOKUP_FAIL's branch fails like a network error.
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    writeFileSync(
+      path.join(bin, 'git'),
+      '#!/bin/sh\nif [ "$1" = ls-remote ] && [ -n "${LOOKUP_FAIL:-}" ] && [ "$5" = "refs/heads/${LOOKUP_FAIL}" ]; then\n' +
+        `  echo "fatal: unable to access origin" >&2; exit 128\nfi\nexec '${realGit}' "$@"\n`,
+      { mode: 0o755 },
+    );
+    return { bin, checkout, runnerTemp, target };
+  }
+
+  function run(f: ReturnType<typeof fixture>, options: { token?: string; ghFail?: string; lookupFail?: string } = {}) {
+    const summary = path.join(f.runnerTemp, 'summary.md');
+    const ghLog = path.join(f.runnerTemp, 'gh.log');
+    writeFileSync(summary, '');
+    writeFileSync(ghLog, '');
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: f.checkout,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${f.bin}:${process.env.PATH}`,
+        GH_TOKEN: options.token ?? 'app-token',
+        GH_FAIL: options.ghFail ?? '',
+        GH_LOG: ghLog,
+        LOOKUP_FAIL: options.lookupFail ?? '',
+        GITHUB_REPOSITORY: 'nanocoai/nanoclaw',
+        GITHUB_STEP_SUMMARY: summary,
+        RELEASE_VERSION: '2026.11.0',
+        RUNNER_TEMP: f.runnerTemp,
+        TARGET_SHA: f.target,
+      },
+    });
+    const calls = readFileSync(ghLog, 'utf8').split('\n').filter(Boolean);
+    return { status: result.status, stdout: result.stdout, summary: readFileSync(summary, 'utf8'), calls };
+  }
+
+  const patch = (branch: string, sha: string) =>
+    `api -X PATCH repos/nanocoai/nanoclaw/git/refs/heads/${branch} -f sha=${sha} -F force=false`;
+  const post = (branch: string, sha: string) =>
+    `api -X POST repos/nanocoai/nanoclaw/git/refs -f ref=refs/heads/${branch} -f sha=${sha}`;
+
+  it('moves an existing branch only forward and creates a missing one', { timeout: 30_000 }, () => {
+    const f = fixture({ existing: ['stable'] });
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.calls).toEqual([patch('stable', f.target), post('beta', f.target)]);
+    expect(result.summary).toContain(`- Branch \`stable\`: \`${f.target}\``);
+    expect(result.summary).toContain(`- Branch \`beta\`: \`${f.target}\``);
+  });
+
+  it('still moves beta when stable is refused, then fails the job', { timeout: 30_000 }, () => {
+    const f = fixture({ existing: ['stable'] });
+    const result = run(f, { ghFail: 'heads/stable' });
+    expect(result.status).toBe(1);
+    expect(result.calls).toEqual([patch('stable', f.target), post('beta', f.target)]);
+    expect(result.summary).toContain('- Branch `stable` NOT moved: the API refused it');
+    expect(result.summary).toContain(`- Branch \`beta\`: \`${f.target}\``);
+    expect(result.stdout).toContain('::error::Channel branches not moved: stable.');
+  });
+
+  it('fails the job without the app token, after saying what an admin must push', { timeout: 30_000 }, () => {
+    const f = fixture({ existing: ['stable'] });
+    const result = run(f, { token: '' });
+    expect(result.status).toBe(1);
+    expect(result.calls).toEqual([]);
+    for (const branch of ['stable', 'beta']) {
+      expect(result.summary).toContain(`An admin must run: \`git push origin ${f.target}:refs/heads/${branch}\``);
+      expect(result.stdout).toContain(`::error::Branch ${branch} was not moved: CHANNEL_BRANCH_TOKEN is not set.`);
+    }
+    expect(result.stdout).toContain('::error::Channel branches not moved: stable beta.');
+  });
+
+  it('passes once an admin has pushed both branches, even without the token', { timeout: 30_000 }, () => {
+    const f = fixture();
+    const origin = path.join(path.dirname(f.checkout), 'origin.git');
+    git(origin, 'update-ref', 'refs/heads/stable', f.target);
+    git(origin, 'update-ref', 'refs/heads/beta', f.target);
+    for (const token of ['', 'app-token']) {
+      const result = run(f, { token });
+      expect(result.status).toBe(0);
+      expect(result.calls).toEqual([]);
+      expect(result.summary).toContain(`- Branch \`stable\`: \`${f.target}\` (already there)`);
+      expect(result.summary).toContain(`- Branch \`beta\`: \`${f.target}\` (already there)`);
+    }
+  });
+
+  it('never creates a branch whose lookup failed, and still moves the other', { timeout: 30_000 }, () => {
+    const f = fixture();
+    const result = run(f, { lookupFail: 'stable' });
+    expect(result.status).toBe(1);
+    expect(result.calls).toEqual([post('beta', f.target)]);
+    expect(result.summary).toContain('- Branch `stable` NOT moved: the lookup failed');
+    expect(result.stdout).toContain('::error::Channel branches not moved: stable.');
+  });
+
+  it('creates beta only from a release that has the channel helper', { timeout: 30_000 }, () => {
+    const f = fixture({ helper: false });
+    const result = run(f);
+    expect(result.status).toBe(0);
+    expect(result.calls).toEqual([post('stable', f.target)]);
+    expect(result.summary).toContain('- Branch `beta` NOT created: v2026.11.0 predates setup/lib/update-channel.sh.');
+    // Without the app token, no admin is told to push it either; only stable fails the job.
+    const manual = run(f, { token: '' });
+    expect(manual.status).toBe(1);
+    expect(manual.calls).toEqual([]);
+    expect(manual.stdout).toContain('::error::Channel branches not moved: stable.');
+    expect(manual.summary).toContain(`git push origin ${f.target}:refs/heads/stable`);
+    expect(manual.summary).not.toContain('refs/heads/beta');
   });
 });

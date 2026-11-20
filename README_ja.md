@@ -27,10 +27,14 @@ NanoClawは同じコア機能を提供しますが、理解できる規模のコ
 ## クイックスタート
 
 ```bash
-git clone https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
+git clone --branch stable https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
 cd nanoclaw-v2
 bash nanoclaw.sh
 ```
+
+`stable`ブランチは最新リリースで、アップデートもリリースに従います。リリース候補も受け取るには`--branch beta`をクローンしてください。`main`のクローンは最新のコードを動かしますが、アップデートはやはりリリースに従うため、最初のアップデートは次のリリースまで待ちます。`main`に従うには、代わりに`bash nanoclaw.sh --update-channel edge`を実行してください。
+
+後からブランチを切り替えても、アップデートチャネルは変わりません。変えるには`pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel <stable|beta|edge>`を実行してください。
 
 `nanoclaw.sh`は、まっさらなマシンから、メッセージを送れる名前付きエージェントが動く状態までを一気通貫で案内します。NodeやpnpmやDockerが無ければインストールし、AnthropicクレデンシャルをOneCLIに登録し、エージェントコンテナをビルドし、最初のチャネル（Telegram、Discord、WhatsApp、またはローカルCLI）とペアリングします。途中でステップが失敗すれば自動的にClaude Codeが呼び出され、原因を診断して中断箇所から再開します。
 

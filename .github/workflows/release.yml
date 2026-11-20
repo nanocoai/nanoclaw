@@ -369,3 +369,74 @@ jobs:
             echo "- State: \`$FINAL_STATE\`"
             echo "- URL: $RELEASE_URL"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # stable and beta are the branches a new install is cloned from
+      # (`git clone --branch stable`). Each moves only to its channel's newest tag,
+      # and only forward: the API refuses an update that is not a fast-forward.
+      # Last, after the release is out: a failed move still fails the job; rerun publish to retry it.
+      - name: Move the channel branches
+        env:
+          # A ruleset lets only organisation admins and listed apps move these
+          # branches, and the default token is neither. Without this secret (an
+          # app token, set in both release environments) the step fails after
+          # printing the push for an admin to run instead.
+          GH_TOKEN: ${{ secrets.CHANNEL_BRANCH_TOKEN }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          # From this workflow's own commit, like the order check: an older target's release.mjs lacks it.
+          git ls-remote --tags --refs origin 'refs/tags/v*' > "$RUNNER_TEMP/release-tags.txt"
+          BRANCHES=$(node "$RUNNER_TEMP/release-order.mjs" branches "$RELEASE_VERSION" "$RUNNER_TEMP/release-tags.txt")
+          if [ -z "$BRANCHES" ]; then
+            echo "- Channel branches: unchanged, v${RELEASE_VERSION} is not the newest tag of a channel" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          FAILED=""
+          for BRANCH in $BRANCHES; do
+            # Exit 2 is the only "no such branch": an auth or network failure must not fall through to creating it.
+            FOUND=0
+            REF=$(git ls-remote --exit-code --heads origin "refs/heads/${BRANCH}") || FOUND=$?
+            if [ "$FOUND" -ne 0 ] && [ "$FOUND" -ne 2 ]; then
+              echo "::error::Branch $BRANCH was not moved: looking it up failed (git ls-remote exit $FOUND)."
+              echo "- Branch \`${BRANCH}\` NOT moved: the lookup failed, see the step log." >> "$GITHUB_STEP_SUMMARY"
+              FAILED="$FAILED $BRANCH"
+              continue
+            fi
+            # Already there, e.g. an admin pushed it after a run without the token: a rerun goes green.
+            if [ "$FOUND" -eq 0 ] && [ "$(printf '%s\n' "$REF" | awk -v ref="refs/heads/${BRANCH}" '$2 == ref { print $1 }')" = "$TARGET_SHA" ]; then
+              echo "- Branch \`${BRANCH}\`: \`${TARGET_SHA}\` (already there)" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            # A beta clone of code without the channel helper records no channel, so the updater follows
+            # stable and stops on the pre-release that clone sits on. stable is the updater's default,
+            # so a stable clone of any release is fine; beta waits for a release that has the helper.
+            if [ "$FOUND" -eq 2 ] && [ "$BRANCH" = beta ] && ! git cat-file -e "${TARGET_SHA}:setup/lib/update-channel.sh" 2>/dev/null; then
+              echo "::notice::Branch beta was not created: v${RELEASE_VERSION} predates setup/lib/update-channel.sh."
+              echo "- Branch \`beta\` NOT created: v${RELEASE_VERSION} predates setup/lib/update-channel.sh. The next release that has it creates the branch." >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            # A failure, not a warning: a stale branch hands new installs old code, and only a red job gets seen.
+            if [ -z "${GH_TOKEN:-}" ]; then
+              echo "::error::Branch $BRANCH was not moved: CHANNEL_BRANCH_TOKEN is not set. An admin must push it."
+              echo "- Branch \`${BRANCH}\` NOT moved. An admin must run: \`git push origin ${TARGET_SHA}:refs/heads/${BRANCH}\`" >> "$GITHUB_STEP_SUMMARY"
+              FAILED="$FAILED $BRANCH"
+              continue
+            fi
+            if [ "$FOUND" -eq 0 ]; then
+              MOVE=(-X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" -f sha="$TARGET_SHA" -F force=false)
+            else
+              MOVE=(-X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/heads/${BRANCH}" -f sha="$TARGET_SHA")
+            fi
+            # One branch failing must not skip the other.
+            if ! gh api "${MOVE[@]}" >/dev/null; then
+              echo "::error::Branch $BRANCH was not moved to $TARGET_SHA, see the API error above."
+              echo "- Branch \`${BRANCH}\` NOT moved: the API refused it, see the step log." >> "$GITHUB_STEP_SUMMARY"
+              FAILED="$FAILED $BRANCH"
+              continue
+            fi
+            echo "- Branch \`${BRANCH}\`: \`${TARGET_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+          if [ -n "$FAILED" ]; then
+            echo "::error::Channel branches not moved:${FAILED}. The release is published; the step summary says what each branch needs."
+            exit 1
+          fi

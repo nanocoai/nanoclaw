@@ -40,10 +40,14 @@ NanoClaw provides that same core functionality, but in a codebase small enough t
 ## Quick Start
 
 ```bash
-git clone https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
+git clone --branch stable https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
 cd nanoclaw-v2
 bash nanoclaw.sh
 ```
+
+The `stable` branch is the latest release, and updates follow releases. To get release candidates too, clone `--branch beta`. A clone of `main` runs the newest code but still follows releases, so its first update waits for the next one; to follow `main`, run `bash nanoclaw.sh --update-channel edge` instead.
+
+Switching branches later doesn't change the channel. To change it, run `pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel <stable|beta|edge>`.
 
 `nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, installs a credential gateway and registers your Anthropic credential with it, builds the agent container, and pairs your first channel (Slack, Telegram, Discord, WhatsApp, iMessage, or a local CLI). If a step fails, Claude Code is invoked automatically to diagnose and resume from where it broke.
 
@@ -53,7 +57,7 @@ bash nanoclaw.sh
 Run from a fresh v2 checkout next to your v1 install:
 
 ```bash
-git clone https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
+git clone --branch stable https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
 cd nanoclaw-v2
 bash migrate-v2.sh
 ```
