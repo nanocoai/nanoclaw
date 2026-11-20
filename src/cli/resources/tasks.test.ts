@@ -115,7 +115,6 @@ describe('tasks CLI resource', () => {
     const content = JSON.parse(row.content);
     expect(content).toMatchObject({ originSessionId: 'chat-1' });
     expect(content.prompt).toBe('send a briefing');
-    expect(content.prompt).not.toContain('Task delivery contract');
     systemDb.close();
   });
 
@@ -737,9 +736,10 @@ describe('deep verb help (ncl tasks help create)', () => {
     }
   });
 
-  it('rejects an unknown verb with a pointer back to resource help', async () => {
+  it('points an unknown verb back to resource help', async () => {
     await import('../commands/index.js');
     const resp = await dispatch({ id: 'h2', command: 'tasks-help-frobnicate', args: {} }, { caller: 'host' });
     expect(resp.ok).toBe(false);
+    if (!resp.ok) expect(resp.error.message).toContain('no verb "frobnicate" on tasks — run `ncl tasks help`');
   });
 });

@@ -3,7 +3,9 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 import { parseArgv } from './parse-argv.js';
-import { MAX_STDIN_JSON_BYTES, readStdinJsonArgs, type StdinJsonStream } from './stdin-json.js';
+import { readStdinJsonArgs, type StdinJsonStream } from './stdin-json.js';
+
+const LIMIT_BYTES = 64 * 1024;
 
 async function* stream(...chunks: Array<string | Uint8Array>): StdinJsonStream {
   for (const chunk of chunks) yield chunk;
@@ -24,21 +26,41 @@ describe('bounded stdin JSON', () => {
 
   it('accepts an object whose UTF-8 representation is exactly 64 KiB', async () => {
     const envelopeBytes = Buffer.byteLength('{"payload":""}', 'utf8');
-    const source = `{"payload":"${'a'.repeat(MAX_STDIN_JSON_BYTES - envelopeBytes)}"}`;
-    expect(Buffer.byteLength(source, 'utf8')).toBe(MAX_STDIN_JSON_BYTES);
+    const source = `{"payload":"${'a'.repeat(LIMIT_BYTES - envelopeBytes)}"}`;
+    expect(Buffer.byteLength(source, 'utf8')).toBe(LIMIT_BYTES);
 
     const result = await readStdinJsonArgs(stream(source), {});
 
-    expect((result.payload as string).length).toBe(MAX_STDIN_JSON_BYTES - envelopeBytes);
+    expect((result.payload as string).length).toBe(LIMIT_BYTES - envelopeBytes);
   });
 
   it('rejects input one byte over the 64 KiB limit', async () => {
     const envelopeBytes = Buffer.byteLength('{"payload":""}', 'utf8');
-    const source = `{"payload":"${'a'.repeat(MAX_STDIN_JSON_BYTES - envelopeBytes + 1)}"}`;
+    const source = `{"payload":"${'a'.repeat(LIMIT_BYTES - envelopeBytes + 1)}"}`;
 
-    await expect(readStdinJsonArgs(stream(source), {})).rejects.toThrow(
-      `--stdin-json input exceeds ${MAX_STDIN_JSON_BYTES} bytes`,
-    );
+    await expect(readStdinJsonArgs(stream(source), {})).rejects.toThrow('--stdin-json input exceeds 65536 bytes');
+  });
+
+  it('applies the limit to the whole stream, not to each chunk', async () => {
+    const envelopeBytes = Buffer.byteLength('{"payload":""}', 'utf8');
+    const source = `{"payload":"${'a'.repeat(LIMIT_BYTES - envelopeBytes + 1)}"}`;
+    const half = LIMIT_BYTES / 2;
+
+    async function* overLimitThenMore(): StdinJsonStream {
+      yield source.slice(0, half);
+      yield source.slice(half);
+      throw new Error('read past the limit');
+    }
+
+    await expect(readStdinJsonArgs(overLimitThenMore(), {})).rejects.toThrow('--stdin-json input exceeds 65536 bytes');
+  });
+
+  it('counts the limit in UTF-8 bytes, not characters', async () => {
+    const envelopeBytes = Buffer.byteLength('{"payload":""}', 'utf8');
+    const source = `{"payload":"${'é'.repeat((LIMIT_BYTES - envelopeBytes) / 2 + 1)}"}`;
+    expect(source.length).toBeLessThan(LIMIT_BYTES);
+
+    await expect(readStdinJsonArgs(stream(source), {})).rejects.toThrow('--stdin-json input exceeds 65536 bytes');
   });
 
   it('measures multibyte input as UTF-8 bytes across chunk boundaries', async () => {

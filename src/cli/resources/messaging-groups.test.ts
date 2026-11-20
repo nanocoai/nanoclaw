@@ -1,11 +1,6 @@
 /**
- * Regression test: `ncl messaging-groups create` must satisfy the NOT NULL
- * `instance` column without an operator-supplied `--instance`. The column has
- * no CLI flag at the operator's altitude (the default instance IS the channel
- * type), so the generic CRUD insert defaults it to `channel_type` — matching
- * `createMessagingGroup`'s `instance ?? channel_type` fallback on the router
- * path. Delete the `instance` column / `defaultFrom` wiring in
- * `messaging-groups.ts` and this goes red: the insert fails the NOT NULL.
+ * `ncl messaging-groups create` and `delete` through dispatch. The default
+ * `instance = channel_type` on create is pinned in programmatic-wiring.test.ts.
  */
 import Database from 'better-sqlite3';
 import fs from 'fs';
@@ -47,7 +42,7 @@ const declared: ChannelDefaults = {
 };
 registerChannelAdapter('declchan-mg', { factory: () => null, defaults: declared });
 
-describe('messaging-groups CLI create defaults instance to channel_type', () => {
+describe('messaging-groups CLI create --instance', () => {
   beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
@@ -59,24 +54,8 @@ describe('messaging-groups CLI create defaults instance to channel_type', () => 
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
-  it('create without --instance sets instance = channel_type', async () => {
-    // caller: 'host' is the post-approval re-entry path for create (approval op).
-    const resp = await dispatch(
-      {
-        id: 'req-1',
-        command: 'messaging-groups-create',
-        args: { channel_type: 'telegram', platform_id: '12345' },
-      },
-      { caller: 'host' },
-    );
-
-    expect(resp.ok).toBe(true);
-    const row = await getMessagingGroupByPlatform('telegram', '12345');
-    expect(row).toBeDefined();
-    expect(row?.instance).toBe('telegram');
-  });
-
   it('create with an explicit --instance keeps that value', async () => {
+    // caller: 'host' is the post-approval re-entry path for create (approval op).
     const resp = await dispatch(
       {
         id: 'req-2',

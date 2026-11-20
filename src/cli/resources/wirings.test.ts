@@ -21,7 +21,7 @@ import type { ChannelDefaults } from '../../channels/adapter.js';
 import { registerChannelAdapter } from '../../channels/channel-registry.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from '../../db/index.js';
 import { createMessagingGroupAgent, getMessagingGroupAgent } from '../../db/messaging-groups.js';
-import { getResource } from '../crud.js';
+import { dispatch } from '../dispatch.js';
 import { lookup } from '../registry.js';
 // Side-effect import: registers wirings-create / wirings-update.
 import './wirings.js';
@@ -84,8 +84,19 @@ afterEach(async () => {
   await closeDb();
 });
 
-it('declares its agent-group scope field', () => {
-  expect(getResource('wirings')?.scopeField).toBe('agent_group_id');
+it('lets a group-scoped agent read the wiring of the conversation it serves', async () => {
+  await create({ messaging_group_id: 'mg-dm', agent_group_id: 'ag-1' });
+  const row = await create({ messaging_group_id: 'mg-group', agent_group_id: 'ag-1' });
+
+  const resp = await dispatch(
+    { id: 'req-get', command: 'wirings-get', args: {} },
+    { caller: 'agent', sessionId: 'sess-1', agentGroupId: 'ag-1', messagingGroupId: 'mg-group' },
+  );
+
+  expect(resp).toMatchObject({
+    ok: true,
+    data: { id: row.id, agent_group_id: 'ag-1', messaging_group_id: 'mg-group' },
+  });
 });
 
 describe('wirings-create — declaration-derived defaults', () => {
