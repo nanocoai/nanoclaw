@@ -85,14 +85,16 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          # Stable releases need a second person; pre-releases are approved by their sole reviewer.
-          # Same rule as the publish job's environment expression; release.mjs verify rejects
-          # any '-' suffix other than -beta.N or -rc.N. Kept in shell so older target commits still verify.
+          # Neither environment blocks self-review. Stable releases still need a second person:
+          # the publish job's "Check stable publish approval" step fails a self-approval unless the
+          # approver is on its allowlist. Same rule as the publish job's environment expression;
+          # release.mjs verify rejects any '-' suffix other than -beta.N or -rc.N. Kept in shell so
+          # older target commits still verify.
           case "$RELEASE_VERSION" in *-*) ENVIRONMENT=prerelease ;; *) ENVIRONMENT=release ;; esac
           case "$ENVIRONMENT" in
             release)
               EXPECTED_REVIEWERS='["amit-shafnir","gavrielc","glifocat","omri-maya","zvi-fried"]'
-              PREVENT_SELF_REVIEW=true
+              PREVENT_SELF_REVIEW=false
               ;;
             prerelease)
               EXPECTED_REVIEWERS='["glifocat"]'
@@ -138,6 +140,27 @@ jobs:
             echo "::error::The $ENVIRONMENT environment must allow exactly the main branch."
             exit 1
           fi
+
+      - name: Verify main protects the release workflow
+        if: ${{ !contains(inputs.version, '-') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The stable self-approval allowlist lives in this file, so a change under .github/ must
+          # need a team's approval on main: a ruleset "required reviewers" rule, nothing negated.
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100" --jq '.[]' \
+            | jq -s '.' > "$RUNNER_TEMP/main-rules.json"
+          if ! jq -e '
+            any(.[] | select(.type == "pull_request") | .parameters.required_reviewers[]?;
+              .reviewer.type == "Team" and .minimum_approvals >= 1
+              and any(.file_patterns[]; . == ".github/**")
+              and all(.file_patterns[]; startswith("!") | not))
+          ' "$RUNNER_TEMP/main-rules.json" >/dev/null; then
+            echo "::error::main must require a team's approval (at least 1) for .github/** through a ruleset's required-reviewers rule with no negated patterns. Stable self-approval is safe only under that rule."
+            exit 1
+          fi
+          echo "::notice::main requires a team's approval for .github/**."
 
       - name: Verify release metadata and target
         env:
@@ -208,8 +231,75 @@ jobs:
     # Only x.y.z-beta.N and x.y.z-rc.N pass verify with a '-'; the verify job checks this same environment.
     environment: ${{ contains(inputs.version, '-') && 'prerelease' || 'release' }}
     permissions:
+      actions: read
       contents: write
     steps:
+      # First step, before checkout: nothing from the target commit runs until it passes.
+      - name: Check stable publish approval
+        if: ${{ !contains(inputs.version, '-') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Logins that may approve a stable publish they started or re-ran (space-separated).
+          # Everyone else needs a second release reviewer. Change only in a reviewed pull request.
+          SELF_APPROVAL_ALLOWLIST: glifocat
+          RUN_ACTOR: ${{ github.actor }}
+          RUN_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          # The release environment allows self-review, so this step keeps the two-person rule.
+          # The history has no attempt numbers, so an approval in any attempt by the dispatcher or
+          # this attempt's re-runner counts as theirs. Account IDs catch a renamed login.
+          RUN_API="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          gh api "$RUN_API/attempts/${GITHUB_RUN_ATTEMPT}" > "$RUNNER_TEMP/run-attempt.json"
+          gh api "$RUN_API/approvals" > "$RUNNER_TEMP/run-approvals.json"
+          DECISION=$(jq -n -c \
+            --slurpfile attempt "$RUNNER_TEMP/run-attempt.json" \
+            --slurpfile history "$RUNNER_TEMP/run-approvals.json" \
+            --arg actor "$RUN_ACTOR" \
+            --arg triggering "$RUN_TRIGGERING_ACTOR" \
+            --arg allowlist "$SELF_APPROVAL_ALLOWLIST" '
+            def login: if type == "string" and length > 0 then ascii_downcase else error("missing login") end;
+            def id: if type == "number" then . else error("missing account id") end;
+            ($attempt[0] | [.actor, .triggering_actor]) as $people
+            | ($history[0] | if type == "array" then . else error("approval history is not a list") end) as $reviews
+            | [$people[] | .id | id] as $starter_ids
+            | ([$people[] | .login | login] + ([$actor, $triggering] | map(login))) as $starter_logins
+            | [$people[] | select(.type != "User") | .login] as $apps
+            | [$allowlist | ascii_downcase | splits("\\s+") | select(. != "")] as $allowed
+            | [$reviews[]
+                | select(.state == "approved" and any(.environments[]; .name | ascii_downcase == "release"))
+                | {id: (.user.id | id), login: (.user.login | login)}]
+            | unique_by(.id) as $approvals
+            | [$approvals[] | select(IN(.id; $starter_ids[]) or IN(.login; $starter_logins[])) | .login] as $self
+            | [$self[] | select(IN($allowed[]) | not)] as $refused
+            | {approvers: ($approvals | map(.login) | join(", "))}
+            + if ($apps | length) > 0 then
+                {ok: false, result: "started by \($apps | unique | join(", ")), not a person"}
+              elif ($approvals | length) == 0 then
+                {ok: false, result: "no approval of the release environment in this run"}
+              elif ($refused | length) > 0 then
+                {ok: false, result: "self-approved by \($refused | join(", ")), who is not on SELF_APPROVAL_ALLOWLIST"}
+              elif ($self | length) > 0 then
+                {ok: true, result: "self-approved by allowlisted maintainer \($self | join(", "))"}
+              else
+                {ok: true, result: "approved by a second person"}
+              end
+          ')
+          RESULT=$(jq -r .result <<< "$DECISION")
+          {
+            echo "### Publish approval"
+            echo "- Started by: \`$RUN_ACTOR\` (this attempt: \`$RUN_TRIGGERING_ACTOR\`)"
+            echo "- Approved by: \`$(jq -r .approvers <<< "$DECISION")\`"
+            echo "- Result: $RESULT"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # A later signed-tag requirement (e.g. a YubiKey-signed tag for allowlisted
+          # self-approvals) goes here, before the step passes.
+          if [ "$(jq -r .ok <<< "$DECISION")" != true ]; then
+            echo "::error::Stable publish refused: $RESULT. A person dispatches a stable release, and a release reviewer other than whoever started or re-ran it approves it, unless that person is on SELF_APPROVAL_ALLOWLIST. Dispatch a fresh run."
+            exit 1
+          fi
+          echo "::notice::Publish approval: $RESULT."
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
