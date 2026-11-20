@@ -120,7 +120,7 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 NanoClaw works without a user account. Without one, and unless you open the portal (below), the only thing it reports is setup and uninstall diagnostics: which steps ran, how long they took, whether they passed, the error message when one fails (it can include a name you typed, such as the agent's), the choices you make (runtime, channel, image source) and your setup environment (OS, WSL, Node version, whether setup runs as root, and RAM when it is low), sent to PostHog under a random per-install id. `NANOCLAW_NO_DIAGNOSTICS=1` turns those off. With or without an account, NanoClaw never sends your messages, files or API keys to us; the only part of an agent's instructions we can see is the Slack avatar excerpt listed below. Your messages do go to your model provider and to the chat apps you connect.
 
-The account is free, and setup's default image source needs it: setup asks *Enable Echo’s hardened agent image? Open the perks dashboard in your browser?* with yes as the default, and yes gets you a [prebuilt agent image](docs/hardened-image.md) (Claude runtime only) after you sign in. Answer no to skip the account and build the image locally; the build contacts no NanoClaw service, though it downloads the base image and packages. If you decline the sign-in, setup also builds locally. The same account unlocks the [perks](#perks) below.
+The account is free, and setup's default path uses it: setup asks *Enable Echo’s hardened agent image? Open the perks dashboard in your browser?* with yes as the default, and yes opens the perks dashboard, where you sign in and can enable a [prebuilt agent image](docs/hardened-image.md) (Claude runtime only). Answer no to skip the account and build the image locally; the build contacts no NanoClaw service, though it downloads the base image and packages. If you decline the sign-in, setup also builds locally. The same account unlocks the [perks](#perks) below.
 
 What we see once you use the portal or the account:
 
@@ -130,7 +130,7 @@ What we see once you use the portal or the account:
 - **Signing in:** your email address, a random host id, your OS, CPU type and NanoClaw version.
 - **Each image pull:** the image digest and your Node and helper versions.
 - **Managed Slack perk:** the app name you choose, your workspace ID, your Slack user ID, and whether the app finished installing. Our service creates the Slack app, so it handles that app's tokens; Slack messages go straight between Slack and your machine.
-- **A Slack teammate an agent creates from chat:** its template reference, whether guests may join, and up to 300 characters of its template's description (or, without a template, its instructions) to draw its avatar. When an agent proposes several teammates at once, this is sent before you approve them.
+- **A Slack teammate an agent creates from chat:** its name, template reference, whether guests may join, and up to 300 characters of its template's description (or, without a template, its instructions) to draw its avatar. When an agent proposes several teammates at once, the name and excerpt are sent before you approve them.
 - **While this checkout is registered** with the portal, the host keeps a connection to it (see [Perks](#perks)).
 
 Nothing else about your agents reaches us.
