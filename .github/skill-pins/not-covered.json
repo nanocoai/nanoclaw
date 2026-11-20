@@ -14,7 +14,7 @@
       "why": "a base image; Dependabot's docker ecosystem could read a Dockerfile, not configured"
     },
     {
-      "pin": "golang:1.26.1-bookworm",
+      "pin": "golang:1.27.3-bookworm",
       "kind": "container image (Dockerfile FROM)",
       "source": ".claude/skills/add-iron-proxy/assets/managed-proxy.Dockerfile",
       "why": "a base image; Dependabot's docker ecosystem could read a Dockerfile, not configured"
@@ -56,7 +56,7 @@
       "why": "read by the skill's own scripts; Dependabot does not read versions.json"
     },
     {
-      "pin": "iron-proxy-commit=8a0eb0beb6524f4a7739b799842a13159d8b739e",
+      "pin": "iron-proxy-commit=c32e47d653256ad7b1638214f60b5859ff94b268",
       "kind": "git commit",
       "source": ".claude/skills/add-iron-proxy/versions.json",
       "why": "read by the skill's own scripts; Dependabot does not read versions.json"

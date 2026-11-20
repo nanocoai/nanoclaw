@@ -3,7 +3,7 @@ WORKDIR /summary
 COPY _approval-summary/ ./
 RUN cargo test --locked && cargo build --release --locked
 
-FROM golang:1.26.1-bookworm AS build
+FROM golang:1.27.3-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
