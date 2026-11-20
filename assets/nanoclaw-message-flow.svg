@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 392" width="840" height="392" role="img" aria-labelledby="title desc">
+<title id="title">NanoClaw message flow</title><desc>A channel message flows through the host router and inbound.db to the session container. The reply returns through outbound.db and host delivery to the same channel. Hosted model calls pass through the credential gateway.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M1 1 9 5 1 9" fill="none" stroke="context-stroke" stroke-width="1.6" stroke-linejoin="round"/></marker></defs>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#0C1213}.label{font-size:16px;font-weight:650}.small{font-size:14px;fill:#5B6E6B}.mono{font:15px ui-monospace,Menlo,monospace;fill:#263234}.zone{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#5B6E6B}</style>
+<rect x="1" y="1" width="838" height="390" rx="14" fill="#fff" stroke="#CCDBDA"/>
+<rect x="172" y="19" width="646" height="277" rx="12" fill="#F6FAF9" stroke="#B0C2C1" stroke-dasharray="5 4"/>
+<text class="zone" x="192" y="48">YOUR MACHINE</text>
+<rect x="18" y="78" width="128" height="147" rx="9" fill="#fff" stroke="#CCDBDA"/>
+<path d="M69 108h23a4 4 0 0 1 4 4v12a4 4 0 0 1-4 4H81l-8 7v-7h-4a4 4 0 0 1-4-4v-12a4 4 0 0 1 4-4Z" fill="#E9FCF7" stroke="#0B7566" stroke-width="2"/>
+<text x="82" y="163" text-anchor="middle" class="label">Messaging</text>
+<text x="82" y="184" text-anchor="middle" class="label">channel</text>
+<rect x="199" y="75" width="154" height="57" rx="9" fill="white" stroke="#CCDBDA"/>
+<text x="276" y="96" text-anchor="middle" class="small">Host</text>
+<text x="276" y="118" text-anchor="middle" class="label">Route message</text>
+<rect x="397" y="75" width="147" height="57" rx="9" fill="#E9FCF7" stroke="#18A08E"/>
+<text x="470" y="109" text-anchor="middle" class="mono">inbound.db</text>
+<rect x="199" y="181" width="154" height="57" rx="9" fill="white" stroke="#CCDBDA"/>
+<text x="276" y="202" text-anchor="middle" class="small">Host</text>
+<text x="276" y="224" text-anchor="middle" class="label">Deliver reply</text>
+<rect x="397" y="181" width="147" height="57" rx="9" fill="#EAF4F2" stroke="#B0C2C1"/>
+<text x="470" y="215" text-anchor="middle" class="mono">outbound.db</text>
+<path d="M147 104 L195 104" fill="none" stroke="#0B7566" stroke-width="2.4" marker-end="url(#arrow)" />
+<path d="M354 104 L393 104" fill="none" stroke="#0B7566" stroke-width="2.4" marker-end="url(#arrow)" />
+<path d="M545 104 L593 104" fill="none" stroke="#0B7566" stroke-width="2.4" marker-end="url(#arrow)" />
+<path d="M597 210 L548 210" fill="none" stroke="#3C4B4A" stroke-width="2.4" marker-end="url(#arrow)" />
+<path d="M396 210 L357 210" fill="none" stroke="#3C4B4A" stroke-width="2.4" marker-end="url(#arrow)" />
+<path d="M198 210 L150 210" fill="none" stroke="#3C4B4A" stroke-width="2.4" marker-end="url(#arrow)" />
+<rect x="598" y="75" width="193" height="163" rx="9" fill="#131B1D" stroke="#131B1D"/>
+<path d="m680 110 14-7 14 7v16l-14 7-14-7z m0 0 14 7 14-7 m-14 7v16" stroke="#56EDD6" stroke-width="2" fill="none"/>
+<text x="694" y="166" text-anchor="middle" class="label" style="fill:#fff">Session container</text>
+<text x="694" y="191" text-anchor="middle" class="small" style="fill:#CCDBDA">Agent runner</text>
+<path d="M694 238 L694 257" fill="none" stroke="#5B6E6B" stroke-width="2.4"/>
+<rect x="598" y="257" width="193" height="31" rx="9" fill="#F6FAF9" stroke="#93A9A6"/>
+<text x="694" y="278" text-anchor="middle" class="small" style="fill:#3C4B4A">Credential gateway</text>
+<path d="M694 291 L694 329" fill="none" stroke="#5B6E6B" stroke-width="2.4" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+<rect x="598" y="333" width="193" height="40" rx="9" fill="#fff" stroke="#93A9A6"/>
+<text x="694" y="358" text-anchor="middle" class="label">Hosted model provider</text>
+<path d="M31 352 L56 352" fill="none" stroke="#0B7566" stroke-width="2.4" marker-end="url(#arrow)" />
+<text x="65" y="357" class="small">Incoming message</text>
+<path d="M210 352 L235 352" fill="none" stroke="#3C4B4A" stroke-width="2.4" marker-end="url(#arrow)" />
+<text x="244" y="357" class="small">Outgoing reply</text>
+</svg>
