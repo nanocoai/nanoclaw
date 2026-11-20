@@ -126,7 +126,7 @@ export function spawnStep(
 
     const child = spawn('pnpm', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const stream = new StatusStream(onBlock);
-    const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
+    const raw = openRawLog(rawLogPath);
     raw.write(`# ${stepName} — ${new Date().toISOString()}\n\n`);
 
     const pushLines = lineFeed(onLine);
@@ -144,8 +144,8 @@ export function spawnStep(
       pushLines(s);
     });
 
-    child.on('close', (code) => {
-      raw.end();
+    child.on('close', async (code) => {
+      await endRawLog(raw);
       const terminal = [...stream.blocks].reverse().find((b) => b.fields.STATUS) ?? null;
       const status = terminal?.fields.STATUS;
       const ok = code === 0 && (status === 'success' || status === 'skipped');
@@ -158,6 +158,22 @@ export function spawnStep(
       });
     });
   });
+}
+
+/**
+ * A raw log opens on the threadpool and can open after a fast child is done.
+ * A run resolves only once its log is flushed, so callers can read it at once,
+ * and a log that cannot be written fails quietly instead of crashing setup.
+ */
+function openRawLog(rawLogPath: string): fs.WriteStream {
+  const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
+  raw.on('error', () => undefined);
+  return raw;
+}
+
+/** Resolves once the raw log is flushed, or has failed. */
+function endRawLog(raw: fs.WriteStream): Promise<void> {
+  return new Promise((done) => raw.end(() => done()));
 }
 
 /**
@@ -248,7 +264,7 @@ export function spawnQuiet(
     const group = opts?.stop ? watchGroup(child, opts.stop) : undefined;
     let transcript = '';
     let spawnError: Error | undefined;
-    const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
+    const raw = openRawLog(rawLogPath);
     raw.write(`# ${[cmd, ...args].join(' ')} — ${new Date().toISOString()}\n\n`);
     const blocks: Block[] = [];
     const stream = new StatusStream((b) => blocks.push(b));
@@ -272,8 +288,8 @@ export function spawnQuiet(
       spawnError = err;
     });
     child.on('close', async (code, signal) => {
-      raw.end();
       await group?.settled();
+      await endRawLog(raw);
       const terminal = [...blocks].reverse().find((b) => b.fields.STATUS) ?? null;
       resolve({
         ok: code === 0 && !spawnError,
