@@ -30,6 +30,7 @@ import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from 
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { mapConcurrent } from './concurrency.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
+import { recordTopLevelPost } from './modules/cross-session-context/timeline.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
@@ -429,6 +430,9 @@ async function completeDelivery(
         session,
         agentGroup,
       );
+      // A top-level post is part of the conversation's timeline, which a new
+      // thread's backfill reads (never throws).
+      void recordTopLevelPost(session, agentGroup.name, msg, platformMsgId ?? null);
       for (const hook of postDeliveryHooks) {
         try {
           await hook(msg, session, { firstDelivery });

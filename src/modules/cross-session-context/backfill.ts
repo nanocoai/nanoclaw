@@ -15,9 +15,11 @@
  * group = identical audience, so the sibling fan's privacy argument applies.
  * A hot existing session has been receiving live echoes and is left alone.
  *
- * Bounded: sources are the ≤ K+1 hot sessions, read concurrently; rows are
- * newer than what the session already has (its newest row) and never older
- * than ECHO_MAX_AGE_DAYS; the newest BACKFILL_LIMIT survive, written in ONE
+ * Bounded: sources are the ≤ K+1 hot sessions; their root user messages and
+ * top-level agent posts come from the conversation timeline the Host records
+ * as they happen (timeline.ts), in one indexed read, so no sibling mailbox is
+ * opened; rows are newer than what the session already has (its newest row)
+ * and never older than ECHO_MAX_AGE_DAYS; the newest BACKFILL_LIMIT survive, written in ONE
  * mailbox session as trigger=0 session-echo rows BEFORE the trigger (lower
  * seq → the formatter renders them first, as ambient context). Never throws.
  */
@@ -25,99 +27,11 @@ import { isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { withExistingMailboxSession, withMailboxSession } from '../../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
-import {
-  ECHO_CHANNEL_TIMELINE_SURFACE,
-  ECHO_CHANNEL_TYPE,
-  ECHO_CONCURRENCY,
-  ECHO_MAX_AGE_MS,
-  ECHO_TIMELINE_SURFACE,
-} from './config.js';
+import { ECHO_CHANNEL_TIMELINE_SURFACE, ECHO_CHANNEL_TYPE, ECHO_MAX_AGE_MS, ECHO_TIMELINE_SURFACE } from './config.js';
 import { loadHotCandidates, selectEchoTargets, selectHotSessions, truncateEchoText } from './fan.js';
-import { mapConcurrent } from './parallel.js';
+import { readConversationTimeline } from './timeline.js';
 
 export const BACKFILL_LIMIT = 12;
-
-interface BackfillRow {
-  timestamp: string;
-  sender: string;
-  senderId: string;
-  text: string;
-  /** Row authored by the agent itself — rendered as "you" in the prelude. */
-  self: boolean;
-  /** The platform's id for it, kept on the seeded row so a platform read can skip it. */
-  platformMessageId?: string;
-}
-
-function parseContent(raw: string): {
-  id?: unknown;
-  text?: string;
-  sender?: string;
-  senderId?: string;
-  echo?: unknown;
-} {
-  try {
-    return JSON.parse(raw) as { id?: unknown; text?: string; sender?: string; senderId?: string; echo?: unknown };
-  } catch {
-    return {};
-  }
-}
-
-/**
- * TOP-LEVEL timeline rows from one sibling session:
- *  - the session's ROOT user message (per-thread sessions: the first
- *    triggering chat row IS the conversation opener), and
- *  - top-level agent posts (outbound with an empty/absent thread — e.g. the
- *    welcome message), which start conversations of their own.
- * Thread replies stay in their threads; deep conversations contribute one
- * line here, not their whole tail. Throws on a broken mailbox — the caller
- * isolates per sibling.
- */
-async function collectSiblingTopLevel(
-  agentGroup: AgentGroup,
-  sessionId: string,
-  limit: number,
-): Promise<BackfillRow[]> {
-  const rows: BackfillRow[] = [];
-  const timeline = await withExistingMailboxSession(agentGroup.id, sessionId, (mailbox) => ({
-    root: mailbox.getConversationRoot(),
-    outbound: mailbox.getTopLevelOutbound(limit),
-  }));
-  if (!timeline) return rows;
-
-  if (timeline.root) {
-    const r = timeline.root;
-    const c = parseContent(r.content);
-    if (c.text && c.senderId !== 'system' && c.sender !== 'system' && !c.text.startsWith('System instruction:')) {
-      // Host-injected triggers (the welcome hand-off) are attributed to the
-      // OWNER for sender-gating, so filter them by shape too — internal
-      // prompts must never surface as user timeline entries (live-hit: the
-      // raw "System instruction: run /welcome…" leaked into a new thread).
-      rows.push({
-        timestamp: r.timestamp,
-        sender: c.sender ?? 'user',
-        senderId: c.senderId ?? '',
-        text: c.text,
-        self: false,
-        // A held message carries the platform's id as `id` (the chat library's serialized message).
-        platformMessageId: typeof c.id === 'string' ? c.id : undefined,
-      });
-    }
-  }
-
-  for (const r of timeline.outbound) {
-    const c = parseContent(r.content);
-    if (!c.text) continue;
-    rows.push({
-      timestamp: r.timestamp,
-      sender: agentGroup.name,
-      senderId: agentGroup.id,
-      text: c.text,
-      self: true,
-      platformMessageId: r.platformMessageId,
-    });
-  }
-  return rows;
-}
 
 export interface BackfillOptions {
   /** The session was created for the very message about to be written. */
@@ -169,22 +83,17 @@ export async function backfillSession(
       if (newest !== null) sinceMs = Math.max(sinceMs, Date.parse(newest));
     }
 
-    const reads = await mapConcurrent(sources, ECHO_CONCURRENCY, (sibling) =>
-      collectSiblingTopLevel(agentGroup, sibling.id, BACKFILL_LIMIT),
+    // The siblings' top-level talk as the Host recorded it (timeline.ts): one
+    // indexed read, no sibling mailbox opened. On a remote mailbox a sibling
+    // not in memory was read whole, record by record, while the person's
+    // message waited (live: 12 to 23 s on a Host just restarted).
+    const newest = await readConversationTimeline(
+      agentGroup.id,
+      mg.id,
+      sources.map((s) => s.id),
+      new Date(sinceMs).toISOString(),
+      BACKFILL_LIMIT,
     );
-    const rows: BackfillRow[] = [];
-    reads.forEach((result, i) => {
-      if (result.status === 'fulfilled') rows.push(...result.value);
-      else
-        log.warn('Backfill sibling read failed', {
-          sessionId: session.id,
-          siblingId: sources[i].id,
-          err: result.reason,
-        });
-    });
-    const fresh = rows.filter((row) => Date.parse(row.timestamp) > sinceMs);
-    fresh.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
-    const newest = fresh.slice(-BACKFILL_LIMIT);
     if (newest.length === 0) return;
 
     const isGroupSurface = mg.is_group === 1;

@@ -30,6 +30,7 @@ import {
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
 import { backfillSession, fanInboundMessage } from './modules/cross-session-context/index.js';
+import { recordConversationRoot } from './modules/cross-session-context/timeline.js';
 import { gatherWakeContext, takeWriteTurn } from './wake-context.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -619,8 +620,18 @@ async function deliverToAgent(
       // seeded with its conversation's recent top-level timeline from the
       // conversation's hot set BEFORE the triggering message is written, so
       // replying to something said in another thread lands with that context
-      // in view. Bounded (K sources, read concurrently); a hot session is a
-      // one-query no-op. Never throws.
+      // in view. Bounded (K sources, one read of the conversation timeline);
+      // a hot session is a one-query no-op. Never throws.
+      // The person sees the agent is on it before any context is gathered:
+      // the wake below starts it again, which only refreshes it.
+      startTypingRefresh(
+        session.id,
+        session.agent_group_id,
+        event.channelType,
+        event.platformId,
+        effectiveThreadId,
+        mg.instance,
+      );
       await backfillSession(agentGroup, session, mg, { created });
       // The runner runs a command only when nothing comes before it.
       if (slashCommandName(commandText(event.message.content)) === null) {
@@ -644,6 +655,14 @@ async function deliverToAgent(
   }
 
   if (wake && created) {
+    // Its first message is the session's root in the conversation timeline,
+    // which the next new thread's backfill reads (never throws).
+    void recordConversationRoot(session, {
+      kind: event.message.kind,
+      channelType: deliveryAddr.channelType,
+      content: event.message.content,
+      timestamp: event.message.timestamp,
+    });
     // A brand-new engaged session: notify registered modules with the
     // resolved wiring context (fire-and-forget — see dispatchSessionCreated).
     dispatchSessionCreated({
