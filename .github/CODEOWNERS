@@ -1,10 +1,13 @@
 # Core code - maintainer only
-/src/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco
-/container/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco
-/groups/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco
-/launchd/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco
-/package.json @gavrielc @gabi-simons @omri-maya @moshe-nanoco
-/package-lock.json @gavrielc @gabi-simons @omri-maya @moshe-nanoco
+/src/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco @glifocat
+/container/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco @glifocat
+/groups/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco @glifocat
+/launchd/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco @glifocat
+/package.json @gavrielc @gabi-simons @omri-maya @moshe-nanoco @glifocat
+/package-lock.json @gavrielc @gabi-simons @omri-maya @moshe-nanoco @glifocat
+
+# Workflows (including the release self-approval allowlist) and this file
+/.github/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco @glifocat
 
 # Skills - open to contributors
 /.claude/skills/
