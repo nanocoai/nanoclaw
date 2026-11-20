@@ -30,6 +30,7 @@ import {
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index.js';
 import { createSession } from './db/sessions.js';
+import { isUniqueViolation } from './db/errors.js';
 import type { Session } from './types.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-write-outbound';
@@ -233,6 +234,22 @@ describe('writeSessionMessage re-provisions a deleted session folder', () => {
     await closeDb();
   });
 
+  const message = (id: string) => ({
+    id,
+    kind: 'system' as const,
+    timestamp: new Date().toISOString(),
+    content: JSON.stringify({ type: 'question_response', questionId: 'q-1' }),
+  });
+
+  it('refuses a second message with the same id as a unique violation', async () => {
+    await writeSessionMessage(AG, SESS, message('qr-q-1'));
+    const second = await writeSessionMessage(AG, SESS, message('qr-q-1')).then(
+      () => undefined,
+      (err: unknown) => err,
+    );
+    expect(isUniqueViolation(second)).toBe(true);
+  });
+
   it('re-creates the folder + inbound.db and does not throw when the row still exists', async () => {
     // Operator resets a stuck session by deleting its folder; the row survives.
     fs.rmSync(sessionDir(AG, SESS), { recursive: true, force: true });
@@ -255,8 +272,7 @@ describe('writeSessionMessage re-provisions a deleted session folder', () => {
     const db = new Database(inboundDbPath(AG, SESS), { readonly: true });
     try {
       const row = db.prepare('SELECT id, content FROM messages_in WHERE id = ?').get('after-reset-1') as
-        | { id: string; content: string }
-        | undefined;
+        { id: string; content: string } | undefined;
       expect(row?.id).toBe('after-reset-1');
       expect(JSON.parse(row!.content).text).toBe('still here?');
     } finally {

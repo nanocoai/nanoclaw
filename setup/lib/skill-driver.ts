@@ -476,7 +476,7 @@ export function plainDuration(ms: number): string {
   return s >= 60 ? `(${Math.floor(s / 60)}m ${s % 60}s)` : `(${s}s)`;
 }
 
-/** Fork-aware registry-branch remote (same resolver setup/channels/slack.ts uses). */
+/** Fork-aware registry-branch remote (`resolve_channels_remote` in setup/lib/channels-remote.sh). */
 export function channelsRemote(projectRoot: string): () => string {
   return () =>
     execSync('source setup/lib/channels-remote.sh; resolve_channels_remote', {

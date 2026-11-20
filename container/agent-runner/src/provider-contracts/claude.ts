@@ -25,8 +25,8 @@ const tone = { default: 'default', toSettings: (tone: string) => ({ outputStyle:
 export const claudeRuntimeContract: ProviderRuntimeContract = {
   seamVersion: PROVIDER_RUNTIME_CONTRACT_SEAM_VERSION,
   configuration: {
-    // Claude's stance is fixed — the container and the OneCLI allow-list are
-    // the boundary — so it is declared as the constant it is.
+    // Claude's stance is fixed — the container and the credential gateway's
+    // allow-list are the boundary — so it is declared as the constant it is.
     executionPolicy: { constant: resolveClaudeExecutionPolicy() },
     inference: resolveClaudeInference,
     tone,
