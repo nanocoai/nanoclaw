@@ -23,6 +23,7 @@ import {
 import { getSessionDriver } from '../../drivers/index.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { reservedMountClass } from '../../modules/mount-security/index.js';
 import { getProviderHostContract } from '../../provider-contracts/registry.js';
 import { resolveProviderName } from '../../providers/provider-name.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
@@ -638,6 +639,16 @@ registerResource({
 
         const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
+
+        // Stored, a path the driver reserves would make it refuse every start of the group.
+        // A copy is fine advice for install content, never for keys and certificates.
+        const reserved = await reservedMountClass(id, hostPath);
+        if (reserved === 'install-surface') {
+          throw new Error(`${hostPath} is NanoClaw's own ${reserved} content; only NanoClaw mounts it. Mount a copy.`);
+        }
+        if (reserved) {
+          throw new Error(`${hostPath} holds NanoClaw's ${reserved} keys or certificates; only NanoClaw mounts it.`);
+        }
 
         const mount: AdditionalMountConfig = {
           hostPath,

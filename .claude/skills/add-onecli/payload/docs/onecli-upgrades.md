@@ -231,6 +231,11 @@ still stored; delete it too. The new login has a new secret ID: grant it to
 each agent that had the old one, as described under Provider credentials in the
 add-onecli skill.
 
+The same stub claims a free ChatGPT plan for every login, and Codex hides its
+built-in image generation tool from free plans. The provider removes that
+made-up plan claim, so Codex treats the plan as unknown. The backend still
+decides what the account may use, from the real token the gateway injects.
+
 ## Remote gateway
 
 A gateway on another host must hand agents its own address. OneCLI 1.45 defaults `GATEWAY_BASE_URL` to `host.docker.internal:10255`, which an agent reads as its own machine, so every model call hangs with no reply. Setup warns when a remote gateway hands agents that address, a loopback one or a wildcard one, and prints the line to set. On the gateway host, put it in `~/.onecli/.env`, with the gateway host's name or IP as agents reach it and its published gateway port (10255, or your `ONECLI_GATEWAY_PORT`). This keeps the file's other settings:

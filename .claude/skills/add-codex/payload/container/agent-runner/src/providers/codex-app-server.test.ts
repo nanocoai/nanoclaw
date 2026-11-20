@@ -43,7 +43,7 @@ describe('Codex config TOML', () => {
       executionPolicy: {
         sandboxMode: 'danger-full-access',
         approvalPolicy: 'never',
-        projectDocumentMaxBytes: 32768,
+        projectDocumentMaxBytes: 65536,
       },
       inference: { model: 'gpt-5', effort: 'medium', fastMode: true },
       memory: { memories: false, useMemories: false, generateMemories: false },
@@ -66,7 +66,7 @@ describe('Codex config TOML', () => {
       [
         'sandbox_mode = "danger-full-access"',
         'approval_policy = "never"',
-        'project_doc_max_bytes = 32768',
+        'project_doc_max_bytes = 65536',
         'mcp_optional_startup_grace_ms = 0',
         'model = "gpt-5"',
         'model_reasoning_effort = "medium"',
@@ -163,7 +163,7 @@ describe('Codex config TOML', () => {
     const content = fs.readFileSync(path.join(tmpHome, '.codex', 'config.toml'), 'utf-8');
     expect(content).toContain('sandbox_mode = "danger-full-access"');
     expect(content).toContain('approval_policy = "never"');
-    expect(content).toContain('project_doc_max_bytes = 32768');
+    expect(content).toContain('project_doc_max_bytes = 65536');
     expect(content).toContain('model = "gpt-5"');
     expect(content).toContain('model_reasoning_effort = "medium"');
     expect(content).toContain('service_tier = "fast"');

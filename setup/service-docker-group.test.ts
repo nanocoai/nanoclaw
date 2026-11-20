@@ -30,7 +30,6 @@ vi.mock('child_process', async (importOriginal) => ({
     if (
       command === 'pnpm run build' ||
       command === 'docker info' ||
-      command === 'loginctl enable-linger' ||
       command.startsWith('systemctl --user ') ||
       command.startsWith('pkill ')
     ) {
@@ -63,6 +62,7 @@ vi.mock('./platform.js', () => ({
 vi.mock('../src/log.js', () => ({ log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 vi.mock('../src/upgrade-state.js', () => ({ writeUpgradeState: () => ({ version: 'fixture' }) }));
 vi.mock('./peer-cleanup.js', () => ({ cleanupUnhealthyPeers: () => ({ unloaded: [], removed: [], retired: [] }) }));
+vi.mock('./lib/systemd-linger.js', () => ({ ensureUserLinger: () => true }));
 vi.mock('./status.js', () => ({ emitStatus: vi.fn() }));
 
 import { getSystemdUnit } from '../src/install-slug.js';

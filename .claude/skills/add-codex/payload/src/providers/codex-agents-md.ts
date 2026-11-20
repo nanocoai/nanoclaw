@@ -22,7 +22,9 @@ import path from 'path';
 import { composeGroupProjectDoc, type ProjectDocSpec } from '../project-doc-compose.js';
 import type { AgentGroup } from '../types.js';
 
-export const CODEX_PROJECT_DOC_MAX_BYTES = 32 * 1024;
+// Codex's own default is 32 KiB, but a default Slack install composes about
+// 39 KB, and over the cap the composer drops whole sections (#4464).
+export const CODEX_PROJECT_DOC_MAX_BYTES = 64 * 1024;
 
 export const CODEX_PROJECT_DOC_EXTRA_SECTIONS = [
   {

@@ -10,6 +10,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { MOUNT_ALLOWLIST_PATH } from '../../config.js';
+import { getAgentGroup } from '../../db/agent-groups.js';
+import { sessionMountPolicy } from '../../drivers/index.js';
+import { GROUP_FOLDER_LABEL, requiredMountClass, type MountClass } from '../../drivers/types.js';
 import { log } from '../../log.js';
 
 export interface AdditionalMount {
@@ -72,6 +75,9 @@ const DEFAULT_BLOCKED_PATTERNS = [
   // directory is a container-to-host code-execution primitive: drop a file,
   // wait for the host to run it.
   '.local/bin',
+  // The local OneCLI gateway's stack: its .env holds the database password, and
+  // the operator runs `docker compose` on the compose file beside it.
+  '.onecli',
   'credentials',
   '.env',
   '.netrc',
@@ -215,6 +221,18 @@ function getRealPath(p: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The class the session driver reserves for this path in this group, or null.
+ * The guard's own rule, judged on the path this module resolves, so add-mount
+ * can refuse what every start of the group would.
+ */
+export async function reservedMountClass(agentGroupId: string, hostPath: string): Promise<MountClass | null> {
+  const group = await getAgentGroup(agentGroupId);
+  const labels: Record<string, string> = group ? { [GROUP_FOLDER_LABEL]: group.folder } : {};
+  const expanded = expandPath(hostPath);
+  return requiredMountClass(getRealPath(expanded) ?? expanded, { labels }, sessionMountPolicy());
 }
 
 /**

@@ -418,6 +418,7 @@ export function wakeContainer(session: Session): Promise<boolean> {
     .then(() => true)
     .catch((err) => {
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
+      logPolicyRefusal(session.id, err);
       return false;
     })
     .finally(() => {
@@ -425,6 +426,17 @@ export function wakeContainer(session: Session): Promise<boolean> {
     });
   wakePromises.set(session.id, promise);
   return promise;
+}
+
+/** A start the driver refuses on policy fails the same way on every retry; say so at error level. */
+function logPolicyRefusal(sessionId: string, err: unknown): void {
+  const failure = err as { kind?: unknown; detail?: unknown } | null;
+  if (failure?.kind !== 'denied-by-policy' && failure?.kind !== 'spec-invalid') return;
+  log.error('Container start refused — every retry fails the same way until the cause is fixed', {
+    sessionId,
+    kind: failure.kind,
+    detail: failure.detail,
+  });
 }
 
 async function spawnContainer(session: Session): Promise<void> {

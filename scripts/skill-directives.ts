@@ -93,8 +93,9 @@
 //
 // Usage: pnpm exec tsx scripts/skill-directives.ts <SKILL.md>
 
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 export interface Directive {
   kind: string;
@@ -409,7 +410,11 @@ export function lintGateAmbiguity(directives: Directive[]): Problem[] {
 }
 
 // CLI
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (
+  process.argv[1] &&
+  existsSync(process.argv[1]) &&
+  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+) {
   let path = process.argv[2];
   if (!path) {
     console.error('usage: pnpm exec tsx scripts/skill-directives.ts <skillDir|SKILL.md>');
