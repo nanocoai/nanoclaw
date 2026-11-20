@@ -624,14 +624,7 @@ async function deliverToAgent(
       // a hot session is a one-query no-op. Never throws.
       // The person sees the agent is on it before any context is gathered:
       // the wake below starts it again, which only refreshes it.
-      startTypingRefresh(
-        session.id,
-        session.agent_group_id,
-        event.channelType,
-        event.platformId,
-        effectiveThreadId,
-        mg.instance,
-      );
+      showTypingNow(session, event, effectiveThreadId, mg);
       await backfillSession(agentGroup, session, mg, { created });
       // The runner runs a command only when nothing comes before it.
       if (slashCommandName(commandText(event.message.content)) === null) {
@@ -740,4 +733,9 @@ async function deliverToAgent(
 function messageIdForAgent(baseId: string | undefined, agentGroupId: string): string {
   const id = baseId && baseId.length > 0 ? baseId : generateId();
   return `${id}:${agentGroupId}`;
+}
+
+/** The typing indicator for a message about to be written, through the instance that owns its chat. */
+function showTypingNow(s: Session, e: InboundEvent, threadId: string | null, mg: MessagingGroup): void {
+  startTypingRefresh(s.id, s.agent_group_id, e.channelType, e.platformId, threadId, mg.instance);
 }
