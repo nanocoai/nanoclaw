@@ -13,20 +13,27 @@ import {
   CardText,
   Actions,
   Button,
+  Chart,
+  Divider,
+  Field,
+  Fields,
   LinkButton,
+  Table,
   type CardChild,
   type ActionEvent,
   type Adapter,
   type AssistantContextChangedEvent,
   type AssistantThreadStartedEvent,
   type ConcurrencyStrategy,
+  type Logger,
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
+import { cardProblems, isCardPart, isRecord, type CardPart } from './card-parts.js';
 import { CardTooLongError, cardQuestionTooLong, normalizeOptions, type NormalizedOption } from './ask-question.js';
-import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, HistoryLine, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
 import { resolveQuestionRender, dispatchQuestionAction } from './question-render-registry.js';
 
@@ -196,6 +203,75 @@ export function attachmentBytesToBase64(data: Buffer | ArrayBuffer | Uint8Array)
   if (Buffer.isBuffer(data)) return data.toString('base64');
   if (data instanceof Uint8Array) return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('base64');
   return Buffer.from(data).toString('base64');
+}
+
+/**
+ * The Chat SDK reports a handler that throws or a failed state write only
+ * through its logger, so `logger: 'silent'` dropped such a message without a
+ * trace. Warn and error reach our log; the SDK's debug and info lines go to
+ * our debug level, except the info lines that report a lost inbound message.
+ */
+export function chatSdkLogger(prefix = 'chat-sdk'): Logger {
+  const to =
+    (level: 'debug' | 'warn' | 'error') =>
+    (message: string, ...args: unknown[]) =>
+      log[level](`${prefix}: ${message}`, sdkLogData(args));
+  return {
+    child: (name: string) => chatSdkLogger(`${prefix}:${name}`),
+    // SDK debug lines print each message's full text; drop them.
+    debug: () => {},
+    info: (message, ...args) => to(isLostMessage(message, args[0]) ? 'warn' : 'debug')(message, ...args),
+    warn: to('warn'),
+    error: to('error'),
+  };
+}
+
+/**
+ * In queue mode the SDK drops a held message that waited past its TTL, and
+ * passes older held messages over for the newest (our handlers ignore the
+ * skipped list). It reports both only at info.
+ */
+function isLostMessage(message: string, data: unknown): boolean {
+  if (message === 'message-expired') return true;
+  return (
+    message === 'message-dequeued' && isRecord(data) && typeof data.skippedCount === 'number' && data.skippedCount > 0
+  );
+}
+
+/** Message-text fields the SDK puts in its log data. */
+const SDK_TEXT_KEYS = new Set(['text', 'messageText']);
+
+/**
+ * Our log prints an Error's message and stack only under `err`; the SDK passes
+ * it as `error`. Message text is cut to its length, a URL to its origin and an
+ * action id to its first two parts (old question cards carry the answer there).
+ */
+function sdkLogData(args: unknown[]): Record<string, unknown> | undefined {
+  const data: Record<string, unknown> = {};
+  const extra: unknown[] = [];
+  for (const arg of args) {
+    if (arg instanceof Error) data.err ??= arg;
+    else if (isRecord(arg)) {
+      for (const [key, value] of Object.entries(arg)) {
+        if (value instanceof Error && data.err === undefined) data.err = value;
+        else if (typeof value === 'string' && SDK_TEXT_KEYS.has(key)) data[key] = `[${value.length} chars]`;
+        else if (typeof value === 'string' && key === 'actionId') data[key] = actionIdHead(value);
+        else data[key] = typeof value === 'string' ? urlOrigin(value) : value;
+      }
+    } else if (arg !== undefined) extra.push(arg);
+  }
+  if (extra.length > 0) data.args = extra;
+  return Object.keys(data).length > 0 ? data : undefined;
+}
+
+function actionIdHead(value: string): string {
+  const parts = value.split(':');
+  return parts.length > 2 ? `${parts.slice(0, 2).join(':')}:…` : value;
+}
+
+function urlOrigin(value: string): string {
+  if (!/^https?:\/\//i.test(value)) return value;
+  return URL.canParse(value) ? `${new URL(value).origin}/…` : '[url]';
 }
 
 /**
@@ -528,11 +604,72 @@ export function splitForLimit(text: string, limit: number): string[] {
     if (cut <= 0) cut = remaining.lastIndexOf('\n', limit);
     if (cut <= 0) cut = remaining.lastIndexOf(' ', limit);
     if (cut <= 0) cut = limit;
+    // A lone half of an emoji can't be encoded: Slack's client throws "URI malformed" and retries for ~30 min.
+    if (cut > 1 && isHighSurrogate(remaining.charCodeAt(cut - 1))) cut--;
     chunks.push(remaining.slice(0, cut).trimEnd());
     remaining = remaining.slice(cut).trimStart();
   }
   if (remaining.length > 0) chunks.push(remaining);
   return chunks;
+}
+
+/** How long split-reply progress is kept for a retry, host downtime included. */
+const SPLIT_PROGRESS_TTL_MS = 7 * 24 * 60 * 60_000;
+
+interface SplitProgress {
+  digest: string;
+  posted: number;
+  firstId?: string;
+}
+
+/**
+ * How many parts of one split reply are posted, kept in the bridge's state
+ * store so a delivery retry, even after a restart, resumes there. Kept after
+ * the last part too, for a retry after a failed delivery ack (the outbox files
+ * are gone by then, so they stay out of the digest). A changed text or limit
+ * starts over. Best effort: on a store error the retry posts from part 1.
+ */
+class SplitProgressStore {
+  private readonly key: string;
+  private readonly digest: string;
+  /** Set when the read failed: saving then could overwrite progress this attempt never saw. */
+  private unread = false;
+
+  constructor(
+    private readonly state: SqliteStateAdapter,
+    deliveryId: string,
+    threadId: string,
+    chunks: string[],
+  ) {
+    this.key = `split-progress:${deliveryId}`;
+    this.digest = createHash('sha256')
+      .update(JSON.stringify([threadId, chunks]))
+      .digest('hex');
+  }
+
+  async read(): Promise<SplitProgress | undefined> {
+    const saved = await this.attempt('read', () => this.state.get<SplitProgress>(this.key));
+    if (saved === undefined) this.unread = true; // a missing key reads as null
+    if (!saved || saved.digest !== this.digest) return undefined;
+    log.info('Resuming a split reply after the parts already posted', { key: this.key, posted: saved.posted });
+    return saved;
+  }
+
+  async save(posted: number, firstId: string | undefined): Promise<void> {
+    if (this.unread) return;
+    const progress: SplitProgress = { digest: this.digest, posted, firstId };
+    await this.attempt('save', () => this.state.set(this.key, progress, SPLIT_PROGRESS_TTL_MS));
+  }
+
+  private async attempt<T>(op: string, run: () => Promise<T>): Promise<T | undefined> {
+    try {
+      return await run();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- progress is best effort; the send goes on without it
+    } catch (err) {
+      log.warn('Split reply progress unavailable', { op, key: this.key, err });
+      return undefined;
+    }
+  }
 }
 
 /**
@@ -549,6 +686,54 @@ export function appendRawText(
   if (!extra) return;
   const text = typeof serialized.text === 'string' ? serialized.text : '';
   serialized.text = text ? `${text}\n\n${extra}` : extra;
+}
+
+/** A checked part as its Chat SDK element, rebuilt from the fields it may have and nothing else. */
+function buildCardPart(part: CardPart): CardChild {
+  const props = (isRecord(part.props) ? part.props : {}) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  switch (part.type) {
+    case 'Text':
+      return props.style ? CardText(props.content, { style: props.style }) : CardText(props.content);
+    case 'Fields':
+      return Fields(
+        (part.children as Array<{ props: { label: string; value: string | number } }>).map((field) =>
+          Field({ label: field.props.label, value: String(field.props.value) }),
+        ),
+      );
+    case 'Table':
+      return Table({
+        headers: props.headers,
+        rows: (props.rows as Array<Array<string | number>>).map((row) => row.map(String)),
+        ...(props.align ? { align: props.align } : {}),
+        ...(props.caption ? { caption: props.caption } : {}),
+      });
+    case 'Chart': {
+      const chart = props.chart;
+      if (chart.type === 'pie') {
+        const segments = (chart.segments as Array<{ label: string; value: number }>).map(({ label, value }) => ({
+          label,
+          value,
+        }));
+        return Chart({ title: props.title, chart: { type: 'pie', segments } });
+      }
+      const categories = chart.categories as string[];
+      return Chart({
+        title: props.title,
+        chart: {
+          type: chart.type,
+          categories,
+          ...(chart.xLabel ? { xLabel: chart.xLabel } : {}),
+          ...(chart.yLabel ? { yLabel: chart.yLabel } : {}),
+          series: (chart.series as Array<{ name: string; values: number[] }>).map((series) => ({
+            name: series.name,
+            data: series.values.map((value, i) => ({ label: categories[i], value })),
+          })),
+        },
+      });
+    }
+    default:
+      return Divider();
+  }
 }
 
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
@@ -783,7 +968,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         userName: adapter.userName || 'NanoClaw',
         concurrency: config.concurrency ?? 'concurrent',
         state,
-        logger: 'silent',
+        logger: chatSdkLogger(),
       });
 
       // Four SDK dispatch paths — bridge just forwards. All per-wiring
@@ -1090,13 +1275,19 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const title = (cardSpec.title as string) || '';
         const fallbackText = (content.fallbackText as string) || (cardSpec.description as string) || title || '';
 
+        // Checked again here: anything in the container can write this row, not only send_card.
+        const problems = cardProblems(cardSpec);
+        if (problems.length > 0) throw new Error(`send_card card refused: ${problems.join('; ')}`);
+
         const cardChildren: CardChild[] = [];
         if (typeof cardSpec.description === 'string' && cardSpec.description) {
           cardChildren.push(CardText(cardSpec.description));
         }
         if (Array.isArray(cardSpec.children)) {
           for (const child of cardSpec.children) {
-            if (typeof child === 'string' && child) {
+            if (isCardPart(child)) {
+              cardChildren.push(buildCardPart(child));
+            } else if (typeof child === 'string' && child) {
               cardChildren.push(CardText(child));
             } else if (
               child &&
@@ -1158,8 +1349,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           config.maxTextLength && text.length > config.maxTextLength
             ? splitForLimit(text, config.maxTextLength)
             : [text];
-        let firstId: string | undefined;
-        for (let i = 0; i < chunks.length; i++) {
+        // A retry of a reply that failed mid-split starts at the failed part:
+        // posting from part 1 again repeats what the user already has.
+        const progress =
+          chunks.length > 1 && message.deliveryId && state
+            ? new SplitProgressStore(state, message.deliveryId, tid, chunks)
+            : undefined;
+        const resumed = await progress?.read();
+        let firstId = resumed?.firstId;
+        for (let i = resumed?.posted ?? 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
           const result = await adapter.postMessage(
@@ -1167,6 +1365,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
           );
           if (i === 0) firstId = result?.id;
+          await progress?.save(i + 1, firstId);
         }
         return firstId;
       } else if (message.files && message.files.length > 0) {
@@ -1203,6 +1402,38 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // is the SDK's thread id, which is what the router already has from
       // the original inbound event.
       await state.subscribe(threadId);
+    },
+
+    async readHistory(
+      platformId: string,
+      threadId: string | null,
+      { limit }: { limit: number },
+    ): Promise<HistoryLine[]> {
+      if (threadId !== null && adapter.channelIdFromThreadId(threadId) !== platformId) {
+        throw new Error('History read refused: thread is not in this chat');
+      }
+      // The library reads the platform, or its own cache on platforms without
+      // server-side history.
+      const { messages } =
+        threadId === null
+          ? await chat.history.channel.listMessages(platformId, { limit })
+          : await chat.history.thread.list(threadId, { limit });
+      return messages.map((m) => {
+        // The text an inbound message of this line would carry.
+        const read = { text: m.text };
+        if (m.raw) appendRawText(read, m.raw as Record<string, unknown>, config.extractRawText);
+        return {
+          id: m.id,
+          timestamp: m.metadata.dateSent.toISOString(),
+          senderId: m.author.userId,
+          senderName: m.author.fullName || m.author.userName,
+          text: read.text,
+          isBot: m.author.isBot === true,
+          isSelf: m.author.isMe,
+          threadId: m.threadId,
+          raw: m.raw,
+        };
+      });
     },
   };
 

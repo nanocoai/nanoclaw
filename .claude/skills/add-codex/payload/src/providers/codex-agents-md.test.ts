@@ -1,5 +1,5 @@
 /**
- * The 32KB Codex project-doc cap must DEGRADE, never throw: composeGroupAgentsMd
+ * The Codex project-doc cap must DEGRADE, never throw: composeGroupAgentsMd
  * runs inside the provider contribution at every spawn, and a throw there rides
  * wakeContainer's transient-retry contract — host-sweep respawns every 60s
  * forever and the group goes silently dark (a permanent condition disguised as
@@ -115,6 +115,24 @@ describe('composeGroupAgentsMd cap handling', () => {
     } finally {
       fs.rmSync(groupDir, { recursive: true, force: true });
     }
+  });
+});
+
+// The container writes the cap into Codex's config.toml. If the two numbers
+// differ, Codex truncates a doc the host thought fit, or the host drops
+// sections Codex would have loaded. Runs on every core, not only legacy ones.
+describe('Codex project-doc cap', () => {
+  it('matches the cap the container writes into config.toml', () => {
+    const source = fs.readFileSync(
+      new URL('../../container/agent-runner/src/providers/codex-app-server.ts', import.meta.url),
+      'utf-8',
+    );
+    const match = source.match(/^const CODEX_PROJECT_DOC_MAX_BYTES = ([\d_]+(?:\s*\*\s*[\d_]+)*);$/m);
+    expect(match, 'CODEX_PROJECT_DOC_MAX_BYTES not found in codex-app-server.ts').not.toBeNull();
+    const containerCap = match![1]
+      .split('*')
+      .reduce((product, factor) => product * Number(factor.replace(/_/g, '').trim()), 1);
+    expect(containerCap).toBe(CODEX_PROJECT_DOC_MAX_BYTES);
   });
 });
 

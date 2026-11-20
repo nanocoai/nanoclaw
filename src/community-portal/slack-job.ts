@@ -48,6 +48,8 @@ export interface SlackJob {
     templateAgentId?: string;
   };
   error?: string;
+  /** Why an install failed, for verify and the wizard; written through slackJobReason. */
+  reason?: string;
   reportedStatus?: string;
 }
 
@@ -67,6 +69,31 @@ export function slackJobStatus(job: SlackJob | null, now = Date.now()): SlackJob
   if (!JOB_STATUSES.includes(job.status)) return 'failed';
   if (['awaiting_approval', 'installing'].includes(job.status) && !(Date.parse(job.expiresAt) > now)) return 'expired';
   return job.status;
+}
+
+/**
+ * A failure reason is printed by verify and the wizard, so keep it to one
+ * short line with the job's own secrets and anything token-shaped removed.
+ */
+export function slackJobReason(text: string, secrets: (string | undefined)[] = []): string {
+  let out = text;
+  for (const secret of secrets.filter((s): s is string => !!s).sort((a, b) => b.length - a.length))
+    out = out.split(secret).join('[REDACTED]');
+  out = out
+    .replace(/\b(Bearer|Basic)\s+[^\s"']+/gi, '$1 [REDACTED]')
+    .replace(/\b(\w*(?:TOKEN|SECRET|PASSWORD|KEY))=[^\s"']+/gi, '$1=[REDACTED]')
+    .replace(/\b(?:xox[a-z]|xapp)-[\w-]+/g, '[REDACTED]')
+    .replace(/[\w-]{32,}/g, '[REDACTED]')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return out.length > 240 ? `${out.slice(0, 239)}…` : out;
+}
+
+/** What to show for a failed or expired job: its saved reason, else its error code. */
+export function slackJobFailure(job: SlackJob | null): string | undefined {
+  const status = slackJobStatus(job);
+  const text = job && (status === 'failed' || status === 'expired') ? job.reason || job.error : undefined;
+  return text ? slackJobReason(text, [job?.identity?.token, job?.app?.appToken, job?.app?.botToken]) : undefined;
 }
 
 /**
@@ -159,7 +186,9 @@ export async function queueSlackJob(context: SlackJob['context'], root = process
     const job: SlackJob = {
       id: randomUUID(),
       status: app.botToken ? 'installing' : 'awaiting_approval',
-      createdAt: new Date().toISOString(),
+      // A retry keeps the first start: verify sets a failed job aside once a
+      // chat was wired after it, and a retry keeps the wiring it finds.
+      createdAt: samePrior ? samePrior.createdAt : new Date().toISOString(),
       expiresAt: samePrior ? samePrior.expiresAt : new Date(Date.now() + APPROVAL_WINDOW_MS).toISOString(),
       setupId: saved.setupId,
       origin: local.origin,

@@ -5,8 +5,10 @@ import { pathToFileURL } from 'node:url';
 
 import type { GatewayCatalogEntry } from '../../setup/gateways/catalog.js';
 import { getInstallSlug } from '../../src/install-slug.js';
+import { pinnedBunVersion } from '../provider-contract-verifier.js';
 import { refreshInstalledSkills, type SkillsRefreshReport } from '../update-skills.js';
 import { stampChannel, type UpdateChannel } from './channel.js';
+import { assertLockfilesUnmarked, lockfileNote, resolveLockfileConflicts } from './lockfiles.js';
 import {
   createCommandRunner,
   defaultServiceEnvironment,
@@ -58,6 +60,8 @@ export interface UpdateState {
   backupBranch: string;
   backupTag: string;
   changedFiles: string[];
+  /** Lockfile conflicts the controller resolved by regenerating them. */
+  regeneratedLockfiles?: string[];
   requirements: UpdateRequirement[];
   skillRefresh?: SkillsRefreshReport;
   service?: ServiceHandle;
@@ -232,8 +236,53 @@ function breakingRequirements(runtime: UpdateRuntime, root: string, from: string
     }));
 }
 
-function refreshPreparedState(state: UpdateState, runtime: UpdateRuntime): void {
+/** What git keeps while a merge, rebase or cherry-pick is unfinished. */
+const UNFINISHED: Record<string, UpdateState['strategy']> = {
+  MERGE_HEAD: 'merge',
+  'rebase-merge': 'rebase',
+  'rebase-apply': 'rebase',
+  CHERRY_PICK_HEAD: 'cherry-pick',
+  sequencer: 'cherry-pick',
+};
+
+function unfinishedOperation(state: UpdateState, runtime: UpdateRuntime): UpdateState['strategy'] | undefined {
+  const names = Object.keys(UNFINISHED);
+  const paths = git(runtime, state.stageRoot, ['rev-parse', ...names.flatMap((name) => ['--git-path', name])]).split(
+    '\n',
+  );
+  const open = names.find((_, i) => fs.existsSync(path.resolve(state.stageRoot, paths[i])));
+  return open ? UNFINISHED[open] : undefined;
+}
+
+/**
+ * Every strategy ends on the stage branch. A rebase detaches HEAD first, and
+ * its apply backend does so before it records any state.
+ */
+function assertOnStageBranch(state: UpdateState, runtime: UpdateRuntime): void {
+  const branch = tryGit(runtime, state.stageRoot, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  if (!branch.ok || branch.stdout.trim() !== state.stageBranch) {
+    throw new Error(
+      `The staging worktree must be on ${state.stageBranch}: finish any rebase (git rebase --continue) ` +
+        'or put HEAD back on that branch, then resume',
+    );
+  }
+}
+
+/** Clean, nothing unfinished, on the stage branch, and no lockfile with conflict markers that `git add` let through. */
+function assertStageReady(state: UpdateState, runtime: UpdateRuntime): void {
   assertClean(runtime, state.stageRoot, 'Staging worktree');
+  // A killed prepare, or a commit by hand mid-rebase, can leave a clean tree
+  // with only part of upstream applied.
+  const op = unfinishedOperation(state, runtime);
+  if (op) {
+    throw new Error(`The staging worktree has an unfinished ${op}: finish it (git ${op} --continue), then resume`);
+  }
+  assertOnStageBranch(state, runtime);
+  assertLockfilesUnmarked(runtime.runner, state.stageRoot, state.upstreamRef);
+}
+
+function refreshPreparedState(state: UpdateState, runtime: UpdateRuntime): void {
+  assertStageReady(state, runtime);
   state.targetHead = git(runtime, state.stageRoot, ['rev-parse', 'HEAD']);
   state.changedFiles = git(runtime, state.stageRoot, ['diff', '--name-only', state.originalHead, state.targetHead])
     .split('\n')
@@ -257,6 +306,10 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
   assertClean(runtime, projectRoot);
   currentBranch(runtime, projectRoot);
   git(runtime, projectRoot, ['rev-parse', '--verify', options.upstreamRef]);
+  const strategy = options.strategy ?? 'merge';
+  if (strategy === 'cherry-pick' && !options.commits?.length) {
+    throw new Error('Cherry-pick strategy requires at least one commit');
+  }
 
   const originalHead = git(runtime, projectRoot, ['rev-parse', 'HEAD']);
   const short = originalHead.slice(0, 8);
@@ -271,7 +324,6 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
   const unique = id.slice(-8);
   const backupBranch = `backup/pre-update-${short}-${stamp}-${unique}`;
   const backupTag = `pre-update-${short}-${stamp}-${unique}`;
-  const strategy = options.strategy ?? 'merge';
 
   fs.mkdirSync(transactionRoot, { recursive: true });
   git(runtime, projectRoot, ['branch', backupBranch, originalHead]);
@@ -281,7 +333,10 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
   const state: UpdateState = {
     schema: 'nanoclaw-update/v1',
     id,
-    phase: 'prepared',
+    // Prepared only once the strategy and any lockfile regenerate finish, so a
+    // prepare killed midway leaves a phase that resume picks up.
+    phase: 'conflict',
+    lastError: `Prepare stopped before the ${strategy} finished. Finish or resolve it in the stage, then resume.`,
     projectRoot,
     transactionRoot,
     stageRoot,
@@ -304,23 +359,61 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
   } else if (strategy === 'rebase') {
     applied = tryGit(runtime, stageRoot, ['rebase', options.upstreamRef]);
   } else {
-    if (!options.commits?.length) throw new Error('Cherry-pick strategy requires at least one commit');
-    applied = tryGit(runtime, stageRoot, ['cherry-pick', ...options.commits]);
+    applied = tryGit(runtime, stageRoot, ['cherry-pick', ...(options.commits ?? [])]);
   }
 
   if (!applied.ok) {
-    state.phase = 'conflict';
-    state.lastError = applied.stdout || `${strategy} needs conflict resolution`;
-    saveState(state);
-    return state;
+    const lockfiles = strategy === 'merge' ? resolveLockfileConflicts(runtime.runner, stageRoot) : undefined;
+    if (lockfiles?.kind !== 'resolved') {
+      state.phase = 'conflict';
+      const note = lockfiles && lockfileNote(lockfiles);
+      state.lastError = [applied.stdout || `${strategy} needs conflict resolution`, note].filter(Boolean).join('\n');
+      saveState(state);
+      return state;
+    }
+    state.regeneratedLockfiles = lockfiles.files;
   }
   refreshPreparedState(state, runtime);
   return state;
 }
 
+/** Still at the original head with nothing changed or in progress. */
+function stageUntouched(state: UpdateState, runtime: UpdateRuntime): boolean {
+  return (
+    git(runtime, state.stageRoot, ['rev-parse', 'HEAD']) === state.originalHead &&
+    !git(runtime, state.stageRoot, ['status', '--porcelain']) &&
+    !unfinishedOperation(state, runtime)
+  );
+}
+
 export function resumePreparedUpdate(projectRoot: string, id: string, runtime = createUpdateRuntime()): UpdateState {
   const state = loadState(projectRoot, id);
   if (state.phase !== 'conflict' && state.phase !== 'prepared') throw new Error(`Cannot resume from ${state.phase}`);
+  // Killed before git changed anything, or undone by hand. Not replayed: the
+  // refs may have moved since prepare.
+  if (state.phase === 'conflict' && stageUntouched(state, runtime)) {
+    state.lastError =
+      `The stage has none of the update: the ${state.strategy} never ran or was undone. ` +
+      'Abandon this update and prepare again.';
+    saveState(state);
+    return state;
+  }
+  // The operator may have resolved every other file and left the lockfiles to us.
+  if (state.phase === 'conflict' && state.strategy === 'merge') {
+    // Before the resolver, which commits the merge wherever HEAD is.
+    assertOnStageBranch(state, runtime);
+    const lockfiles = resolveLockfileConflicts(runtime.runner, state.stageRoot);
+    if (lockfiles.kind === 'failed' || lockfiles.kind === 'blocked') {
+      state.lastError = lockfileNote(lockfiles);
+      saveState(state);
+      return state;
+    }
+    if (lockfiles.kind === 'resolved') {
+      // Saved now: the clean check below can still refuse an operator's leftover file.
+      state.regeneratedLockfiles = lockfiles.files;
+      saveState(state);
+    }
+  }
   refreshPreparedState(state, runtime);
   return state;
 }
@@ -335,6 +428,50 @@ function hasChanged(state: UpdateState, prefix: string): boolean {
   return state.changedFiles.some((file) => file === prefix || file.startsWith(`${prefix}/`));
 }
 
+const SKILL_ERROR_HEAD = 200;
+const SKILL_ERROR_TAIL = 300;
+
+// Long text keeps its start (which step failed) and its end: a failed command
+// reads "Command failed: <command>" and then its stderr, so the reason is last.
+function excerpt(text: string): string {
+  const chars = Array.from(text);
+  if (chars.length <= SKILL_ERROR_HEAD + SKILL_ERROR_TAIL) return text;
+  return `${chars.slice(0, SKILL_ERROR_HEAD).join('')}…${chars.slice(-SKILL_ERROR_TAIL).join('')}`;
+}
+
+// One flattened line per failed skill: a failed run can carry a whole build
+// log, and its own newlines must not read as another skill's line.
+// The full text stays in state.skillRefresh, which `status` prints.
+function skillRefreshFailure(report: SkillsRefreshReport, heading = 'Installed skills failed to refresh:'): string {
+  const lines = report.skills
+    .filter((skill) => skill.status === 'failed')
+    .map((skill) => `- ${skill.name}: ${excerpt(skill.errors.join('; ').replace(/\s*\n\s*/g, ' '))}`);
+  return [heading, ...lines].join('\n');
+}
+
+// Bounds only the Bun fetch, so a stalled registry skips the check instead of hanging validate.
+const BUN_FETCH_TIMEOUT_MS = 5 * 60 * 1000;
+
+type AgentRunnerBun = { command: string; prefix: string[]; label: string } | { skipped: string };
+
+// Host Bun first, else the Bun the image pins, through pnpm. Nothing else
+// typechecks agent-runner source (the image build only installs its deps), so
+// when neither runs the check line must say the source went unchecked.
+function agentRunnerBun(runner: CommandRunner, root: string): AgentRunnerBun {
+  if (runner.tryRun('bun', ['--version'], root).ok) return { command: 'bun', prefix: [], label: 'host Bun' };
+  let version: string;
+  try {
+    version = pinnedBunVersion(root);
+  } catch (err) {
+    return { skipped: `no Bun on the host, and ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const prefix = [`--package=bun@${version}`, 'dlx', 'bun'];
+  const probe = runner.tryRun('pnpm', [...prefix, '--version'], root, { timeoutMs: BUN_FETCH_TIMEOUT_MS });
+  if (probe.ok) return { command: 'pnpm', prefix, label: `bun@${version} via pnpm` };
+  const reason = excerpt(probe.stdout.replace(/\s*\n\s*/g, ' ') || 'no output');
+  return { skipped: `no Bun on the host, and pnpm could not run bun@${version}: ${reason}` };
+}
+
 export async function validateUpdate(
   projectRoot: string,
   id: string,
@@ -342,11 +479,12 @@ export async function validateUpdate(
 ): Promise<UpdateState> {
   const state = loadState(projectRoot, id);
   if (state.phase !== 'prepared' && state.phase !== 'validated') throw new Error(`Cannot validate from ${state.phase}`);
-  assertClean(runtime, state.stageRoot, 'Staging worktree');
+  // Markers committed after prepare would otherwise surface only as a frozen-lockfile install failure.
+  assertStageReady(state, runtime);
 
   try {
     state.skillRefresh = await refreshInstalledSkills(state.stageRoot);
-    if (!state.skillRefresh.success) throw new Error('One or more installed skills failed to refresh');
+    if (!state.skillRefresh.success) throw new Error(skillRefreshFailure(state.skillRefresh));
     commitStageChanges(state, runtime, 'chore: refresh installed skill payloads');
     refreshPreparedState(state, runtime);
 
@@ -386,11 +524,7 @@ export async function validateUpdate(
         state.skillRefresh.skills.push(...report.skills);
         state.skillRefresh.selected.push(...report.selected);
         state.skillRefresh.success &&= report.success;
-        if (!report.success) {
-          throw new Error(
-            `Gateway skill did not fully apply: ${report.skills.flatMap((skill) => skill.errors).join('; ')}`,
-          );
-        }
+        if (!report.success) throw new Error(skillRefreshFailure(report, 'Gateway skill did not fully apply:'));
         commitStageChanges(state, runtime, 'chore: materialize selected gateway');
         refreshPreparedState(state, runtime);
       }
@@ -407,10 +541,16 @@ export async function validateUpdate(
     checks.push('host tests');
 
     if (hasChanged(state, 'container/agent-runner')) {
-      if (runtime.runner.tryRun('bun', ['--version'], state.stageRoot).ok) {
+      const bun = agentRunnerBun(runtime.runner, state.stageRoot);
+      if ('skipped' in bun) {
+        checks.push(
+          `agent-runner source NOT typechecked (${bun.skipped}). ` +
+            'Agents run it with Bun, which skips type checks, so nothing else will catch a type error there.',
+        );
+      } else {
         runtime.runner.run(
-          'bun',
-          ['install', '--frozen-lockfile'],
+          bun.command,
+          [...bun.prefix, 'install', '--frozen-lockfile'],
           path.join(state.stageRoot, 'container/agent-runner'),
         );
         runtime.runner.run(
@@ -418,9 +558,7 @@ export async function validateUpdate(
           ['exec', 'tsc', '-p', 'container/agent-runner/tsconfig.json', '--noEmit'],
           state.stageRoot,
         );
-        checks.push('container dependencies and typecheck');
-      } else {
-        checks.push('container typecheck deferred to image build (Bun unavailable on host)');
+        checks.push(`container dependencies and typecheck (${bun.label})`);
       }
     }
 
@@ -1073,6 +1211,7 @@ export function summarizeState(state: UpdateState): Record<string, unknown> {
     stageRoot: state.stageRoot,
     stageCleanedAt: state.stageCleanedAt,
     changedFiles: state.changedFiles,
+    regeneratedLockfiles: state.regeneratedLockfiles,
     requirements: state.requirements,
     skillRefresh: state.skillRefresh,
     service: state.service,

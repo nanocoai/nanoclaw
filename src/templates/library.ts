@@ -120,7 +120,7 @@ export function listTemplatesFromDir(dir: string): TemplateEntry[] {
 /** True when `ref` equals or sits anywhere below a discovered template ref. */
 function isWithinTemplate(ref: string, templateRefs: Set<string>): boolean {
   if (templateRefs.has('.')) return true;
-  for (let current = ref; ; ) {
+  for (let current = ref; ;) {
     if (templateRefs.has(current)) return true;
     const cut = current.lastIndexOf('/');
     if (cut === -1) return false;

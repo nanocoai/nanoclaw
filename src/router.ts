@@ -30,11 +30,13 @@ import {
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
 import { backfillSession, fanInboundMessage } from './modules/cross-session-context/index.js';
+import { gatherWakeContext, takeWriteTurn } from './wake-context.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, withExistingMailboxSession, writeSessionMessage } from './session-manager.js';
 import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
+import { commandText, slashCommandName } from './slash-command.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
 import type { WakeEvidence } from './mailbox/types.js';
 import type { InboundEvent } from './channels/adapter.js';
@@ -607,27 +609,39 @@ async function deliverToAgent(
     effectiveSessionMode,
   );
 
-  if (wake) {
-    // Cross-session context backfill: a just-born or long-idle session is
-    // seeded with its conversation's recent top-level timeline from the
-    // conversation's hot set BEFORE the triggering message is written, so
-    // replying to something said in another thread lands with that context
-    // in view. Bounded (K sources, read concurrently); a hot session is a
-    // one-query no-op. Never throws.
-    await backfillSession(agentGroup, session, mg, { created });
-  }
-
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
-  await writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageId,
-    kind: event.message.kind,
-    timestamp: event.message.timestamp,
-    platformId: deliveryAddr.platformId,
-    channelType: deliveryAddr.channelType,
-    threadId: deliveryAddr.threadId,
-    content: event.message.content,
-    trigger: wake,
-  });
+  // In arrival order: a message waiting for wake context is not overtaken. The
+  // finally releases the turn on every way out, so no exit holds the next message.
+  const turn = takeWriteTurn(session.id);
+  try {
+    if (wake) {
+      // Cross-session context backfill: a just-born or long-idle session is
+      // seeded with its conversation's recent top-level timeline from the
+      // conversation's hot set BEFORE the triggering message is written, so
+      // replying to something said in another thread lands with that context
+      // in view. Bounded (K sources, read concurrently); a hot session is a
+      // one-query no-op. Never throws.
+      await backfillSession(agentGroup, session, mg, { created });
+      // The runner runs a command only when nothing comes before it.
+      if (slashCommandName(commandText(event.message.content)) === null) {
+        await gatherWakeContext({ agentGroup, session, mg, wiring: agent, created, trigger: event.message });
+      }
+    }
+
+    await turn.previous;
+    await writeSessionMessage(session.agent_group_id, session.id, {
+      id: messageId,
+      kind: event.message.kind,
+      timestamp: event.message.timestamp,
+      platformId: deliveryAddr.platformId,
+      channelType: deliveryAddr.channelType,
+      threadId: deliveryAddr.threadId,
+      content: event.message.content,
+      trigger: wake,
+    });
+  } finally {
+    turn.release();
+  }
 
   if (wake && created) {
     // A brand-new engaged session: notify registered modules with the

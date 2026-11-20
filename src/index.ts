@@ -10,6 +10,7 @@ import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js
 import {
   abortGatewaySessionObservers,
   adoptRunningSessions,
+  refreshStaleGroupImages,
   resumeGatewaySessionAdmission,
   stopGatewaySessionsForUnavailability,
 } from './container-runner.js';
@@ -188,6 +189,10 @@ async function main(): Promise<void> {
   await startCliServer();
 
   log.info('NanoClaw running');
+
+  // In the background, one group at a time: after an update the agent image is
+  // new but groups with extra packages still run images built on the old one.
+  void refreshStaleGroupImages();
 }
 
 /** Graceful shutdown. */
