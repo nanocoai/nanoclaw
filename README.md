@@ -56,12 +56,19 @@ cd nanoclaw
 bash nanoclaw.sh
 ```
 
-`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, installs a credential gateway and offers to register your model credential with it when your runtime needs one (Claude by default, or Codex, Cursor or OpenCode if you pick one), fetches a prebuilt agent image or builds one locally, and pairs your first channel (Slack, Mattermost, Microsoft Teams, Telegram, Discord, WhatsApp, Dial, Signal, iMessage, or chat from the terminal). If a wizard step fails, setup can hand it to Claude Code (or to Codex or OpenCode, if you picked one of those) to diagnose, then retry from where it broke.
+`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It:
+
+- installs or updates Node and pnpm, and installs Docker if missing
+- installs a credential gateway and offers to register your model credential with it when your runtime needs one (Claude by default, or Codex, Cursor or OpenCode if you pick one)
+- fetches a prebuilt agent image or builds one locally
+- pairs your first channel (Slack, Mattermost, Microsoft Teams, Telegram, Discord, WhatsApp, Dial, Signal, iMessage, or chat from the terminal)
+
+If a wizard step fails, setup can hand it to Claude Code (or to Codex or OpenCode, if you picked one of those) to diagnose, then retry from where it broke.
 
 <details>
 <summary><strong>Migrating from NanoClaw v1?</strong></summary>
 
-Run it from a fresh v2 checkout. Your v1 checkout is probably already called `nanoclaw`, so clone v2 into a `nanoclaw` folder under another parent folder and point the script at your v1 path:
+Run it from a fresh v2 checkout. Clone v2 into a separate parent folder (your v1 checkout is likely `~/nanoclaw`) and point the script at it:
 
 ```bash
 mkdir -p ~/v2 && cd ~/v2
@@ -111,23 +118,22 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 ## Accounts and what leaves your machine
 
-NanoClaw works without a user account. Without one, and unless you open the portal (below), the only thing it reports is setup and
-uninstall diagnostics: which steps ran, how long they took, whether they passed, the error message when one
-fails (it can include a name you typed, such as the agent's), the choices you make (runtime,
-channel, image source) and your platform, sent to PostHog under a random per-install id.
-`NANOCLAW_NO_DIAGNOSTICS=1` turns those off. Without an account, NanoClaw sends none of your
-messages, files or keys to us. Your messages do go to your model provider and to the chat apps
-you connect.
+NanoClaw works without a user account. Without one, and unless you open the portal (below), the only thing it reports is setup and uninstall diagnostics: which steps ran, how long they took, whether they passed, the error message when one fails (it can include a name you typed, such as the agent's), the choices you make (runtime, channel, image source) and your setup environment (OS, WSL, Node version, whether setup runs as root, and RAM when it is low), sent to PostHog under a random per-install id. `NANOCLAW_NO_DIAGNOSTICS=1` turns those off. With or without an account, NanoClaw never sends your messages, files or API keys to us; the only part of an agent's instructions we can see is the Slack avatar excerpt listed below. Your messages do go to your model provider and to the chat apps you connect.
 
-The free account is opt-in. With it you can [fetch a prebuilt agent image](docs/hardened-image.md)
-(Claude runtime only) instead of building it locally. Before setup offers a perk, it asks the portal which perks are
-available. Opening the portal sends a device label (your machine's hostname and the checkout
-folder name) and, for Slack, the agent's name, even before you sign in. Once you sign in, we also see your email address, a random
-host id, your OS, CPU type and NanoClaw version, and each image pull (its digest and your Node and helper versions), but nothing else about
-your agents. The managed Slack perk also sends the app name you choose, your workspace ID and your Slack user ID. A Slack teammate an agent creates from chat also sends its template reference and whether guests may join, plus up to 300 characters of its template's description (or, without a template, its instructions) to draw its avatar.
-Once this checkout is registered with the portal, the host keeps a connection to it (see [Perks](#perks)).
-Building locally needs no account; the build itself contacts no NanoClaw service, though it
-downloads the base image and packages. When setup asks, its default is the prebuilt image. The same account unlocks the [perks](#perks) below.
+The account is free, and setup's default image source needs it: setup asks *Enable Echo’s hardened agent image? Open the perks dashboard in your browser?* with yes as the default, and yes gets you a [prebuilt agent image](docs/hardened-image.md) (Claude runtime only) after you sign in. Answer no to skip the account and build the image locally; the build contacts no NanoClaw service, though it downloads the base image and packages. If you decline the sign-in, setup also builds locally. The same account unlocks the [perks](#perks) below.
+
+What we see once you use the portal or the account:
+
+- **Before any perk:** setup fetches the list of available perks from the portal.
+- **Opening the portal**, even before you sign in: a device label (your machine's hostname and the checkout folder name).
+- **Slack setup:** the agent's name. It can be sent before you sign in, and on a machine with an earlier Slack setup, before setup asks to open the portal.
+- **Signing in:** your email address, a random host id, your OS, CPU type and NanoClaw version.
+- **Each image pull:** the image digest and your Node and helper versions.
+- **Managed Slack perk:** the app name you choose, your workspace ID, your Slack user ID, and whether the app finished installing. Our service creates the Slack app, so it handles that app's tokens; Slack messages go straight between Slack and your machine.
+- **A Slack teammate an agent creates from chat:** its template reference, whether guests may join, and up to 300 characters of its template's description (or, without a template, its instructions) to draw its avatar. When an agent proposes several teammates at once, this is sent before you approve them.
+- **While this checkout is registered** with the portal, the host keeps a connection to it (see [Perks](#perks)).
+
+Nothing else about your agents reaches us.
 
 ## Perks
 
@@ -136,11 +142,7 @@ a dashboard where you switch on what the account offers. Today that is Echo's ha
 image and a managed Slack app for your agent, created and installed for you with no tokens to
 paste. Everything else in NanoClaw works without it.
 
-Setup asks a yes/no question before each perk and opens the portal only if you say yes. You sign in in the browser, approve the terminal you are running
-setup from, and enable the perk; the wizard notices and continues on its own. Enabling Echo is
-where you agree to Echo's terms, including whether you want product and security email. Answer
-no, or decline the sign-in, and setup carries on without the perk; you can enable it later
-(see below).
+Setup asks a yes/no question before each perk and opens the portal only if you say yes. You sign in in the browser, approve the terminal you are running setup from, and enable the perk; the wizard notices and continues on its own. Enabling Echo is where you agree to Echo's terms, including whether you want product and security email. Answer no, or decline the sign-in, and setup carries on without the perk; you can enable it later (see below).
 
 What stays on your machine: the sign-in record and install token in `~/.config/nanoclaw/account.json`,
 one device key per machine in `~/.config/nanoclaw/device-key.json`, and this checkout's journal in
