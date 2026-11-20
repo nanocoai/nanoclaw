@@ -42,6 +42,7 @@ import {
   cancelAllTasks,
   cancelTask,
   clearRecurrence,
+  compactSupersededOccurrences,
   deleteTask,
   getCompletedRecurring,
   insertTaskRow,
@@ -239,6 +240,7 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
       db.transaction(() => {
         insertTaskRow(db, task, sequence);
         clearRecurrence(db, originalId);
+        compactSupersededOccurrences(db, task.seriesId, sequence);
       })();
     },
     cancelTask: (taskId) => (taskId === undefined ? cancelAllTasks(db) : cancelTask(db, taskId)),
