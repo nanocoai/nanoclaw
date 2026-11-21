@@ -24,7 +24,10 @@ import {
   toMountSpecs,
   watchGatewayAvailability,
 } from './container-runner.js';
+import { registerEnvContributor, resetEnvContributorsForTesting } from './container-env-contributors.js';
+import { mountPolicy } from './drivers/index.js';
 import type { SupervisedHandle } from './drivers/session-events.js';
+import { validateSpec } from './drivers/types.js';
 import { resetGatewayProvider } from './gateway-providers/index.js';
 import { log } from './log.js';
 import type { VolumeMount } from './providers/provider-container-registry.js';
@@ -350,6 +353,57 @@ describe('composeSessionSpec', () => {
     expect(spec.resources.cpus).toBeUndefined();
     expect(spec.resources.memoryMb).toBeUndefined();
     expect(spec.resources.shmSizeMb).toBe(1024);
+  });
+});
+
+describe('composeSessionSpec env contributors', () => {
+  afterEach(() => resetEnvContributorsForTesting());
+
+  it('composes the same spec when nothing is registered', () => {
+    const before = compose({ contribution: { env: { A: '1' } }, gateway: { env: { B: '2' } } });
+    registerEnvContributor('empty', () => ({}));
+    const after = compose({ contribution: { env: { A: '1' } }, gateway: { env: { B: '2' } } });
+    expect(after).toEqual(before);
+    expect(before.containers[0].contributedEnv).toEqual({ A: '1', B: '2' });
+  });
+
+  it('merges contributed env onto the contributed lane in registration order', () => {
+    const seen: unknown[] = [];
+    registerEnvContributor('first', (ctx) => {
+      seen.push(ctx);
+      return { ANTHROPIC_BASE_URL: 'http://first:1', FIRST_ONLY: 'yes' };
+    });
+    registerEnvContributor('second', () => ({ ANTHROPIC_BASE_URL: 'http://second:2' }));
+    const spec = compose({ contribution: { env: { ANTHROPIC_BASE_URL: 'http://provider:0' } } });
+    expect(spec.containers[0].contributedEnv).toMatchObject({
+      ANTHROPIC_BASE_URL: 'http://second:2',
+      FIRST_ONLY: 'yes',
+    });
+    expect(spec.containers[0].env.FIRST_ONLY).toBeUndefined();
+    expect(seen).toEqual([{ agentGroupId: 'agent-1', sessionId: 'session-1', containerConfig }]);
+  });
+
+  it('the gateway still wins a collision with a contributor', () => {
+    registerEnvContributor('proxy', () => ({ HTTPS_PROXY: 'http://contributor:1' }));
+    const spec = compose({ gateway: { env: { HTTPS_PROXY: 'http://gateway-must-win:15001' } } });
+    expect(spec.containers[0].contributedEnv?.HTTPS_PROXY).toBe('http://gateway-must-win:15001');
+  });
+
+  it('refuses to register the same name twice', () => {
+    registerEnvContributor('dup', () => ({}));
+    expect(() => registerEnvContributor('dup', () => ({}))).toThrow(/already registered/);
+  });
+
+  it('a credential value from a contributor is still refused by validateSpec', () => {
+    const withoutMounts = (spec: ReturnType<typeof compose>) => ({
+      ...spec,
+      containers: spec.containers.map((c) => ({ ...c, mounts: [] })),
+    });
+    expect(() => validateSpec(withoutMounts(compose()), mountPolicy())).not.toThrow();
+    registerEnvContributor('leaky', () => ({ SOME_SETTING: 'sk-' + 'a'.repeat(40) }));
+    expect(() => validateSpec(withoutMounts(compose()), mountPolicy())).toThrow(
+      /credential value in contributed env 'SOME_SETTING'/,
+    );
   });
 });
 
