@@ -476,7 +476,7 @@ describe('CodexProvider active turns', () => {
     });
     query.end();
     // Codex sends turn.items only when the turn produced an agent message.
-    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', items: [] } });
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } });
     await collect;
 
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: null }]);
@@ -502,7 +502,7 @@ describe('CodexProvider active turns', () => {
     });
     query.end();
     // Empty items, so the result can only come from the parent's own deltas.
-    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', items: [] } });
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } });
     await collect;
 
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'parent answer' }]);
@@ -579,7 +579,7 @@ describe('CodexProvider active turns', () => {
     });
     await waitFor(() => events.some((event) => event.type === 'progress'));
     query.end();
-    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', items: [] } });
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } });
     await collect;
 
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'first message' }]);
