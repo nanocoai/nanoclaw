@@ -16,6 +16,12 @@
   <a href="repo-tokens"><img src="repo-tokens/badge.svg" alt="repo tokens" valign="middle"></a>
 </p>
 
+<p align="center">
+  <a href="https://nanoclaw.dev/slack">
+    <img src="assets/slack-launch-banner.png" alt="A whole new way to run agents in Slack — install once and spawn your own agents as Slack teammates, each with its own persona, memory, and sandbox." width="100%">
+  </a>
+</p>
+
 ---
 
 <div align="center">
