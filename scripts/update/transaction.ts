@@ -215,7 +215,7 @@ function currentBranch(runtime: UpdateRuntime, root: string): string {
   const at =
     tag.ok && tag.stdout ? `tag ${tag.stdout}` : `commit ${git(runtime, root, ['rev-parse', '--short=8', 'HEAD'])}`;
   throw new Error(
-    `Update needs a branch, but HEAD is detached at ${at}. Make one here, then run the update again: git switch -c nanoclaw`,
+    `Update needs a branch, but HEAD is detached at ${at}. Make a branch here with a name that is not taken yet, then run the update again. For example: git switch -c nanoclaw`,
   );
 }
 

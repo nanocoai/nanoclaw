@@ -449,15 +449,27 @@ describe('update-nanoclaw transaction end to end', () => {
     previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
     process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
     const { runtime } = fakeRuntime(fixture.install);
-    const prepare = () => prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    const refusal = () => {
+      try {
+        prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+      } catch (err) {
+        return (err as Error).message;
+      }
+      return 'prepare did not throw';
+    };
+    // A taken name makes `git switch -c` fail, so the example must not read as the only name.
+    const expected = (at: string) =>
+      `Update needs a branch, but HEAD is detached at ${at}. Make a branch here with a name that is not taken yet, then run the update again. For example: git switch -c nanoclaw`;
 
     // `git checkout v2026.11.0` leaves an install like this.
     exec(fixture.install, 'git', ['tag', '-a', 'v9.9.9', '-m', 'release']);
     exec(fixture.install, 'git', ['checkout', '-q', '--detach', 'v9.9.9']);
-    expect(prepare).toThrow(/detached at tag v9\.9\.9\b[\s\S]*git switch -c nanoclaw/);
+    expect(refusal()).toBe(expected('tag v9.9.9'));
 
     exec(fixture.install, 'git', ['tag', '-d', 'v9.9.9']);
-    expect(prepare).toThrow(`detached at commit ${fixture.originalHead.slice(0, 8)}`);
+    const short = exec(fixture.install, 'git', ['rev-parse', '--short=8', 'HEAD']);
+    expect(short.startsWith(fixture.originalHead.slice(0, 8))).toBe(true);
+    expect(refusal()).toBe(expected(`commit ${short}`));
 
     expect(fs.readdirSync(process.env.NANOCLAW_UPDATE_DIR)).toEqual([]);
     expect(exec(fixture.install, 'git', ['branch', '--list', 'backup/*'])).toBe('');
