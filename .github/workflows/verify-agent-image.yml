@@ -237,7 +237,13 @@ jobs:
           }
           python3 -c 'import json; [print(t["ref"], t["old"]) for t in json.load(open("/tmp/targets.json")) if t["old"]]' \
           | while read -r NEW OLD; do
-            N=$(total "$NEW"); O=$(total "$OLD")
+            N=$(total "$NEW")
+            # An old pin can be gone from the registry by now (a stale branch,
+            # a sync from main). With nothing to compare, skip the tripwire.
+            if ! O=$(total "$OLD" 2>/dev/null); then
+              echo "::notice::Could not read the old image $OLD, so its size is not compared."
+              continue
+            fi
             echo "  manifest bytes: old=$O new=$N"
             # A coarse tripwire, not a measurement: catches a wholly different
             # image landing on the pin. Real growth between CVE rebuilds is small.
