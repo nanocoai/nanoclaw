@@ -321,6 +321,32 @@ describe('CodexProvider active turns', () => {
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: null }]);
   });
 
+  it("keeps the parent's own text when a sub-agent's text arrives in between", async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'delegate this', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+    await waitFor(() => fake.startCalls.length === 1);
+    const delta = (threadId: string, turnId: string, text: string): void =>
+      fake.notify('item/agentMessage/delta', { threadId, turnId, itemId: `${threadId}-m`, delta: text });
+    delta('thread-1', 'turn-1', 'parent ');
+    delta('child-thread', 'child-turn', 'child ');
+    delta('thread-1', 'turn-1', 'answer');
+    fake.notify('item/completed', {
+      threadId: 'child-thread',
+      turnId: 'child-turn',
+      item: { type: 'agentMessage', text: 'child answer' },
+    });
+    query.end();
+    // Empty items, so the result can only come from the parent's own deltas.
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', items: [] } });
+    await collect;
+
+    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'parent answer' }]);
+  });
+
   it("interrupts the parent turn on abort, not a sub-agent's turn", async () => {
     const fake = createFakeCodexRuntime();
     const provider = createCodexProvider({}, fake.runtime);
