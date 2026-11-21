@@ -56,7 +56,7 @@
     "@deltachat/stdio-rpc-server": "2.49.0",
     "@resend/chat-sdk-adapter": "^0.1.1",
     "@types/qrcode": "^1.5.6",
-    "@whiskeysockets/baileys": "7.0.0-rc.9",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
     "better-sqlite3": "13.0.3",
     "chat": "4.41.1",
     "chat-adapter-imessage": "^0.1.1",
