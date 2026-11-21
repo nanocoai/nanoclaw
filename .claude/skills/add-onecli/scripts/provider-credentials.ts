@@ -97,25 +97,25 @@ export function findOneCliCredential(payload: unknown, descriptor: OneCliCredent
   return secret.id as string;
 }
 
-/** Use this installation's management connection, independently of the global OneCLI CLI configuration. */
-export function createOneCliCredentialConnection(
-  descriptor: OneCliCredential,
+/** Requests to this installation's management API for secrets, independently of the global OneCLI CLI configuration. */
+export function oneCliSecretsRequest(
+  name: string,
   url?: string,
   apiKey?: string,
   fetchImpl: typeof fetch = globalThis.fetch,
   root = process.cwd(),
-): OneCliCredentialConnection {
+): (suffix: string, method: string, body?: unknown) => Promise<unknown> {
   // The setup wizard may have written these after src/config was imported.
   const saved = readEnvFile(['ONECLI_URL', 'ONECLI_API_KEY', 'ONECLI_PROJECT_ID'], root);
   url ??= process.env.ONECLI_URL || saved.ONECLI_URL;
   apiKey ??= process.env.ONECLI_API_KEY || saved.ONECLI_API_KEY;
-  if (!url) throw new Error(`Configure ONECLI_URL before connecting the ${descriptor.name} credential.`);
+  if (!url) throw new Error(`Configure ONECLI_URL before connecting the ${name} credential.`);
   const base = new URL(url);
   if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash) {
     throw new Error('ONECLI_URL must be an HTTP(S) gateway URL without embedded credentials, query, or fragment.');
   }
   const projectId = process.env.ONECLI_PROJECT_ID || saved.ONECLI_PROJECT_ID;
-  const request = async (suffix: string, method: string, body?: unknown): Promise<unknown> => {
+  return async (suffix, method, body) => {
     try {
       const response = await fetchImpl(`${base.href.replace(/\/+$/, '')}/v1/secrets${suffix}`, {
         method,
@@ -134,10 +134,21 @@ export function createOneCliCredentialConnection(
       // API responses can include previews of secrets. Never echo them or a
       // transport error, including when a successful write's response is lost.
       throw new Error(
-        `Could not confirm the ${descriptor.name} credential in OneCLI. Check gateway connectivity and management permissions, then retry.`,
+        `Could not confirm the ${name} credential in OneCLI. Check gateway connectivity and management permissions, then retry.`,
       );
     }
   };
+}
+
+/** Use this installation's management connection, independently of the global OneCLI CLI configuration. */
+export function createOneCliCredentialConnection(
+  descriptor: OneCliCredential,
+  url?: string,
+  apiKey?: string,
+  fetchImpl: typeof fetch = globalThis.fetch,
+  root = process.cwd(),
+): OneCliCredentialConnection {
+  const request = oneCliSecretsRequest(descriptor.name, url, apiKey, fetchImpl, root);
   // A host move is explicit and keeps the granted ID. Revalidate the old
   // descriptor on the final read so an edit during prompts cannot be adopted.
   let expected = descriptor;

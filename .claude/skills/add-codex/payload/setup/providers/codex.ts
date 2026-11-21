@@ -53,9 +53,30 @@ function ensureAnswer<T>(value: T | symbol): T {
 export async function runCodexAuthStep(): Promise<void> {
   const store = await getCredentialStore();
   if (await store.has('codex')) {
-    p.log.success(brandBody('Your OpenAI account is already connected.'));
-    setupLog.step('auth', 'skipped', 0, { REASON: 'openai-secret-already-present', PROVIDER: 'codex' });
-    return;
+    // A stored sign-in that expired or was revoked looks the same as a working
+    // one, so someone at a terminal can replace it. Without one, keep it.
+    const choice =
+      process.stdin.isTTY && process.stdout.isTTY
+        ? ensureAnswer(
+            await brightSelect<'keep' | 'reconnect'>({
+              message: 'Your OpenAI account is already connected. Keep it, or sign in again?',
+              options: [
+                { value: 'keep', label: 'Keep it', hint: 'Codex keeps using the stored sign-in' },
+                {
+                  value: 'reconnect',
+                  label: 'Sign in again',
+                  hint: 'replaces a sign-in that expired or was revoked',
+                },
+              ],
+            }),
+          )
+        : 'keep';
+    if (choice === 'keep') {
+      p.log.success(brandBody('Your OpenAI account is already connected.'));
+      setupLog.step('auth', 'skipped', 0, { REASON: 'openai-secret-already-present', PROVIDER: 'codex' });
+      return;
+    }
+    setupLog.userInput('codex_existing_account', choice);
   }
 
   const method = ensureAnswer(

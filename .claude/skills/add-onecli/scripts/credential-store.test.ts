@@ -136,3 +136,37 @@ it('Codex: after the one-time match found nothing, a later same-named key is not
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+it('Codex: signing in again updates the recorded secret in place, so no second Codex secret is created', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-replace-'));
+  const file = path.join(root, 'data', 'onecli', 'provider-credentials.json');
+  const fetchMock = vi.fn(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  vi.stubEnv('ONECLI_URL', 'http://onecli.test:10254');
+  vi.stubEnv('ONECLI_API_KEY', 'fixture-management-key');
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ providers: { codex: ['sec-codex'] }, matched: ['codex'] }));
+    exec.mockReturnValue(
+      JSON.stringify({
+        data: [{ id: 'sec-codex', name: 'Codex', type: 'openai', hostPattern: 'chatgpt.com', valueSource: 'inline' }],
+      }),
+    );
+    const login = path.join(root, 'auth.json');
+    fs.writeFileSync(login, '{"tokens":{"refresh_token":"fixture-refresh"}}\n');
+
+    await createCredentialStore(root).save('codex', { kind: 'oauth', file: login });
+
+    expect(exec.mock.calls.some(([, args]) => args[1] === 'create')).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('http://onecli.test:10254/v1/secrets/sec-codex');
+    expect(init.method).toBe('PATCH');
+    expect(JSON.parse(String(init.body))).toEqual({ value: '{"tokens":{"refresh_token":"fixture-refresh"}}' });
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).providers).toEqual({ codex: ['sec-codex'] });
+  } finally {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
