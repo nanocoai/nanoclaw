@@ -396,6 +396,29 @@ describe('CodexProvider active turns', () => {
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'final answer' }]);
   });
 
+  it('never reports text from a stream that broke before its message completed', async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+    await waitFor(() => fake.startCalls.length === 1);
+    fake.notify('item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', itemId: 'm1', delta: 'half a ' });
+    fake.notify('error', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      willRetry: true,
+      error: { message: 'Reconnecting... 1/5', additionalDetails: 'stream disconnected' },
+    });
+    await waitFor(() => events.some((event) => event.type === 'progress'));
+    query.end();
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', items: [] } });
+    await collect;
+
+    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: null }]);
+  });
+
   for (const willRetry of [false, undefined]) {
     it(`ends the turn on an error Codex will not retry (willRetry: ${willRetry})`, async () => {
       const fake = createFakeCodexRuntime();
@@ -406,7 +429,8 @@ describe('CodexProvider active turns', () => {
       const collect = collectEvents(query.events, events);
       await waitFor(() => fake.startCalls.length === 1);
       fake.notify('error', { threadId: 'thread-1', turnId: 'turn-1', willRetry, error: { message: 'quota exceeded' } });
-      await collect.catch(() => {});
+      // The runner treats the turn as failed only when iteration throws.
+      await expect(collect).rejects.toThrow('quota exceeded');
 
       expect(events.filter((event) => event.type === 'error')).toEqual([
         { type: 'error', message: 'quota exceeded', retryable: false, classification: 'quota' },
