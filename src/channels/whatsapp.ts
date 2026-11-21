@@ -113,6 +113,21 @@ function optionToCommand(option: string): string {
   return '/' + option.toLowerCase().replace(/\s+/g, '-');
 }
 
+/**
+ * The slash command a reply starts with, lowercased, or undefined. Only the first
+ * word counts, so a note after the command ("/approve\nthanks") still answers. RTL
+ * keyboards put invisible bidi marks (U+200E/U+200F, U+202A-U+202E, U+2066-U+2069)
+ * before "/", so those are dropped first.
+ */
+export function slashCommandOf(text: string): string | undefined {
+  const first =
+    text
+      .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+      .trim()
+      .split(/\s+/)[0] ?? '';
+  return first.startsWith('/') && first.length > 1 ? first.toLowerCase() : undefined;
+}
+
 type PendingQuestion = { questionId: string; options: NormalizedOption[] };
 /**
  * What the host did with an answer, read loosely: this file is copied onto cores
@@ -136,8 +151,9 @@ export function answerPendingQuestion(
   confirm: (option: NormalizedOption) => Promise<unknown>,
 ): Promise<{ questionId: string; value: string; outcome: AnswerOutcome }> | undefined {
   const pending = pendingQuestions.get(chatJid);
-  if (!pending || !text.startsWith('/')) return undefined;
-  const cmd = text.trim().toLowerCase();
+  if (!pending) return undefined;
+  const cmd = slashCommandOf(text);
+  if (!cmd) return undefined;
   const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
   if (!matched) return undefined;
   return (async () => {
