@@ -35,6 +35,7 @@ import {
   type DriverCapabilities,
   type MountPolicy,
   type NetworkAccessIntent,
+  type NetworkReconcile,
   type MountSpec,
   type SessionDriver,
   type SessionEvent,
@@ -53,12 +54,34 @@ export interface DockerDriverOptions extends MountPolicy {
   cli?: Cli;
   /** Docker network the session's containers attach to, resolved by the overlay. */
   networkArgsFor?: (spec: SessionSpec) => string[];
-  reconcileNetworkAccess?: (access: NetworkAccessIntent) => void;
+  /** `attachedNetworks` lists the adopted container's networks, read only when called. */
+  reconcileNetworkAccess?: (access: NetworkAccessIntent, attachedNetworks: () => string[]) => NetworkReconcile | void;
 }
 
 /** Watch reconnection: bounded backoff, never give up (see `watchSessions`). */
 const WATCH_RECOVERY_BASE_MS = 1_000;
 const WATCH_RECOVERY_MAX_MS = 30_000;
+
+/**
+ * Docker rejects `docker rm --force` while its own `--rm` auto-removal is still
+ * running ("removal of container X is already in progress"). Only that error
+ * is waited out: sleep between probes (budget below), then give up.
+ * The budget is elapsed time on a monotonic clock, counted from Docker's first
+ * "already in progress" reply. Each probe and retry call inside it gets the time
+ * left as its timeout, but never under REMOVAL_PROBE_FLOOR_MS (1s), so the probe
+ * at the deadline still runs. A Docker that honours timeouts therefore ends the
+ * wait at most about two floors past the budget (a last inspect, then one
+ * `rm --force`). The first `rm` before that reply keeps the normal CLI timeout,
+ * and since `Cli.run` is synchronous, a Docker process that ignores the timeout
+ * kill can still overrun.
+ */
+const REMOVAL_IN_PROGRESS = /removal of container .+ is already in progress/i;
+const CONTAINER_NOT_FOUND = /No such (container|object)/i;
+const NETWORK_NOT_FOUND = /No such network|network .* not found/i;
+const REMOVAL_WAIT_BUDGET_MS = 15_000;
+const REMOVAL_WAIT_INTERVALS_MS = [200, 400, 800, 1_000];
+/** Minimum timeout for any Docker call inside the removal wait, so the probe at the deadline still runs (`execFileSync` treats 0 as no timeout). */
+const REMOVAL_PROBE_FLOOR_MS = 1_000;
 
 interface InstallWatch {
   subscribers: Set<(event: SessionEvent) => void>;
@@ -103,8 +126,8 @@ export class DockerSessionDriver implements SessionDriver {
     ensureDockerRunning(this.#cli);
   }
 
-  async reconcileNetworkAccess(access: NetworkAccessIntent): Promise<void> {
-    this.opts.reconcileNetworkAccess?.(access);
+  async reconcileNetworkAccess(access: NetworkAccessIntent, handle: SessionHandle): Promise<NetworkReconcile | void> {
+    return this.opts.reconcileNetworkAccess?.(access, () => attachedNetworks(this.#cli, handle.name));
   }
 
   async prepare(spec: SessionSpec): Promise<SessionHandle> {
@@ -126,9 +149,28 @@ export class DockerSessionDriver implements SessionDriver {
 
     this.#remember(spec.key);
 
-    // Idempotency on key: an existing live container for this key is the session.
+    // Idempotency on key: an existing live container for this key is the session,
+    // unless it is not on the network this spec would give it, or that cannot be
+    // checked — then it is replaced, never left running unsupervised.
     if (this.#existingSession(name, spec.key)) {
-      return new DockerHandle(spec.key, name, this.#cli, null, auxiliaryNames, privateNetwork, this.#emit);
+      let verdict: NetworkReconcile | void = 'restart';
+      try {
+        verdict = this.opts.reconcileNetworkAccess?.(spec.networkAccess, () => attachedNetworks(this.#cli, name));
+      } catch (error) {
+        log.warn('Network check failed for existing container', { containerName: name, error });
+      }
+      if (verdict !== 'restart') {
+        return new DockerHandle(spec.key, name, this.#cli, null, auxiliaryNames, privateNetwork, this.#emit);
+      }
+      log.warn('Replacing existing container that is not on the required network', { containerName: name });
+      // A bare remove is enough: no host runtime supervises this container (a
+      // registered one makes the wake a no-op before prepare), and an
+      // off-network verdict only comes for targets without auxiliary containers.
+      try {
+        this.#cli.run(['rm', '--force', name]);
+      } catch (error) {
+        throw normalizeDockerError(error);
+      }
     }
 
     // Composition existsSync-gates mount sources; re-check here so a
@@ -466,6 +508,11 @@ class DockerHandle implements SessionHandle {
   #proc: SupervisedProcess | null = null;
   /** Log hygiene only — events are never intent-filtered here (that is the hub's job). */
   #stopping = false;
+  /** In-flight teardown only; cleared when it settles. Progress lives in the flags below. */
+  #stopPromise: Promise<void> | undefined;
+  #mainContainerRemoved = false;
+  readonly #removedAuxiliaryNames = new Set<string>();
+  #privateNetworkRemoved = false;
   /** Exit code the attach process observed; undefined until it exits. */
   #attachExitCode: number | null | undefined;
   readonly #stderrTail: string[] = [];
@@ -573,24 +620,50 @@ class DockerHandle implements SessionHandle {
    * Full teardown. That this blocks until the container is gone is an
    * implementation behavior (it happens to serialize workspace single-writer
    * during termination), not a contract guarantee — see `SessionHandle.stop`.
+   *
+   * Concurrent stops share one in-flight teardown: the removal poll yields, and
+   * a second teardown could finish first and see a successor reuse this
+   * container name. Completed steps are remembered per handle, so a later stop
+   * never re-runs them and a failed teardown retries only what is left
+   * (container-runner's finishAndResolve relies on that). The memory is
+   * per-handle only: handles built independently by listSessions do not share it.
    */
-  async stop(reason: string): Promise<void> {
-    this.#stopping = true;
-    log.info('Stopping session container', { containerName: this.name, reason });
-    const grace = String(this.pendingSpec?.stopGraceSeconds ?? 1);
-    try {
-      this.cli.run(['stop', '-t', grace, this.name]);
-    } catch {
-      // Already gone, or the daemon refused: fall back to killing the attach
-      // process so supervision never hangs waiting for an exit that cannot come.
-      this.#proc?.kill();
+  stop(reason: string): Promise<void> {
+    if (this.#stopPromise) {
+      log.info('Stopping session container', { containerName: this.name, reason, joined: true });
+      return this.#stopPromise;
     }
-    try {
-      this.cli.run(['rm', '--force', this.name]);
-    } catch (error) {
-      this.#confirmRemoved(this.name, error);
+    log.info('Stopping session container', { containerName: this.name, reason });
+    const teardown = this.#teardown().finally(() => {
+      if (this.#stopPromise === teardown) this.#stopPromise = undefined;
+    });
+    this.#stopPromise = teardown;
+    return teardown;
+  }
+
+  async #teardown(): Promise<void> {
+    this.#stopping = true;
+    if (this.#mainContainerRemoved) {
+      // Removed by an earlier stop; the attach process may still be alive.
+      if (this.#proc && this.#attachExitCode === undefined) this.#proc.kill();
+    } else {
+      const grace = String(this.pendingSpec?.stopGraceSeconds ?? 1);
+      try {
+        this.cli.run(['stop', '-t', grace, this.name]);
+      } catch {
+        // Already gone, or the daemon refused: fall back to killing the attach
+        // process so supervision never hangs waiting for an exit that cannot come.
+        this.#proc?.kill();
+      }
+      try {
+        this.cli.run(['rm', '--force', this.name]);
+      } catch (error) {
+        await this.#removeAfterFailure(this.name, error);
+      }
+      this.#mainContainerRemoved = true;
     }
     for (const auxiliary of [...this.auxiliaryNames].reverse()) {
+      if (this.#removedAuxiliaryNames.has(auxiliary)) continue;
       try {
         this.cli.run(['stop', '-t', '1', auxiliary]);
       } catch {
@@ -599,27 +672,87 @@ class DockerHandle implements SessionHandle {
       try {
         this.cli.run(['rm', '--force', auxiliary]);
       } catch (error) {
-        this.#confirmRemoved(auxiliary, error);
+        await this.#removeAfterFailure(auxiliary, error);
       }
+      this.#removedAuxiliaryNames.add(auxiliary);
     }
-    if (this.privateNetwork) {
+    if (this.privateNetwork && !this.#privateNetworkRemoved) {
       try {
         this.cli.run(['network', 'rm', this.privateNetwork]);
-      } catch {
-        /* already gone or still in use */
+      } catch (error) {
+        if (!NETWORK_NOT_FOUND.test(errorMessage(error))) {
+          throw this.#teardownError(error, { networkName: this.privateNetwork });
+        }
       }
+      this.#privateNetworkRemoved = true;
     }
   }
 
-  /** A successful daemon query distinguishes auto-removal from a daemon outage. */
-  #confirmRemoved(name: string, error: unknown): void {
+  /** Container status from an exact-name inspect; `null` when the container is gone. Other failures throw. */
+  #probeStatus(name: string, timeoutMs?: number): string | null {
     try {
-      const remaining = this.cli.run(['ps', '-a', '--filter', `name=^/${name}$`, '--format', '{{.Names}}']);
-      if (!remaining.trim()) return;
+      return this.cli
+        .run(['inspect', '--type', 'container', '--format', '{{.State.Status}}', name], { timeoutMs })
+        .trim();
     } catch (probeError) {
-      throw normalizeDockerError(probeError);
+      if (CONTAINER_NOT_FOUND.test(errorMessage(probeError))) return null;
+      throw this.#teardownError(probeError, { containerName: name });
     }
-    throw normalizeDockerError(error);
+  }
+
+  /**
+   * `rm --force` failed. Only Docker's "removal already in progress" error is
+   * waited out; anything else gets a single existence probe and no sleep.
+   */
+  async #removeAfterFailure(name: string, error: unknown): Promise<void> {
+    const message = errorMessage(error);
+    if (CONTAINER_NOT_FOUND.test(message)) return;
+    if (!REMOVAL_IN_PROGRESS.test(message)) {
+      if (this.#probeStatus(name) === null) return;
+      throw this.#teardownError(error, { containerName: name });
+    }
+    // Monotonic elapsed-time deadline: Docker call latency counts against the budget, not just the sleeps.
+    const deadline = performance.now() + REMOVAL_WAIT_BUDGET_MS;
+    const callTimeoutMs = () => Math.max(Math.ceil(deadline - performance.now()), REMOVAL_PROBE_FLOOR_MS);
+    for (let step = 0; ; step++) {
+      const status = this.#probeStatus(name, callTimeoutMs());
+      if (status === null) return;
+      if (status !== 'removing') {
+        try {
+          this.cli.run(['rm', '--force', name], { timeoutMs: callTimeoutMs() });
+          return;
+        } catch (retryError) {
+          const retryMessage = errorMessage(retryError);
+          if (CONTAINER_NOT_FOUND.test(retryMessage)) return;
+          if (!REMOVAL_IN_PROGRESS.test(retryMessage)) throw this.#teardownError(retryError, { containerName: name });
+        }
+      }
+      // The loop also probes once at the full budget, so a removal that finishes during the last sleep is seen.
+      const remainingMs = deadline - performance.now();
+      if (remainingMs <= 0) break;
+      const scheduledInterval = REMOVAL_WAIT_INTERVALS_MS[Math.min(step, REMOVAL_WAIT_INTERVALS_MS.length - 1)]!;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(scheduledInterval, remainingMs)));
+    }
+    throw this.#teardownError(error, { containerName: name });
+  }
+
+  /**
+   * `unknown` drops Docker's words from the error, so log them under the same
+   * opaqueRef, naming the container or network that failed.
+   */
+  #teardownError(
+    error: unknown,
+    resource: { containerName: string } | { networkName: string },
+  ): Error & SessionFailure {
+    const failure = normalizeDockerError(error);
+    if (failure.kind === 'unknown') {
+      log.warn('Docker teardown failed', {
+        ...resource,
+        opaqueRef: failure.opaqueRef,
+        dockerError: errorMessage(error).trim(),
+      });
+    }
+    return failure;
   }
 
   /** `docker exec` against this session's container — see `SessionExecSpec`. */
@@ -741,6 +874,21 @@ function auxiliaryContainerNames(cli: Cli, key: SessionKey): string[] {
   }
 }
 
+/** The networks a container is attached to. Throws when they cannot be read. */
+function attachedNetworks(cli: Cli, name: string): string[] {
+  try {
+    const out = cli.run([
+      'inspect',
+      '--format',
+      '{{json .NetworkSettings.Networks}}',
+      validateRuntimeName(name, 'container'),
+    ]);
+    return Object.keys((JSON.parse(out) as Record<string, unknown> | null) ?? {});
+  } catch (error) {
+    throw normalizeDockerError(error);
+  }
+}
+
 function containerCreateArgs(
   spec: SessionSpec,
   container: ContainerSpec,
@@ -819,6 +967,10 @@ export function envArgs(env: Record<string, string>): string[] {
 
 export function labelArgs(labels: Record<string, string>): string[] {
   return Object.entries(labels).flatMap(([k, v]) => ['--label', `${k}=${v}`]);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function normalizeDockerError(error: unknown): Error & SessionFailure {

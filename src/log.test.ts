@@ -190,3 +190,20 @@ describe('log never throws on unserializable data', () => {
     expect(written.join('')).toContain('[log data unserializable]');
   });
 });
+
+describe('log err formatting', () => {
+  it('prints the opaqueRef a session failure carries, so a raw driver error can be matched to it', () => {
+    let out = '';
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      out += String(chunk);
+      return true;
+    });
+    const err = Object.assign(new Error('session realization failed: unknown'), {
+      kind: 'unknown',
+      opaqueRef: 'docker-1700000000000',
+    });
+    log.error('Failed to stop session', { err });
+    vi.restoreAllMocks();
+    expect(out).toContain('opaqueRef: "docker-1700000000000"');
+  });
+});

@@ -49,11 +49,13 @@ async function post(path: string, body: string): Promise<Response> {
 
 beforeEach(() => {
   process.env.WEBHOOK_PORT = String(PORT);
+  process.env.WEBHOOK_HOST = '127.0.0.1';
 });
 
 afterEach(async () => {
   await stopWebhookServer();
   delete process.env.WEBHOOK_PORT;
+  delete process.env.WEBHOOK_HOST;
 });
 
 describe('registerWebhookAdapter — route/handler split', () => {
@@ -65,6 +67,7 @@ describe('registerWebhookAdapter — route/handler split', () => {
     expect(res.status).toBe(200);
     expect(getWebhookStatus()).toEqual({
       id: res.headers.get('x-nanoclaw-webhook-id'),
+      host: '127.0.0.1',
       port: PORT,
       paths: ['/webhook/slack'],
     });

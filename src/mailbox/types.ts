@@ -82,14 +82,20 @@ export interface MailboxHistoryMessage {
   timestamp: string;
   kind: string;
   content: string;
+  /** Outbound only: the platform's id for the delivered message, when known. */
+  platformMessageId?: string;
 }
 
 export interface MailboxTimelineMessage {
   timestamp: string;
   content: string;
+  /** The platform's id for the message, when known. Lets a read of the platform's history skip it. */
+  platformMessageId?: string;
 }
 
 /** Host-visible inbound mailbox behavior. Storage layout and lifecycle are implementation-private. */
+export type WakeEvidence = 'woken' | 'chatter' | 'none';
+
 export interface InboundMailbox {
   setRouting(routing: SessionRouting): void;
   replaceDestinations(entries: Destination[]): void;
@@ -106,6 +112,8 @@ export interface InboundMailbox {
   getMostRecentPeerSourceSessionId(peerAgentGroupId: string): string | null;
   /** True once another agent has messaged this session, answered or not. */
   hasMessagesFromOtherAgents(selfAgentGroupId: string): boolean;
+  /** Whether anything woke this session, or it holds only silent chat (echoes ignored). */
+  wakeEvidence(): WakeEvidence;
   insertTask(task: Task): Promise<void>;
   cancelTask(taskId?: string): number;
   pauseTask(taskId: string): number;
@@ -123,8 +131,10 @@ export interface InboundMailbox {
    * the completed original — one durable step. Split writes tear on a crash:
    * an inserted next occurrence with the original's recurrence intact
    * re-clones the series on the following tick (duplicate runs), while the
-   * reverse order silently kills the series. Durable when the promise
-   * resolves, like insertTask.
+   * reverse order silently kills the series. The same step drops the content
+   * of the series' older finished occurrences, so a series keeps one copy of
+   * its payload instead of one per run. Durable when the promise resolves,
+   * like insertTask.
    */
   armNextTask(originalId: string, task: Task): Promise<void>;
   countLiveTasks(): number;

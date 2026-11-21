@@ -12,6 +12,8 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
+import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
+
 vi.mock('./container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
   isContainerRunning: vi.fn().mockReturnValue(false),
@@ -26,7 +28,17 @@ vi.mock('./config.js', async () => {
 
 const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
-import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
+// The split-reply tests below run a real Chat SDK bridge, which imports the webhook server.
+vi.mock('./webhook-server.js', () => ({ registerWebhookAdapter: vi.fn() }));
+
+import {
+  initTestDb,
+  closeDb,
+  runMigrations,
+  createAgentGroup,
+  createMessagingGroup,
+  getPendingQuestion,
+} from './db/index.js';
 import { getDeliveredIds } from './mailbox/sqlite/session-db.js';
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { resolveSession, resolveTaskSession, withMailboxSession } from './session-manager.js';
@@ -36,7 +48,13 @@ import {
   registerPostDeliveryHook,
   setDeliveryAdapter,
 } from './delivery.js';
-import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
+import {
+  createChannelDeliveryAdapter,
+  initChannelAdapters,
+  registerChannelAdapter,
+  teardownChannelAdapters,
+} from './channels/channel-registry.js';
+import { createChatSdkBridge } from './channels/chat-sdk-bridge.js';
 import { createDestination } from './modules/agent-to-agent/db/agent-destinations.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { log } from './log.js';
@@ -68,12 +86,12 @@ async function seedAgentAndChannel(): Promise<void> {
   });
 }
 
-function insertOutbound(agentGroupId: string, sessionId: string, msgId: string): void {
+function insertOutbound(agentGroupId: string, sessionId: string, msgId: string, text = 'hello'): void {
   const db = new Database(outboundDbPath(agentGroupId, sessionId));
   db.prepare(
     `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
      VALUES (?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?)`,
-  ).run(msgId, JSON.stringify({ text: 'hello' }));
+  ).run(msgId, JSON.stringify({ text }));
   db.close();
 }
 
@@ -258,6 +276,26 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     expect(delivered.has('out-flaky')).toBe(true);
   });
 
+  it('gives the adapter a delivery id of session and row id, the same on the retry, so a split reply can resume', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-split');
+
+    const ids: Array<string | undefined> = [];
+    setDeliveryAdapter({
+      async deliver(_channelType, _platformId, _threadId, _kind, _content, _files, _instance, deliveryId) {
+        ids.push(deliveryId);
+        if (ids.length === 1) throw new Error('part 3 failed');
+        return 'plat-msg-1';
+      },
+    });
+
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+
+    expect(ids).toEqual([`${session.id}:out-split`, `${session.id}:out-split`]);
+  });
+
   it('does not acknowledge a message when no channel adapter is registered (#2995)', async () => {
     // Regression: the real bridge used to return undefined when the exact
     // adapter lookup missed, and drainSession marked the row delivered with
@@ -284,8 +322,7 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // The row must end as status='failed', never 'delivered'
     const deliveryDb = new Database(inboundDbPath('ag-1', session.id), { readonly: true });
     const row = deliveryDb.prepare('SELECT * FROM delivered WHERE message_out_id = ?').get('out-offline') as
-      | { status: string; platform_message_id: string | null }
-      | undefined;
+      { status: string; platform_message_id: string | null } | undefined;
     deliveryDb.close();
     expect(row).toBeDefined();
     expect(row!.status).toBe('failed');
@@ -317,6 +354,100 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // Attempt 3 — not called, message already delivered
     await deliverSessionMessages(session);
     expect(callCount).toBe(2);
+  });
+});
+
+describe('deliverSessionMessages — a split reply through the real bridge', () => {
+  // Three parts under a limit of 12: each paragraph fits, no two fit together.
+  const TEXT = 'first part\n\nsecond part\n\nthird part';
+
+  /** Starts a real Chat SDK bridge as the telegram channel, over a fake platform that records each post. */
+  async function startSplitChannel(): Promise<{ posts: string[] }> {
+    const posts: string[] = [];
+    const adapter = {
+      name: 'telegram',
+      initialize: async () => {},
+      postMessage: async (threadId: string, message: AdapterPostableMessage): Promise<RawMessage<unknown>> => {
+        posts.push((message as { markdown: string }).markdown);
+        return { id: `plat-${posts.length}`, threadId, raw: {} };
+      },
+    } as unknown as Adapter;
+    registerChannelAdapter('telegram', {
+      factory: () => createChatSdkBridge({ adapter, supportsThreads: false, maxTextLength: 12 }),
+    });
+    await initChannelAdapters(() => ({
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    }));
+    setDeliveryAdapter(createChannelDeliveryAdapter());
+    return { posts };
+  }
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await teardownChannelAdapters();
+  });
+
+  it('two sessions whose outbound rows share an id each post their whole reply', async () => {
+    // A row id is unique only within one session's mailbox.
+    await seedAgentAndChannel();
+    await createAgentGroup({
+      id: 'ag-2',
+      name: 'Second Agent',
+      folder: 'second-agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    const { session: first } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const { session: second } = await resolveSession('ag-2', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', first.id, 'out-same', TEXT);
+    insertOutbound('ag-2', second.id, 'out-same', TEXT);
+    const { posts } = await startSplitChannel();
+
+    await deliverSessionMessages(first);
+    await deliverSessionMessages(second);
+
+    const parts = ['first part', 'second part', 'third part'];
+    expect(posts).toEqual([...parts, ...parts]);
+  });
+
+  it('a failed delivery ack after every part landed: the retry posts nothing more and acks with part 1 id', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-ack', TEXT);
+    const { posts } = await startSplitChannel();
+
+    // The host's own ack, markDelivered, fails once after the send succeeded.
+    const store = getAgentMailbox();
+    const openSession = store.session.bind(store);
+    let ackFailures = 1;
+    vi.spyOn(store, 'session').mockImplementation((key, action) =>
+      openSession(key, (mailbox) =>
+        action({
+          ...mailbox,
+          markDelivered: (id, platformId) => {
+            if (ackFailures-- > 0) throw new Error('ack failed');
+            return mailbox.markDelivered(id, platformId);
+          },
+        }),
+      ),
+    );
+
+    await deliverSessionMessages(session);
+    expect(posts).toEqual(['first part', 'second part', 'third part']);
+    expect(await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds().has('out-ack'))).toBe(
+      false,
+    );
+
+    await deliverSessionMessages(session);
+    expect(posts).toEqual(['first part', 'second part', 'third part']);
+    const deliveryDb = new Database(inboundDbPath('ag-1', session.id), { readonly: true });
+    const row = deliveryDb.prepare('SELECT * FROM delivered WHERE message_out_id = ?').get('out-ack') as
+      { status: string; platform_message_id: string | null } | undefined;
+    deliveryDb.close();
+    expect(row).toMatchObject({ status: 'delivered', platform_message_id: 'plat-1' });
   });
 });
 
@@ -764,5 +895,7 @@ describe('deliverSessionMessages — agent questions', () => {
     await deliverSessionMessages(session);
     expect(delivered).toContainEqual({ ...question, fromAgent: true });
     expect(delivered).toContainEqual({ text: 'hello' });
+    // The body is stored too, so the answered card can keep it.
+    expect((await getPendingQuestion('q-1'))?.question).toBe('Which?');
   });
 });

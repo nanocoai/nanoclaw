@@ -11,6 +11,7 @@ import {
   hostProxyEnv,
   nodeHonorsEnvProxy,
   renderLaunchdPlist,
+  renderNohupWrapper,
   renderSystemdUnit,
   serviceProxyEnvPath,
   tightenCredentialFiles,
@@ -109,6 +110,56 @@ describe('systemd unit generation', () => {
   it('keeps the standard PATH order for /usr/bin/node', () => {
     const unit = renderSystemdUnit('/home/user/nanoclaw', '/usr/bin/node', '/home/user', false);
     expect(unit).toContain('Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/user/.local/bin\n');
+  });
+});
+
+// The service does not inherit the setup shell, so without this the host would
+// fall back to the path hash for its image and labels.
+describe('install id in the service environment', () => {
+  const saved = process.env.NANOCLAW_INSTALL_ID;
+  const plist = () => renderLaunchdPlist('/Users/u/nanoclaw', '/opt/homebrew/bin/node', '/Users/u');
+  const unit = () => renderSystemdUnit('/home/user/nanoclaw', '/usr/bin/node', '/home/user', false);
+  const wrapper = () => renderNohupWrapper('/home/user/nanoclaw', '/usr/bin/node');
+  afterEach(() => {
+    if (saved === undefined) delete process.env.NANOCLAW_INSTALL_ID;
+    else process.env.NANOCLAW_INSTALL_ID = saved;
+  });
+
+  it('gives the launchd host the id its label uses', () => {
+    process.env.NANOCLAW_INSTALL_ID = 'prod-eks_1';
+    expect(plist()).toContain('<string>com.nanoclaw-v2-prod-eks_1</string>');
+    expect(plist()).toContain('<key>NANOCLAW_INSTALL_ID</key>\n        <string>prod-eks_1</string>');
+  });
+
+  it('gives the systemd host the id its unit name uses', () => {
+    process.env.NANOCLAW_INSTALL_ID = 'prod-eks_1';
+    expect(unit()).toContain('Environment=NANOCLAW_INSTALL_ID=prod-eks_1\n');
+  });
+
+  // restart.sh and the updater run the wrapper from shells that may not set it.
+  it('gives the nohup host the id before it starts', () => {
+    process.env.NANOCLAW_INSTALL_ID = 'prod-eks_1';
+    const lines = wrapper().split('\n');
+    const exported = lines.indexOf("export NANOCLAW_INSTALL_ID='prod-eks_1'");
+    expect(exported).toBeGreaterThan(-1);
+    expect(exported).toBeLessThan(lines.findIndex((line) => line.startsWith('setsid nohup ')));
+  });
+
+  it('writes the same files for an empty id as for none', () => {
+    delete process.env.NANOCLAW_INSTALL_ID;
+    const [unsetPlist, unsetUnit, unsetWrapper] = [plist(), unit(), wrapper()];
+    process.env.NANOCLAW_INSTALL_ID = '';
+    expect(plist()).toBe(unsetPlist);
+    expect(unit()).toBe(unsetUnit);
+    expect(wrapper()).toBe(unsetWrapper);
+    expect(unsetPlist + unsetUnit + unsetWrapper).not.toContain('NANOCLAW_INSTALL_ID');
+  });
+
+  it('refuses an invalid id', () => {
+    process.env.NANOCLAW_INSTALL_ID = 'UPPER';
+    expect(plist).toThrow(/NANOCLAW_INSTALL_ID/);
+    expect(unit).toThrow(/NANOCLAW_INSTALL_ID/);
+    expect(wrapper).toThrow(/NANOCLAW_INSTALL_ID/);
   });
 });
 

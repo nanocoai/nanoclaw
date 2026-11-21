@@ -17,7 +17,10 @@
  *   WHATSAPP_AUTH_PAIRING_CODE   { CODE: "XXXX-XXXX" }        — one-shot
  *   WHATSAPP_AUTH                { STATUS: success }          — terminal
  *                                { STATUS: skipped, AUTH_DIR, REASON }
+ *                                  only when creds.json holds a finished pairing
  *                                { STATUS: failed, ERROR: <reason> }
+ *                                  also sent at once, with the status code,
+ *                                  for any close that nothing reconnects (405)
  *
  * STATUS values are kept in the runner's vocabulary (success/skipped/failed)
  * so `spawnStep` recognises them and sets `ok` correctly; WhatsApp-specific
@@ -55,7 +58,30 @@ function phoneFromId(id?: string | null): string {
   return id.split(':')[0].split('@')[0];
 }
 
-/** Read the linked number from saved credentials (the skipped / already-authed path). */
+/** Saved credentials. Only a finished pairing writes `account`. */
+type SavedCreds = { account?: unknown; me?: { id?: string } };
+
+/**
+ * One read of creds.json: the saved creds, 'missing', 'not-json' (for example
+ * while a write is rewriting it), or the error that kept it from being opened.
+ * Decide from one read only.
+ */
+function readSavedCreds(): SavedCreds | 'missing' | 'not-json' | NodeJS.ErrnoException {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(path.join(AUTH_DIR, 'creds.json'), 'utf-8');
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : (err as NodeJS.ErrnoException);
+  }
+  try {
+    const creds: unknown = JSON.parse(raw);
+    return typeof creds === 'object' && creds !== null ? (creds as SavedCreds) : {};
+  } catch {
+    return 'not-json';
+  }
+}
+
+/** Read the linked number from saved credentials (the success path's fallback). */
 function readAuthedPhoneFromFile(): string {
   try {
     const raw = fs.readFileSync(path.join(AUTH_DIR, 'creds.json'), 'utf-8');
@@ -102,6 +128,18 @@ function printPairingCard(code: string): void {
   );
 }
 
+/** True once `work` settles; false if it is still running after `ms`. */
+function settled(work: Promise<unknown>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    const done = (): void => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    void work.then(done, done);
+  });
+}
+
 function parseArgs(args: string[]): { method: AuthMethod; phone?: string } {
   let method: AuthMethod = 'qr';
   let phone: string | undefined;
@@ -135,14 +173,47 @@ function parseArgs(args: string[]): { method: AuthMethod; phone?: string } {
 export async function run(args: string[]): Promise<void> {
   const { method, phone } = parseArgs(args);
 
-  if (fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) {
+  // Baileys rewrites creds.json in place, so a running service can leave it half
+  // written for a moment: read it again, for up to 1 s, before judging it.
+  let saved = readSavedCreds();
+  for (let tries = 0; tries < 5 && saved === 'not-json'; tries++) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    saved = readSavedCreds();
+  }
+  // A file this step can't read may yet hold a link, so never say to clear it.
+  if (saved instanceof Error) {
+    emitStatus('WHATSAPP_AUTH', {
+      STATUS: 'failed',
+      ERROR: `store/auth/creds.json could not be opened (${saved.code ?? saved.message}). Make it readable by the user running setup, then run the step again.`,
+    });
+    process.exit(1);
+  }
+  if (saved === 'not-json') {
+    emitStatus('WHATSAPP_AUTH', {
+      STATUS: 'failed',
+      ERROR:
+        'store/auth/creds.json is not valid JSON (it may be mid-write). Stop the NanoClaw service if it is running, then run the step again.',
+    });
+    process.exit(1);
+  }
+  if (saved !== 'missing' && saved.account) {
     emitStatus('WHATSAPP_AUTH', {
       STATUS: 'skipped',
       REASON: 'already-authenticated',
       AUTH_DIR,
-      PHONE: readAuthedPhoneFromFile(),
+      PHONE: typeof saved.me?.id === 'string' ? phoneFromId(saved.me.id) : '',
     });
     return;
+  }
+  // Creds without `account` are not a link, and can't be reused: a requested pairing
+  // code saves `me`, and Baileys then logs in as that `me` instead of linking.
+  if (saved !== 'missing') {
+    emitStatus('WHATSAPP_AUTH', {
+      STATUS: 'failed',
+      ERROR:
+        'store/auth/ has WhatsApp credentials but no linked device (for example, from a pairing code that was never entered). Clear store/auth/ and run the step again.',
+    });
+    process.exit(1);
   }
 
   // Once, before connecting: a failure is reported as this step's own block,
@@ -187,6 +258,11 @@ export async function run(args: string[]): Promise<void> {
 
     async function connectSocket(isReconnect = false): Promise<void> {
       const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+      // Only a finished pairing saves `account` (a requested pairing code already
+      // saves `me`), so a 515 reconnect finds it on disk; this socket's own
+      // pairing shows up as isNewLogin below.
+      let paired = Boolean(state.creds.account);
+      let saving: Promise<unknown> = Promise.resolve();
 
       const sock = makeWASocket({
         version,
@@ -218,7 +294,8 @@ export async function run(args: string[]): Promise<void> {
       }
 
       sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, lastDisconnect, qr, isNewLogin } = update;
+        if (isNewLogin) paired = true;
 
         // QR method: render each rotation as plain stdout lines so a streaming
         // parent (hostExecStream) tees the live QR straight to the operator's
@@ -235,8 +312,10 @@ export async function run(args: string[]): Promise<void> {
           sock.end(undefined);
         }
 
-        if (connection === 'close') {
-          const reason = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode;
+        // Our own sock.end() after a successful link closes too; that is not a failure.
+        if (connection === 'close' && !succeeded) {
+          const err = lastDisconnect?.error as { message?: string; output?: { statusCode?: number } } | undefined;
+          const reason = err?.output?.statusCode;
           if (reason === DisconnectReason.loggedOut) {
             clearTimeout(timeout);
             emitStatus('WHATSAPP_AUTH', {
@@ -255,11 +334,49 @@ export async function run(args: string[]): Promise<void> {
             // 515 = stream error after pairing succeeds but before registration
             // completes. Reconnect to finish the handshake.
             connectSocket(true);
+          } else {
+            // Nothing reconnects after any other close (405 = WhatsApp refused this
+            // WhatsApp Web version), so waiting would only end in a misleading timeout.
+            clearTimeout(timeout);
+            const detail = `${reason ?? 'no status'} ${err?.message ?? ''}`.replace(/\s+/g, ' ').trim();
+            const fail = (error: string): void => {
+              emitStatus('WHATSAPP_AUTH', { STATUS: 'failed', ERROR: error });
+              process.exit(1);
+            };
+            if (!paired) {
+              fail(
+                `WhatsApp closed the connection before linking (${detail}). Clear store/auth/ and run the step again.`,
+              );
+            } else {
+              // A paired device stays in store/auth/ for the next run, so once the creds
+              // writes settle (at most 5 s), report what creds.json holds. With a write
+              // still running the file could yet change, so the link is only probably saved.
+              void settled(saving, 5000).then((done) => {
+                const after = `WhatsApp closed the connection after pairing (${detail})`;
+                const saved = readSavedCreds();
+                if (saved === 'not-json' || saved instanceof Error) {
+                  fail(
+                    `${after}, but store/auth/creds.json could not be read. Run the step again to check the saved link.`,
+                  );
+                } else if (saved === 'missing' || !saved.account) {
+                  fail(`${after}, but the link was not saved. Clear store/auth/ and run the step again.`);
+                } else if (done) {
+                  fail(`${after}. The link is saved in store/auth/, so run the step again to use it.`);
+                } else {
+                  fail(
+                    `${after}. The link is probably saved in store/auth/ (a creds write had not finished), so run the step again to use it.`,
+                  );
+                }
+              });
+            }
           }
         }
       });
 
-      sock.ev.on('creds.update', saveCreds);
+      // A close after pairing waits for every write to settle before it reads creds.json.
+      sock.ev.on('creds.update', () => {
+        saving = Promise.allSettled([saving, saveCreds()]);
+      });
     }
 
     connectSocket();

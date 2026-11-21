@@ -231,7 +231,7 @@ describe('apply engine lifecycle', () => {
   });
 
   it('plan marks the unknown step ↳agent and the prompt ? needs-input before any write', () => {
-    const { steps, agentSteps, needsInput } = planSkill(skillDir, root);
+    const { agentSteps, needsInput } = planSkill(skillDir, root);
     expect(agentSteps).toBe(1);
     expect(needsInput).toContain('token');
     expect(existsSync(join(root, 'src/sample.ts'))).toBe(false); // planning mutated nothing
@@ -420,6 +420,36 @@ describe('append at:<marker>', () => {
     await applySkill(askill, aroot, { resolveInput: headless({}), exec: () => {} });
     const lines = readFileSync(join(aroot, 'setup/index.ts'), 'utf8').split('\n').filter(Boolean);
     expect(lines[lines.length - 1]).toBe('// trailing line'); // at EOF, not before the marker
+  });
+
+  it.each([
+    ['at EOF', ''],
+    ['before a marker', ' at:nanoclaw:setup-steps'],
+  ])('adds each line a file lacks, %s, even when the first line is there', async (_where, at) => {
+    const one = "one: () => import('./one.js'),";
+    const two = "two: () => import('./two.js'),";
+    writeFileSync(
+      join(askill, 'SKILL.md'),
+      ['# grown block', `\`\`\`nc:append to:setup/index.ts${at}`, one, two, '```', ''].join('\n'),
+    );
+    // Installed before the block gained its second line.
+    writeFileSync(join(aroot, 'setup/index.ts'), MARKER_FILE.replace('  // <<<', `  ${one}\n  // <<<`));
+    const res = await applySkill(askill, aroot, { mode: 'refresh', exec: () => {} });
+    const lines = readFileSync(join(aroot, 'setup/index.ts'), 'utf8')
+      .split('\n')
+      .map((l) => l.trim());
+    expect([one, two].map((line) => lines.filter((l) => l === line).length)).toEqual([1, 1]);
+    expect(res.journal).toEqual([{ op: 'appended', path: 'setup/index.ts', line: two }]);
+  });
+
+  it('adds the whole block when its first line is absent, even a line the file already has', async () => {
+    writeFileSync(
+      join(askill, 'SKILL.md'),
+      ['# block', '```nc:append to:setup/index.ts', 'const extra = {', 'on: true,', '};', '```', ''].join('\n'),
+    );
+    // MARKER_FILE already closes its STEPS object with `};`.
+    await applySkill(askill, aroot, { exec: () => {} });
+    expect(readFileSync(join(aroot, 'setup/index.ts'), 'utf8').endsWith('const extra = {\non: true,\n};\n')).toBe(true);
   });
 });
 

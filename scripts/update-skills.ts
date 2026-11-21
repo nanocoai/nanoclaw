@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { applySkill, fullyApplied, type DependencyCommandRequest } from './skill-apply.js';
-import { parseDirectives } from './skill-directives.js';
+import { parseDirectives, type Directive } from './skill-directives.js';
 import { pinnedBunVersion } from './provider-contract-verifier.js';
 
 export type InstalledSkillKind = 'channel' | 'provider' | 'gateway';
@@ -86,10 +86,106 @@ function readImports(file: string): string[] {
   return names;
 }
 
+/**
+ * Which installed skill owns each barrel import, read from the skills' own
+ * `append to:<barrel>` directives.
+ *
+ * A skill may append more than one import to a barrel: `add-slack` registers
+ * both `slack.js` and the `slack-a2a-guard.js` companion module. Mapping every
+ * import to its own `add-<name>` skill would demand an `add-slack-a2a-guard`
+ * that does not and should not exist. An import a skill declares belongs to
+ * that skill; only an unclaimed one is attributed to `add-<name>`, which is
+ * what keeps the missing-skill check meaningful for a channel installed
+ * without one.
+ */
+function importOwners(skills: [string, Directive[]][], barrel: string): Map<string, string> {
+  const owners = new Map<string, string>();
+  for (const [skillName, directives] of skills) {
+    for (const directive of directives) {
+      if (directive.kind !== 'append' || path.posix.normalize(String(directive.attrs.to)) !== barrel) continue;
+      for (const line of directive.body) {
+        const match = /^\s*import\s+['"]\.\/([a-z0-9-]+)\.js['"];?\s*$/.exec(line);
+        if (!match) continue;
+        // add-<name> always owns <name>, whichever other skill also declares it.
+        if (!owners.has(match[1]) || skillName === `add-${match[1]}`) owners.set(match[1], skillName);
+      }
+    }
+  }
+  return owners;
+}
+
+/** Every skill's parsed directives, sorted so a contested line resolves the same way on every filesystem. */
+function skillDirectives(root: string): [string, Directive[]][] {
+  const skillsDir = path.join(root, '.claude/skills');
+  if (!fs.existsSync(skillsDir)) return [];
+  return fs
+    .readdirSync(skillsDir)
+    .sort()
+    .flatMap((skillName): [string, Directive[]][] => {
+      const skillFile = path.join(skillsDir, skillName, 'SKILL.md');
+      if (!fs.existsSync(skillFile)) return [];
+      try {
+        return [[skillName, parseDirectives(fs.readFileSync(skillFile, 'utf8'))]];
+      } catch {
+        // A skill we cannot parse simply claims nothing; refresh reports its own
+        // parse failure with a better message than detection could.
+        return [];
+      }
+    });
+}
+
+/**
+ * Skills that copy from the channels branch but add no channel barrel import,
+ * such as slack-agent-flow. Each counts as installed when a line that only it
+ * appends is in its file.
+ */
+function channelCompanions(skills: [string, Directive[]][], barrel: string, root: string): string[] {
+  const appends = (directives: Directive[]) =>
+    directives
+      .filter((d) => d.kind === 'append' && typeof d.attrs.to === 'string' && !d.attrs.when)
+      .flatMap((d) => d.body.map((line) => ({ to: path.posix.normalize(String(d.attrs.to)), line })));
+  const owners = new Map<string, number>();
+  for (const [, directives] of skills) {
+    for (const key of new Set(appends(directives).map(({ to, line }) => `${to}\n${line}`))) {
+      owners.set(key, (owners.get(key) ?? 0) + 1);
+    }
+  }
+  const hasLine = (to: string, line: string) => {
+    const file = path.join(root, to);
+    return (
+      fs.existsSync(file) &&
+      fs
+        .readFileSync(file, 'utf8')
+        .split('\n')
+        .some((l) => l.trim() === line)
+    );
+  };
+  return skills
+    .filter(
+      ([, directives]) =>
+        directives.some((d) => d.kind === 'copy' && d.attrs['from-branch'] === 'channels') &&
+        !appends(directives).some(({ to }) => to === barrel) &&
+        appends(directives).some(({ to, line }) => owners.get(`${to}\n${line}`) === 1 && hasLine(to, line)),
+    )
+    .map(([skillName]) => skillName);
+}
+
 export function detectInstalledSkills(root: string): InstalledSkill[] {
-  const channels = readImports(path.join(root, 'src/channels/index.ts'))
-    .filter((name) => name !== 'cli')
-    .map((name) => ({ name, skillName: `add-${name}`, kind: 'channel' as const }));
+  const channelBarrel = 'src/channels/index.ts';
+  const skills = skillDirectives(root);
+  const owners = importOwners(skills, channelBarrel);
+  // A skill that owns several imports is refreshed once, under its own name.
+  const channelSkills = new Set([
+    ...readImports(path.join(root, channelBarrel))
+      .filter((name) => name !== 'cli')
+      .map((name) => owners.get(name) ?? `add-${name}`),
+    ...channelCompanions(skills, channelBarrel, root),
+  ]);
+  const channels = [...channelSkills].map((skillName) => ({
+    name: skillName.startsWith('add-') ? skillName.slice('add-'.length) : skillName,
+    skillName,
+    kind: 'channel' as const,
+  }));
   const providers = new Set([
     ...readImports(path.join(root, 'src/providers/index.ts')),
     ...readImports(path.join(root, 'container/agent-runner/src/providers/index.ts')),

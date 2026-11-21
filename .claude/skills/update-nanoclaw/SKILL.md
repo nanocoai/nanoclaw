@@ -92,7 +92,8 @@ git archive "$upstream_ref" scripts src/install-slug.ts | tar -x -C "$controller
 
 Channels (`NANOCLAW_UPDATE_CHANNEL` in `.env`; `--channel <name>` overrides it
 once): `stable` (default) = newest annotated `vX.Y.Z` tag; `beta` = newest
-`-rc.N` if newer than stable; `edge` = upstream `main`. Change the default only
+`-beta.N` or `-rc.N` if newer than stable (beta.N < rc.N < the release);
+`edge` = upstream `main`. Change the default only
 with `set-channel` (below), never by editing `.env`.
 
 Default to `merge`. Use `rebase` only when the user explicitly wants linear
@@ -131,6 +132,17 @@ pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" resume \
   --project-root "$PWD" --id "$id"
 ```
 
+Never merge a lockfile (`pnpm-lock.yaml`, `container/agent-runner/bun.lock`)
+by hand. With `merge`, `prepare` regenerates them itself when they are the only
+conflicts (listed under `regeneratedLockfiles`): it starts from upstream's
+lockfile, so a version pinned only in the local lockfile, not in
+`package.json`, becomes upstream's. Tell the user. If other files conflict too,
+resolve and `git add` those, leave the lockfiles alone, and run `resume`
+without committing: it regenerates the lockfiles and commits the merge. With
+`rebase` or `cherry-pick`, check out upstream's copy (`--ours` during a rebase,
+`--theirs` in a cherry-pick), run `pnpm install --lockfile-only` (or
+`bun install --lockfile-only` in `container/agent-runner`), and add it.
+
 Run every transaction command from `$controller_dir`, not from `stageRoot`: a
 cherry-pick stage can still hold the old controller. If `$controller_dir` is
 gone (a reboot clears temp directories), recreate it with the step 1 commands
@@ -156,11 +168,22 @@ and provider, and of the selected gateway when gateway core or that gateway's
 own skill changed. On a skill-only change, a gateway it cannot resolve is
 skipped and named in the validation checks. It commits refreshed payloads in
 the staging branch, installs frozen dependencies, runs the host build and full
-host tests, and runs the container dependency/typecheck leg when Bun is
-available. A provider skill that declares
+host tests, and, when `container/agent-runner` changed, installs its
+dependencies and typechecks it. That leg uses host Bun, or else the exact Bun
+version pinned by `container/Dockerfile` through pnpm. If neither can run, the
+update is not blocked, but the validation checks say the agent-runner source
+was NOT typechecked and why; tell the user. A provider skill that declares
 Bun dependencies does not require Bun on the host: refresh runs the exact Bun
 version pinned by `container/Dockerfile` through pnpm. Any selected skill
 refresh or validation failure blocks cutover and the completion stamp.
+
+A refresh failure names each failed skill and its error, shortened. The full
+text is under `skillRefresh` in:
+
+```bash
+pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" status \
+  --project-root "$PWD" --id "$id"
+```
 
 Fix only failures caused by the staged update, inside `stageRoot`, commit the
 fix, and re-run validation. Do not mutate the live checkout to repair staging.

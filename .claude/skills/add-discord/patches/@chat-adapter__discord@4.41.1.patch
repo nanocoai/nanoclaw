@@ -1,0 +1,21 @@
+diff --git a/dist/index.js b/dist/index.js
+index eb26e8b64d77593219f278f2aed27ceddfc2111c..1ea704079af81656c116e5f0ec4b72534eab5fcc 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -2494,9 +2494,14 @@ var DiscordAdapter = class _DiscordAdapter {
+         this.logger.info("Discord Gateway forwarding event", {
+           type: packet.t
+         });
++        // Snapshot before yielding: discord.js handles this same packet object
++        // in this turn and patches it in place (MessageMentions.js assigns
++        // mention.member.user = mention), which makes it circular. Backport of
++        // vercel/chat 81e1a8c (@chat-adapter/discord 4.42.0).
++        const wire = { ...packet, d: structuredClone(packet.d) };
+         await this.enqueueOrderedForward(
+-          getPacketChannelId(packet),
+-          () => this.forwardRawGatewayPacket(client, webhookUrl, packet)
++          getPacketChannelId(wire),
++          () => this.forwardRawGatewayPacket(client, webhookUrl, wire)
+         );
+       });
+     } else {

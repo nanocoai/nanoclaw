@@ -179,14 +179,7 @@ export interface TaskRecord {
 }
 
 export type MailboxRecordKind =
-  | 'inbound'
-  | 'outbound'
-  | 'processingAck'
-  | 'delivery'
-  | 'destination'
-  | 'sessionRouting'
-  | 'state'
-  | 'container';
+  'inbound' | 'outbound' | 'processingAck' | 'delivery' | 'destination' | 'sessionRouting' | 'state' | 'container';
 
 export interface MailboxRecordByKind {
   inbound: InboundRecord;

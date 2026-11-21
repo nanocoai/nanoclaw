@@ -38,7 +38,10 @@ function safeStringify(v: unknown): string {
 
 function formatErr(err: unknown): string {
   if (err instanceof Error) {
-    return `{ type: "${err.constructor.name}", message: "${err.message}", stack: ${err.stack} }`;
+    // A session failure's opaqueRef is the key a driver logged its raw error under.
+    const ref = (err as { opaqueRef?: unknown }).opaqueRef;
+    const opaqueRef = typeof ref === 'string' ? `, opaqueRef: "${ref}"` : '';
+    return `{ type: "${err.constructor.name}", message: "${err.message}"${opaqueRef}, stack: ${err.stack} }`;
   }
   return safeStringify(err);
 }

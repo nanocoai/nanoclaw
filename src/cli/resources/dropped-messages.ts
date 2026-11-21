@@ -10,7 +10,7 @@ import { registerResource } from '../crud.js';
  * `unknown_sender_public`. A new policy flows through on its own; extend the
  * filter only for a policy that admits before the gate the way `public` does.
  */
-export const DROPPED_MESSAGE_REASONS = [
+const DROPPED_MESSAGE_REASONS = [
   'no_agent_wired',
   'no_agent_engaged',
   ...UNKNOWN_SENDER_POLICIES.filter((policy) => policy !== 'public').map(

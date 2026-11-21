@@ -1,4 +1,9 @@
 import { createProviderCredentialConnection } from './provider-credentials.js';
+import {
+  createdSecretId,
+  hasProviderCredential,
+  recordProviderCredentials,
+} from '../payload/src/gateway-providers/onecli-provider-credentials.js';
 import { getProviderModelEndpoint } from '../../../../src/provider-contracts/index.js';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -14,32 +19,32 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
   return {
     connection: (target) => createProviderCredentialConnection(target, root),
     connectionPaths: true,
+    // Connected means Codex groups will be granted a recorded credential.
     async has(provider) {
       check(provider);
+      let secrets: Array<{ id?: string; name?: string; type?: string }>;
       try {
         const parsed = JSON.parse(
-          execFileSync('onecli', ['secrets', 'list'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
+          execFileSync('onecli', ['secrets', 'list', '--max', '0'], {
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'pipe'],
+          }),
         );
-        return (parsed.data ?? []).some(
-          (s: { name?: string; type?: string; hostPattern?: string }) =>
-            /^(codex|openai)$/i.test(s.name ?? '') ||
-            s.type === 'openai' ||
-            (['api', 'subscription'] as const).some(
-              (kind) => s.hostPattern?.toLowerCase() === new URL(getProviderModelEndpoint(provider, kind)).hostname,
-            ),
-        );
+        secrets = (Array.isArray(parsed) ? parsed : parsed.data) ?? [];
       } catch {
         throw new Error('Cannot read the selected OneCLI vault; check that OneCLI is running.');
       }
+      return hasProviderCredential(path.join(root, 'data'), provider, secrets);
     },
     async save(provider, credential) {
       check(provider);
       const temporary =
         credential.kind === 'api-key' ? fs.mkdtempSync(path.join(os.tmpdir(), 'onecli-codex-')) : undefined;
+      let output: string;
       try {
         const file = credential.kind === 'oauth' ? credential.file : path.join(temporary!, 'key');
         if (credential.kind === 'api-key') fs.writeFileSync(file, credential.value, { mode: 0o600 });
-        execFileSync(
+        output = execFileSync(
           'onecli',
           [
             'secrets',
@@ -54,13 +59,16 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
             new URL(getProviderModelEndpoint(provider, credential.kind === 'api-key' ? 'api' : 'subscription'))
               .hostname,
           ],
-          { stdio: ['ignore', 'pipe', 'pipe'] },
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
         );
       } catch {
         throw new Error('Cannot save Codex credentials in the selected OneCLI vault.');
       } finally {
         if (temporary) fs.rmSync(temporary, { recursive: true, force: true });
       }
+      // New groups get only the recorded model credential; an unparsed id is matched by name at spawn.
+      const id = createdSecretId(output);
+      if (id) await recordProviderCredentials(path.join(root, 'data'), provider, [id]);
     },
   };
 }

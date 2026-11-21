@@ -282,11 +282,13 @@ async function enforceRunningContainerSla(
   if (decision.action === 'ok') return;
 
   if (decision.action === 'kill-ceiling') {
-    log.warn('Killing container past absolute ceiling', {
-      sessionId: session.id,
-      heartbeatAgeMs: decision.heartbeatAgeMs,
-      ceilingMs: decision.ceilingMs,
-    });
+    // Most ceiling kills reap an idle container; warn only when one cuts off a claimed message.
+    const fields = { sessionId: session.id, heartbeatAgeMs: decision.heartbeatAgeMs, ceilingMs: decision.ceilingMs };
+    if (gatedClaims.length === 0) {
+      log.info('Stopping idle container past absolute ceiling', fields);
+    } else {
+      log.warn('Killing container past absolute ceiling', { ...fields, claimsInFlight: gatedClaims.length });
+    }
     killContainer(session.id, 'absolute-ceiling');
     resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
     return;

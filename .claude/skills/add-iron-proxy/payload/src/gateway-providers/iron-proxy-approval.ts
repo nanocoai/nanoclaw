@@ -7,7 +7,7 @@ import * as protoLoader from '@grpc/proto-loader';
 
 import { log } from '../log.js';
 import { gatewayApprovalPresentation } from '../gateway-approval-presentation.js';
-import { normalizeGatewayApprovalSummary } from '../gateway-approval-summary.js';
+import { markedCut, normalizeGatewayApprovalSummary } from '../gateway-approval-summary.js';
 
 import type { GatewayApprovalDecision, GatewayApprovalRequest } from './gateway-provider-registry.js';
 
@@ -82,7 +82,7 @@ function safeRequest(
     const base = new URL(`${scheme}://${host}`);
     const url = new URL(request?.url || '/', base);
     if (url.origin !== base.origin || url.username || url.password || base.username || base.password) return undefined;
-    const requestPath = url.pathname.slice(0, 240) || '/';
+    const requestPath = markedCut(url.pathname, 240) || '/';
     return { method, rawMethod, host, path: requestPath };
   } catch {
     return undefined;
@@ -261,11 +261,11 @@ export class IronProxyApprovalBridge {
       createdAt: createdAt.toISOString(),
       expiresAt: expiresAt.toISOString(),
       summary: {
-        agent: identity.groupName.slice(0, 120),
+        agent: markedCut(identity.groupName, 120),
         action: ['GET', 'HEAD'].includes(request.method)
           ? 'Read from an external service'
           : 'Send a request that may change external data',
-        resource: `${request.method} ${request.host}${request.path}`.slice(0, 600),
+        resource: markedCut(`${request.method} ${request.host}${request.path}`, 600),
         reason: 'No automatic approval rule covers this request. Its exact business action is unavailable.',
       },
       title: 'Network credentials request',

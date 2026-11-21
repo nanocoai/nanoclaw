@@ -5,13 +5,14 @@ export function formatTransportError(e: unknown): string {
   if (msg.includes('ENOENT') || msg.includes('ECONNREFUSED')) {
     // `bin/ncl` cd's to the project root before exec'ing client.ts, so
     // process.cwd() is the install dir — install-slug helpers pick up
-    // the right per-checkout suffix.
+    // the right per-checkout suffix, and it is where the nohup launcher is.
     return [
       `ncl: cannot reach NanoClaw host (${msg}).`,
       `Is the host running? Start it with: pnpm run dev`,
       `Or, if installed as a service:`,
       `  macOS:  launchctl kickstart -k gui/$(id -u)/${getLaunchdLabel()}`,
       `  Linux:  systemctl --user restart ${getSystemdUnit()}`,
+      `  Linux without systemd (e.g. WSL):  bash start-nanoclaw.sh (from ${process.cwd()})`,
       ``,
     ].join('\n');
   }

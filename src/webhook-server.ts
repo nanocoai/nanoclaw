@@ -9,13 +9,15 @@
  * to its owning Chat instance. Raw routes let modules receive non-Chat-SDK
  * webhooks (GitHub, payment providers, health checks) on the same server
  * without editing this file or opening a second port.
+ *
+ * Listens on WEBHOOK_HOST (default 127.0.0.1) and WEBHOOK_PORT (default 3000).
  */
 import http from 'http';
 import { randomUUID } from 'node:crypto';
 
 import type { Chat } from 'chat';
 
-import { getWebhookPort } from './config.js';
+import { getWebhookHost, getWebhookPort } from './config.js';
 import { log } from './log.js';
 
 interface WebhookEntry {
@@ -32,11 +34,12 @@ let server: http.Server | null = null;
 let listenerId: string | null = null;
 
 /** Report only a successfully bound listener owned by this host process. */
-export function getWebhookStatus(): { id: string; port: number; paths: string[] } | null {
+export function getWebhookStatus(): { id: string; host: string; port: number; paths: string[] } | null {
   const address = server?.address();
   if (!server?.listening || !address || typeof address === 'string' || !listenerId) return null;
   return {
     id: listenerId,
+    host: address.address,
     port: address.port,
     paths: [...new Set([...routes.keys(), ...rawRoutes.keys()])].map((p) => `/webhook/${p}`),
   };
@@ -122,6 +125,7 @@ export function registerWebhookHandler(path: string, handler: RawWebhookHandler)
 function ensureServer(): void {
   if (server) return;
 
+  const host = getWebhookHost();
   const port = getWebhookPort();
   const id = randomUUID();
 
@@ -151,7 +155,7 @@ function ensureServer(): void {
         const entry = routes.get(adapterName);
         if (!entry) {
           res.writeHead(404, { 'Content-Type': 'text/plain' });
-          res.end(`Unknown adapter: ${adapterName}`);
+          res.end('Not found');
           return;
         }
 
@@ -182,11 +186,11 @@ function ensureServer(): void {
   listenerId = id;
   candidate.on('error', (err) => {
     if (!candidate.listening && server === candidate) server = null;
-    log.error('Webhook server error', { port, err });
+    log.error('Webhook server error', { host, port, err });
   });
 
-  candidate.listen(port, '0.0.0.0', () => {
-    log.info('Webhook server started', { port, adapters: [...routes.keys()] });
+  candidate.listen(port, host, () => {
+    log.info('Webhook server started', { host, port, adapters: [...routes.keys()] });
   });
 }
 

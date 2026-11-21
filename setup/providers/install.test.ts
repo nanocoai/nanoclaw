@@ -109,7 +109,9 @@ describe('OpenCode setup installation and refresh', () => {
     expect(tree(directory)).toEqual(before);
     expect(fixture.commands).toHaveLength(2);
     expect(fixture.commands[0]).toMatch(/^node -e /);
-    expect(fixture.commands[1]).toBe('rm -f src/opencode-dockerfile.test.ts');
+    expect(fixture.commands[1]).toBe(
+      'rm -f src/opencode-dockerfile.test.ts container/agent-runner/src/providers/opencode.attachments.test.ts',
+    );
   });
 
   it('keeps an installed Codex payload and pins as they are', async () => {
