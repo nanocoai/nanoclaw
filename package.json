@@ -40,10 +40,12 @@
   "dependencies": {
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
+    "agentmail": "0.5.23",
     "better-sqlite3": "13.0.3",
     "chat": "4.41.1",
     "cron-parser": "5.5.0",
     "kleur": "^4.1.5",
+    "svix": "2.3.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

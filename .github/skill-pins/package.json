@@ -31,12 +31,14 @@
     "@types/ws": "8.18.1",
     "@whiskeysockets/baileys": "7.0.0-rc14",
     "agent-browser": "0.27.1",
+    "agentmail": "0.5.23",
     "chat-adapter-imessage": "0.1.1",
     "mcp-remote": "0.1.38",
     "opencode-ai": "1.18.25",
     "pino": "9.6.0",
     "qrcode": "1.5.4",
     "spectrum-ts": "11.0.0",
+    "svix": "2.3.0",
     "vercel": "52.2.1",
     "wechat-ilink-client": "0.1.0",
     "ws": "8.21.3"
@@ -202,6 +204,12 @@
         "container/cli-tools.json"
       ]
     },
+    "agentmail": {
+      "version": "0.5.23",
+      "sources": [
+        ".claude/skills/add-agentmail/SKILL.md code block"
+      ]
+    },
     "chat-adapter-imessage": {
       "version": "0.1.1",
       "sources": [
@@ -238,6 +246,12 @@
       "version": "11.0.0",
       "sources": [
         ".claude/skills/add-imessage/SKILL.md nc:dep when:backend=hosted"
+      ]
+    },
+    "svix": {
+      "version": "2.3.0",
+      "sources": [
+        ".claude/skills/add-agentmail/SKILL.md code block"
       ]
     },
     "vercel": {
