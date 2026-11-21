@@ -47,21 +47,23 @@ async function replaceableSecret(
   if (!recorded.length) return undefined;
   const listed = (await request()('', 'GET')) as SecretSummary[] | { data?: SecretSummary[] };
   const mine = (Array.isArray(listed) ? listed : (listed.data ?? [])).filter(
-    (s) =>
-      typeof s.id === 'string' &&
-      recorded.includes(s.id) &&
-      s.type === 'openai' &&
-      (s.valueSource === undefined || s.valueSource === 'inline'),
+    (s) => typeof s.id === 'string' && recorded.includes(s.id),
   );
   const sameHost = mine.filter((s) => s.hostPattern === host);
-  // Two logins holding one refresh token invalidate each other, so never fill both.
+  // Groups get every recorded secret, so two on one host compete; and two
+  // logins holding one refresh token invalidate each other. Fill neither.
   if (sameHost.length > 1) {
     throw new Error(
       `Several recorded Codex secrets use ${host} (${sameHost.map((s) => s.id).join(', ')}). Delete all but one in OneCLI, then sign in again.`,
     );
   }
-  return (sameHost[0] ?? (mine.length === 1 ? mine[0] : undefined))?.id;
+  const target = sameHost[0] ?? (mine.length === 1 ? mine[0] : undefined);
+  const inlineLogin =
+    target?.type === 'openai' && (target.valueSource === undefined || target.valueSource === 'inline');
+  return inlineLogin ? target.id : undefined;
 }
+
+const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.trim() !== '';
 
 /** OneCLI files a ChatGPT login without both tokens as an API key, so a partial one must not replace a working login. */
 function chatGptLogin(file: string): string {
@@ -72,7 +74,7 @@ function chatGptLogin(file: string): string {
   } catch {
     tokens = undefined;
   }
-  if (typeof tokens?.access_token !== 'string' || typeof tokens.refresh_token !== 'string') {
+  if (!nonEmpty(tokens?.access_token) || !nonEmpty(tokens?.refresh_token)) {
     throw new Error('Codex login did not produce a complete ChatGPT session.');
   }
   return value;

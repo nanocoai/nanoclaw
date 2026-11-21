@@ -25,7 +25,13 @@ it('passes API credentials in a private temporary file, never in argv, and remov
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     expect(args).not.toContain('fixture-key');
   });
-  await createCredentialStore().save('codex', { kind: 'api-key', value: 'fixture-key' });
+  // Never this checkout: a live install's record would send the save to its real vault.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-argv-'));
+  try {
+    await createCredentialStore(root).save('codex', { kind: 'api-key', value: 'fixture-key' });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
   expect(fs.existsSync(file)).toBe(false);
 });
 it('counts only credentials Codex groups will be granted, records them, and fails explicitly without a vault', async () => {
@@ -183,7 +189,7 @@ describe('Codex: signing in again', () => {
     expect(JSON.parse(fs.readFileSync(record, 'utf8')).providers).toEqual({ codex: ['sec-codex'] });
   });
 
-  it('moves the only recorded secret to an API key, through the same connection', async () => {
+  it('replaces the only recorded secret with an API key, through the same connection', async () => {
     await save({ kind: 'api-key', value: 'fixture-key' });
 
     expect(exec).not.toHaveBeenCalled();
@@ -205,10 +211,26 @@ describe('Codex: signing in again', () => {
     expect(exec).not.toHaveBeenCalled();
   });
 
-  it('never replaces a login with a ChatGPT session missing a token', async () => {
-    await expect(
-      save({ kind: 'oauth', file: loginFile('{"tokens":{"refresh_token":"fixture-refresh"}}') }),
-    ).rejects.toThrow('Codex login did not produce a complete ChatGPT session.');
+  it.each(['{"tokens":{"refresh_token":"fixture-refresh"}}', '{"tokens":{"access_token":"","refresh_token":""}}'])(
+    'never replaces a login with a ChatGPT session missing a token: %s',
+    async (partial) => {
+      await expect(save({ kind: 'oauth', file: loginFile(partial) })).rejects.toThrow(
+        'Codex login did not produce a complete ChatGPT session.',
+      );
+      expect(calls.map((c) => c.method)).toEqual(['GET']);
+    },
+  );
+
+  it('counts every recorded secret on the host as competing, whatever its type', async () => {
+    fs.writeFileSync(record, JSON.stringify({ providers: { codex: ['sec-a', 'sec-b'] }, matched: ['codex'] }));
+    listed = [
+      { id: 'sec-a', name: 'Codex', type: 'openai', hostPattern: 'chatgpt.com', valueSource: 'inline' },
+      { id: 'sec-b', name: 'OpenAI', type: 'generic', hostPattern: 'chatgpt.com' },
+    ];
+
+    await expect(save({ kind: 'oauth', file: loginFile(login) })).rejects.toThrow(
+      'Several recorded Codex secrets use chatgpt.com (sec-a, sec-b)',
+    );
     expect(calls.map((c) => c.method)).toEqual(['GET']);
   });
 
