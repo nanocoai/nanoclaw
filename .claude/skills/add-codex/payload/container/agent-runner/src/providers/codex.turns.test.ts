@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 
 import { CodexProvider, codexImageSavedNote, type CodexRuntimeDeps } from './codex.js';
 import type { AppServer, JsonRpcNotification, TurnParams } from './codex-app-server.js';
@@ -117,6 +117,205 @@ describe('CodexProvider active turns', () => {
     expect(events.some((event) => event.type === 'result')).toBe(false);
     expect(fake.killed).toBe(true);
   });
+
+  it('keeps a retrying turn alive and steers into it until it completes', async () => {
+    const fake = createFakeCodexRuntime();
+    const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events).catch((error: Error) => error);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    fake.notify('error', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      error: { message: 'stream disconnected' },
+      willRetry: true,
+    });
+    await sleep(20);
+
+    expect(fake.killed).toBe(false);
+    expect(events.some((event) => event.type === 'error' || event.type === 'result')).toBe(false);
+    query.push('follow-up during retry');
+    await waitFor(() => fake.steerCalls.length === 1);
+    query.end();
+    fake.completeTurn('recovered answer');
+
+    expect(await collect).toBeUndefined();
+    expect(fake.startCalls).toHaveLength(1);
+    expect(fake.steerCalls).toEqual([{ threadId: 'thread-1', turnId: 'turn-1', inputText: 'follow-up during retry' }]);
+    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'recovered answer' }]);
+    expect(fake.killed).toBe(true);
+  });
+
+  it('reports a terminal turn failure after a transient error without starting another turn', async () => {
+    const fake = createFakeCodexRuntime();
+    const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    query.end();
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events).catch((error: Error) => error);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    fake.notify('error', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      error: { message: 'stream disconnected' },
+      willRetry: true,
+    });
+    await sleep(20);
+    fake.notify('turn/completed', {
+      threadId: 'thread-1',
+      turn: {
+        status: 'failed',
+        error: { message: 'terminal failure', additionalDetails: 'retry exhausted' },
+        items: [],
+      },
+    });
+
+    expect((await collect)?.message).toBe('terminal failure: retry exhausted');
+    expect(events.filter((event) => event.type === 'error')).toEqual([
+      { type: 'error', message: 'terminal failure: retry exhausted', retryable: false, classification: undefined },
+    ]);
+    expect(events.some((event) => event.type === 'result')).toBe(false);
+    expect(fake.startCalls).toHaveLength(1);
+    expect(fake.killed).toBe(true);
+  });
+
+  it.each([false, undefined, 'true'])(
+    'keeps nonretrying error notifications terminal (willRetry=%s)',
+    async (willRetry) => {
+      const fake = createFakeCodexRuntime();
+      const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+      const events: ProviderEvent[] = [];
+      const collect = collectEvents(query.events, events).catch((error: Error) => error);
+
+      await waitFor(() => fake.startCalls.length === 1);
+      fake.notify('error', {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        error: { message: 'permission denied' },
+        ...(willRetry === undefined ? {} : { willRetry }),
+      });
+
+      expect((await collect)?.message).toBe('permission denied');
+      expect(events.filter((event) => event.type === 'error')).toEqual([
+        { type: 'error', message: 'permission denied', retryable: false, classification: 'sandbox' },
+      ]);
+      expect(events.some((event) => event.type === 'result')).toBe(false);
+      expect(fake.killed).toBe(true);
+    },
+  );
+
+  it('can abort a turn while the app-server is retrying', async () => {
+    const fake = createFakeCodexRuntime();
+    const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events).catch((error: Error) => error);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    fake.notify('error', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      error: { message: 'stream disconnected' },
+      willRetry: true,
+    });
+    await sleep(20);
+    query.abort();
+
+    expect(await collect).toBeUndefined();
+    expect(fake.interruptCalls).toEqual([{ threadId: 'thread-1', turnId: 'turn-1' }]);
+    expect(events.some((event) => event.type === 'error' || event.type === 'result')).toBe(false);
+    expect(fake.startCalls).toHaveLength(1);
+    expect(fake.killed).toBe(true);
+  });
+
+  it('keeps the existing turn deadline active during native retries', async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    let fireDeadline: (() => void) | undefined;
+    const deadlines: unknown[] = [];
+    const cleared: unknown[] = [];
+    const timeout = spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) => {
+      const handle = originalSetTimeout(callback, ms, ...args);
+      if (ms === 10 * 60 * 1000) {
+        deadlines.push(handle);
+        fireDeadline = () => callback(...args);
+      }
+      return handle;
+    });
+    const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((handle) => {
+      cleared.push(handle);
+      return originalClearTimeout(handle);
+    });
+    const fake = createFakeCodexRuntime();
+    const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events).catch((error: Error) => error);
+    try {
+      await waitFor(() => fake.startCalls.length === 1);
+      fake.notify('error', {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        error: { message: 'stream disconnected' },
+        willRetry: true,
+      });
+      await sleep(20);
+      // One deadline, armed at turn start: the retry neither restarts nor cancels it.
+      expect(deadlines).toHaveLength(1);
+      expect(cleared).not.toContain(deadlines[0]);
+      fireDeadline!();
+
+      expect((await collect)?.message).toBe('Turn timed out after 600000ms');
+      expect(events.filter((event) => event.type === 'error')).toHaveLength(1);
+      expect(events.some((event) => event.type === 'result')).toBe(false);
+      expect(fake.startCalls).toHaveLength(1);
+      expect(fake.killed).toBe(true);
+    } finally {
+      timeout.mockRestore();
+      clear.mockRestore();
+      query.abort();
+      await collect;
+    }
+  });
+
+  it('does not report earlier partial text as success when an interrupted turn has no final items', async () => {
+    const fake = createFakeCodexRuntime();
+    const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    query.end();
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events).catch((error: Error) => error);
+
+    await waitFor(() => fake.startCalls.length === 1);
+    fake.notify('item/agentMessage/delta', { delta: 'partial answer' });
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { status: 'interrupted', error: null, items: [] } });
+
+    expect((await collect)?.message).toBe('Codex turn interrupted');
+    expect(events.filter((event) => event.type === 'error')).toHaveLength(1);
+    expect(events.some((event) => event.type === 'result')).toBe(false);
+    expect(fake.killed).toBe(true);
+  });
+
+  it.each(['failed', 'inProgress', undefined, null, 'unexpected', 1])(
+    'does not report success for a noncompleted or malformed completion status (%s)',
+    async (status) => {
+      const fake = createFakeCodexRuntime();
+      const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+      query.end();
+      const events: ProviderEvent[] = [];
+      const collect = collectEvents(query.events, events).catch((error: Error) => error);
+
+      await waitFor(() => fake.startCalls.length === 1);
+      // failed/null is a nullable-schema control, not a claimed native emission.
+      fake.notify('turn/completed', {
+        threadId: 'thread-1',
+        turn: { status, error: null, items: [{ type: 'agentMessage', text: 'partial answer' }] },
+      });
+
+      expect((await collect)?.message).toBe('Codex turn failed');
+      expect(events.filter((event) => event.type === 'error')).toHaveLength(1);
+      expect(events.some((event) => event.type === 'result')).toBe(false);
+      expect(fake.killed).toBe(true);
+    },
+  );
 
   it('threads the configured model and effort into the turn', async () => {
     const fake = createFakeCodexRuntime();
@@ -315,7 +514,7 @@ describe('CodexProvider active turns', () => {
     });
     query.end();
     // Codex sends turn.items only when the turn produced an agent message.
-    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', items: [] } });
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } });
     await collect;
 
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: null }]);
@@ -341,7 +540,7 @@ describe('CodexProvider active turns', () => {
     });
     query.end();
     // Empty items, so the result can only come from the parent's own deltas.
-    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', items: [] } });
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } });
     await collect;
 
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'parent answer' }]);
@@ -362,6 +561,116 @@ describe('CodexProvider active turns', () => {
 
     expect(fake.interruptCalls).toEqual([{ threadId: 'thread-1', turnId: 'turn-1' }]);
   });
+
+  it('keeps the turn open through an error Codex says it will retry', async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+    await waitFor(() => fake.startCalls.length === 1);
+
+    // A transient stream error: Codex retries it itself and the turn goes on.
+    fake.notify('error', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      willRetry: true,
+      error: { message: 'Reconnecting... 1/5', additionalDetails: 'stream disconnected' },
+    });
+    await waitFor(() => events.some((event) => event.type === 'progress'));
+
+    // The turn is still the active one: a follow-up steers into it.
+    query.push('follow-up');
+    await waitFor(() => fake.steerCalls.length === 1);
+    query.end();
+    fake.completeTurn('final answer');
+    await collect;
+
+    expect(fake.steerCalls).toEqual([{ threadId: 'thread-1', turnId: 'turn-1', inputText: 'follow-up' }]);
+    expect(events.filter((event) => event.type === 'error')).toHaveLength(0);
+    expect(events.filter((event) => event.type === 'progress')).toEqual([
+      { type: 'progress', message: 'Codex retrying: Reconnecting... 1/5: stream disconnected' },
+    ]);
+    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'final answer' }]);
+  });
+
+  it('keeps completed messages but drops text a broken stream left unfinished', async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+    await waitFor(() => fake.startCalls.length === 1);
+    fake.notify('item/completed', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: { type: 'agentMessage', text: 'first message' },
+    });
+    fake.notify('item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', itemId: 'm2', delta: 'half a ' });
+    fake.notify('error', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      willRetry: true,
+      error: { message: 'Reconnecting... 1/5', additionalDetails: 'stream disconnected' },
+    });
+    await waitFor(() => events.some((event) => event.type === 'progress'));
+    query.end();
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } });
+    await collect;
+
+    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'first message' }]);
+  });
+
+  it("leaves the parent's text alone when a sub-agent's stream error is retried", async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+    await waitFor(() => fake.startCalls.length === 1);
+    fake.notify('item/agentMessage/delta', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'm1',
+      delta: 'parent answer',
+    });
+    fake.notify('error', {
+      threadId: 'child-thread',
+      turnId: 'child-turn',
+      willRetry: true,
+      error: { message: 'Reconnecting... 1/5', additionalDetails: 'stream disconnected' },
+    });
+    await sleep(20);
+    query.end();
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } });
+    await collect;
+
+    expect(events.some((event) => event.type === 'progress')).toBe(false);
+    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'parent answer' }]);
+  });
+
+  for (const willRetry of [false, undefined]) {
+    it(`ends the turn on an error Codex will not retry (willRetry: ${willRetry})`, async () => {
+      const fake = createFakeCodexRuntime();
+      const provider = createCodexProvider({}, fake.runtime);
+      const query = provider.query({ prompt: 'prompt', cwd: '/workspace/agent' });
+      const events: ProviderEvent[] = [];
+
+      const collect = collectEvents(query.events, events);
+      await waitFor(() => fake.startCalls.length === 1);
+      fake.notify('error', { threadId: 'thread-1', turnId: 'turn-1', willRetry, error: { message: 'quota exceeded' } });
+      // The runner treats the turn as failed only when iteration throws.
+      await expect(collect).rejects.toThrow('quota exceeded');
+
+      expect(events.filter((event) => event.type === 'error')).toEqual([
+        { type: 'error', message: 'quota exceeded', retryable: false, classification: 'quota' },
+      ]);
+      expect(events.some((event) => event.type === 'result')).toBe(false);
+    });
+  }
 
   it('ends the turn immediately with the real cause when the app-server dies mid-turn', async () => {
     const fake = createFakeCodexRuntime();
@@ -433,7 +742,10 @@ function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
     notify,
     completeTurn(text: string) {
       const threadId = startCalls[startCalls.length - 1]?.threadId;
-      notify('turn/completed', { threadId, turn: { items: [{ type: 'agentMessage', text }] } });
+      notify('turn/completed', {
+        threadId,
+        turn: { status: 'completed', error: null, items: [{ type: 'agentMessage', text }] },
+      });
     },
     crashServer(err: Error) {
       for (const h of [...server.exitHandlers]) h(err);

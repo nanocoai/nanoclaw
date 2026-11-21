@@ -281,6 +281,7 @@ async function* runOneTurn(
 ): AsyncGenerator<ProviderEvent> {
   const state: { error: Error | null } = { error: null };
   let resultText = '';
+  let completedText = '';
   let turnDone = false;
   let turnId: string | null = null;
 
@@ -349,7 +350,7 @@ async function* runOneTurn(
       }
       case 'item/completed': {
         const item = params.item as { type?: string; text?: string } | undefined;
-        if (item?.type === 'agentMessage' && item.text) resultText = item.text;
+        if (item?.type === 'agentMessage' && item.text) resultText = completedText = item.text;
         break;
       }
       case 'thread/status/changed': {
@@ -360,13 +361,25 @@ async function* runOneTurn(
       case 'error': {
         const err = params.error as { message?: string; additionalDetails?: string | null } | undefined;
         const msg = [err?.message, err?.additionalDetails].filter(Boolean).join(': ') || 'Codex turn failed';
+        // willRetry: Codex retries a transient stream error itself and the
+        // turn goes on, so it must not end the turn. Text the broken stream
+        // left unfinished is dropped: only completed messages may be the result.
+        if (params.willRetry === true) {
+          resultText = completedText;
+          buffer.push({ type: 'progress', message: `Codex retrying: ${msg}` });
+          break;
+        }
         state.error = new Error(msg);
         finishTurn();
         break;
       }
       case 'turn/completed': {
         const turn = params.turn as
-          | { error?: { message?: string; additionalDetails?: string | null } | null; items?: unknown[] }
+          | {
+              status?: unknown;
+              error?: { message?: string; additionalDetails?: string | null } | null;
+              items?: unknown[];
+            }
           | undefined;
         const agentMessage = turn?.items
           ?.filter((item): item is { type: string; text?: string } => typeof item === 'object' && item !== null)
@@ -376,6 +389,8 @@ async function* runOneTurn(
           const msg =
             [turn.error.message, turn.error.additionalDetails].filter(Boolean).join(': ') || 'Codex turn failed';
           state.error = new Error(msg);
+        } else if (turn?.status !== 'completed') {
+          state.error = new Error(turn?.status === 'interrupted' ? 'Codex turn interrupted' : 'Codex turn failed');
         }
         finishTurn();
         break;
