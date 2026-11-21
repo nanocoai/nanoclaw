@@ -635,6 +635,78 @@ describe('CodexProvider active turns', () => {
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'first message' }]);
   });
 
+  // Codex counts only a final answer or an unphased message as the turn's answer.
+  for (const { phase, text, result } of [
+    { phase: 'final_answer', text: 'The sample is fine.', result: 'The sample is fine.' },
+    { phase: null, text: 'The sample is fine.', result: 'The sample is fine.' },
+    { phase: 'commentary', text: 'Checking the sample.', result: null },
+    { phase: 'partial_answer', text: 'The sample', result: null },
+    { phase: 'final_answer', text: '  ', result: null },
+  ]) {
+    it(`after a retry, a completed ${phase} message ${JSON.stringify(text)} gives result ${result}`, async () => {
+      const fake = createFakeCodexRuntime();
+      const provider = createCodexProvider({}, fake.runtime);
+      const query = provider.query({ prompt: 'prompt', cwd: '/workspace/agent' });
+      const events: ProviderEvent[] = [];
+
+      const collect = collectEvents(query.events, events);
+      await waitFor(() => fake.startCalls.length === 1);
+      fake.notify('item/completed', {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: { type: 'agentMessage', text, phase },
+      });
+      fake.notify('error', {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        willRetry: true,
+        error: { message: 'Reconnecting... 1/5', additionalDetails: 'stream disconnected' },
+      });
+      await waitFor(() => events.some((event) => event.type === 'progress'));
+      query.end();
+      // The recovered stream ends the turn without another message.
+      fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } });
+      await collect;
+
+      expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: result }]);
+    });
+  }
+
+  it('keeps the last answer across a retry when commentary followed it', async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+    await waitFor(() => fake.startCalls.length === 1);
+    for (const [phase, text] of [
+      ['final_answer', 'First answer.'],
+      [null, 'The sample is fine.'],
+      ['commentary', 'Checking one more thing.'],
+    ]) {
+      fake.notify('item/completed', {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: { type: 'agentMessage', text, phase },
+      });
+    }
+    fake.notify('error', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      willRetry: true,
+      error: { message: 'Reconnecting... 1/5', additionalDetails: 'stream disconnected' },
+    });
+    await waitFor(() => events.some((event) => event.type === 'progress'));
+    query.end();
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } });
+    await collect;
+
+    expect(events.filter((event) => event.type === 'result')).toEqual([
+      { type: 'result', text: 'The sample is fine.' },
+    ]);
+  });
+
   it("leaves the parent's text alone when a sub-agent's stream error is retried", async () => {
     const fake = createFakeCodexRuntime();
     const provider = createCodexProvider({}, fake.runtime);

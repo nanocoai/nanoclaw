@@ -349,8 +349,14 @@ async function* runOneTurn(
         break;
       }
       case 'item/completed': {
-        const item = params.item as { type?: string; text?: string } | undefined;
-        if (item?.type === 'agentMessage' && item.text) resultText = completedText = item.text;
+        const item = params.item as { type?: string; text?: string; phase?: string | null } | undefined;
+        if (item?.type === 'agentMessage' && item.text) {
+          resultText = item.text;
+          // Codex's own rule for a turn's answer (app-server thread_state.rs):
+          // a final answer or an unphased message with text. Commentary such as
+          // "Checking the sample." must not survive a retry as the reply.
+          if ((item.phase == null || item.phase === 'final_answer') && item.text.trim()) completedText = item.text;
+        }
         break;
       }
       case 'thread/status/changed': {
