@@ -190,7 +190,7 @@ export async function restampAgentFromTemplate(
     const target = contextTarget(groupDir, name);
     const segments = name.split('/');
     const leaf = segments.pop()!;
-    const live = fs.existsSync(target) && fs.statSync(target).isFile() ? fs.readFileSync(target, 'utf-8') : undefined;
+    const live = readRegularFile(target)?.bytes.toString('utf-8');
     const wanted = newContext.get(name);
     if (wanted !== undefined) {
       if (live === wanted) {
@@ -465,8 +465,15 @@ function listFilesRecursive(root: string): Map<string, string> {
   for (const entry of fs.readdirSync(root, { recursive: true }) as string[]) {
     const abs = path.join(root, entry);
     // lstat: symlinks are never plugin content, so a (possibly dangling) link
-    // compares as an absent file instead of crashing the plan.
-    if (fs.lstatSync(abs).isFile()) out.set(entry.split(path.sep).join('/'), abs);
+    // compares as an absent file instead of crashing the plan. So does an
+    // entry the container removed, or put under a non-folder, since the listing.
+    let stat: fs.Stats | undefined;
+    try {
+      stat = fs.lstatSync(abs);
+    } catch (err) {
+      if (!NOT_A_REGULAR_FILE.has((err as NodeJS.ErrnoException).code ?? '')) throw err;
+    }
+    if (stat?.isFile()) out.set(entry.split(path.sep).join('/'), abs);
   }
   return out;
 }
@@ -494,10 +501,37 @@ function dirsEqual(a: string, b: string): boolean {
   for (const [rel, absA] of filesA) {
     const absB = filesB.get(rel);
     if (absB === undefined) return false;
-    if ((fs.lstatSync(absA).mode & 0o111) !== (fs.lstatSync(absB).mode & 0o111)) return false;
-    if (!fs.readFileSync(absA).equals(fs.readFileSync(absB))) return false;
+    const fileA = readRegularFile(absA);
+    const fileB = readRegularFile(absB);
+    if (fileA === undefined || fileB === undefined) return false;
+    if ((fileA.mode & 0o111) !== (fileB.mode & 0o111) || !fileA.bytes.equals(fileB.bytes)) return false;
   }
   return true;
+}
+
+// Open errors that mean the name is not a regular file (or its folder is not a folder).
+const NOT_A_REGULAR_FILE = new Set(['ENOENT', 'ENOTDIR', 'ELOOP', 'ENXIO', 'EOPNOTSUPP']);
+
+/**
+ * The bytes and mode of `file`, or undefined unless it is a regular file.
+ * Group and overlay folders are container-writable, so the name can change
+ * after any earlier check: open without following a symlink or blocking on a
+ * FIFO, and take both from that one descriptor.
+ */
+function readRegularFile(file: string): { bytes: Buffer; mode: number } | undefined {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch (err) {
+    if (NOT_A_REGULAR_FILE.has((err as NodeJS.ErrnoException).code ?? '')) return undefined;
+    throw err;
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    return stat.isFile() ? { bytes: fs.readFileSync(fd), mode: stat.mode } : undefined;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 interface TaskSeriesMatch {
