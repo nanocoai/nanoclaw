@@ -22,6 +22,10 @@ You don't have to think in skills while you're building. **Edit the code directl
 
 The only rule worth remembering: **a change isn't really part of your fork until it's a skill**, because that's the form that survives an upgrade.
 
+## Instructions for your coding agent
+
+Don't edit the root `CLAUDE.md` to tell your coding agent about your fork — it's upstream's file and every update would conflict on it. Put your fork's instructions in `CLAUDE.fork.md` at the repo root and commit it. `CLAUDE.md` imports that file when it exists (Claude Code loads it automatically), and tells agents that read `AGENTS.md` to read it too. Upstream never ships `CLAUDE.fork.md`, so it's always yours.
+
 ## Upgrading
 
 Always upgrade by running `/update-nanoclaw`. **Don't just `git pull`.** The
