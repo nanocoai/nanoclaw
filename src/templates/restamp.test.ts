@@ -174,18 +174,21 @@ function replaceDirectoryAfterOpen(directory: string, outside: string): string {
   return moved;
 }
 
-// After 3 s, writes the marker (argv[2]), then retries opening the FIFO (argv[1])
-// for writing until that works: that frees a read stuck on it, even one that
-// started late.
+// After 3 s, writes the marker (argv[2]), then opens the FIFO (argv[1]) for
+// writing every 50 ms: each open frees a read stuck on it, even one that
+// started late or shared the FIFO with another reader. Stops when the test
+// kills it, the FIFO is gone, or after 30 s.
 const UNBLOCK_FIFO = `
   const fs = require('fs');
   const [fifo, marker] = process.argv.slice(1);
+  const deadline = Date.now() + 33000;
   const unblock = () => {
     try {
       fs.closeSync(fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK));
     } catch (err) {
-      if (err.code === 'ENXIO') setTimeout(unblock, 50);
+      if (err.code !== 'ENXIO') return;
     }
+    if (Date.now() < deadline) setTimeout(unblock, 50);
   };
   setTimeout(() => {
     fs.writeFileSync(marker, '');
@@ -491,6 +494,21 @@ describe('restampAgentFromTemplate', () => {
     expect(run.swapped).toBe(true);
     expect(run.stuck, 'the plan blocked on a FIFO').toBe(false);
     expect(change(run.result.changes, 'skill', 'widget').action).toBe('update');
+  });
+
+  it('compares a skill overlay whose file disappears after the listing', async () => {
+    const g = await stamp();
+    writeTemplateV2();
+    const overlay = path.dirname(overlaySkill(g.id, 'widget'));
+    const readdirSync = fs.readdirSync as (...args: unknown[]) => unknown;
+    vi.spyOn(fs, 'readdirSync').mockImplementation(((dir: unknown, ...rest: unknown[]) => {
+      const entries = readdirSync(dir, ...rest) as string[];
+      return dir === overlay ? [...entries, 'gone.md'] : entries;
+    }) as never);
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+    expect(change(plan.changes, 'skill', 'widget').action).toBe('update');
   });
 
   it('refuses to write context through a symlinked directory', async () => {
