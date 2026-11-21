@@ -61,6 +61,55 @@ async function openMailbox(_g: string, sessionId: string, fn: (mailbox: unknown)
     },
   });
 }
+/** Sessions whose timeline the backfill read, in order. */
+const timelineReads: string[] = [];
+let brokenTimeline = false;
+/**
+ * The recorded timeline (timeline.ts) as the siblings' fixtures describe it,
+ * with the read's own rules: only the sessions asked for, newer than the
+ * floor, the newest `limit`, oldest first. Which rows are recorded at all is
+ * timeline.test.ts's (real DB).
+ */
+vi.mock('./timeline.js', () => ({
+  readConversationTimeline: async (_g: string, _mg: string, ids: string[], sinceIso: string, limit: number) => {
+    if (brokenTimeline) throw new Error('central DB unavailable');
+    timelineReads.push(...ids);
+    const rows = ids.flatMap((id) => {
+      const sibling = siblings[id];
+      const out: Array<Record<string, unknown>> = [];
+      if (sibling?.root) {
+        const c = JSON.parse(sibling.root.content) as Record<string, string>;
+        if (c.sender !== 'system' && c.senderId !== 'system')
+          out.push({
+            sessionId: id,
+            timestamp: sibling.root.timestamp,
+            sender: c.sender ?? 'user',
+            senderId: c.senderId ?? '',
+            text: c.text,
+            self: false,
+            platformMessageId: c.id,
+          });
+      }
+      for (const o of sibling?.outbound ?? []) {
+        const c = JSON.parse(o.content) as Record<string, string>;
+        out.push({
+          sessionId: id,
+          timestamp: o.timestamp,
+          sender: 'Pete',
+          senderId: 'ag-1',
+          text: c.text,
+          self: true,
+          platformMessageId: (o as { platformMessageId?: string }).platformMessageId,
+        });
+      }
+      return out;
+    });
+    return rows
+      .filter((r) => (r.timestamp as string) > sinceIso)
+      .sort((a, b) => ((a.timestamp as string) < (b.timestamp as string) ? -1 : 1))
+      .slice(-limit);
+  },
+}));
 vi.mock('../../db/sessions.js', () => ({
   getRecentConversationSessions: async () => recentSessions,
   findSessionForAgent: async () => topLevelSession,
@@ -113,6 +162,8 @@ beforeEach(() => {
   opened.length = 0;
   inboundSql.length = 0;
   outboundSql.length = 0;
+  timelineReads.length = 0;
+  brokenTimeline = false;
   targetHistory = [];
   missingMailboxes = new Set();
   brokenMailboxes = new Set();
@@ -153,8 +204,9 @@ describe('backfillSession — new session', () => {
     expect((second.echo as Record<string, unknown>).label).toBe('this DM, just before this conversation');
     expect(second.self).toBe(true);
     expect(first.self).toBeUndefined();
-    // One read session per source, one write session for the target — never one per row.
-    expect(opened).toEqual(['sess-old', 'sess-new']);
+    // One timeline read for the sources, one write session for the target; no sibling mailbox opened.
+    expect(timelineReads).toEqual(['sess-old']);
+    expect(opened).toEqual(['sess-new']);
   });
 
   it('keeps the platform id on the rows it seeds, so a later read of the platform can skip them', async () => {
@@ -169,10 +221,11 @@ describe('backfillSession — new session', () => {
     expect(written.map((w) => JSON.parse(w.content as string).platformMessageId)).toEqual(['P0', 'P1']);
   });
 
-  it('reads the semantic conversation timeline operations', async () => {
+  it("reads the recorded conversation timeline, not the siblings' mailboxes", async () => {
     await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
-    expect(inboundSql).toEqual(['getConversationRoot:sess-old']);
-    expect(outboundSql).toEqual(['getTopLevelOutbound:sess-old']);
+    expect(timelineReads).toEqual(['sess-old']);
+    expect(inboundSql).toEqual([]);
+    expect(outboundSql).toEqual([]);
   });
 
   it('skips task sessions and sessions without hot siblings', async () => {
@@ -185,6 +238,7 @@ describe('backfillSession — new session', () => {
     await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
     expect(written).toHaveLength(0);
     expect(opened).toEqual([]);
+    expect(timelineReads).toEqual([]);
   });
 
   it('seeds group-surface sessions with the channel timeline: channel-timeline surface + channel label', async () => {
@@ -250,7 +304,7 @@ describe('backfillSession — new session', () => {
 
     await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
 
-    const read = opened.filter((id) => id !== 'sess-new');
+    const read = timelineReads;
     expect(read).toHaveLength(HOT_SESSION_LIMIT + 1);
     expect(read).not.toContain('sess-other-dm');
     expect(read).toContain('sess-top');
@@ -258,14 +312,10 @@ describe('backfillSession — new session', () => {
     expect(read).not.toContain(`sib-${HOT_SESSION_LIMIT}`);
   });
 
-  it('one broken sibling mailbox does not stop the others', async () => {
-    siblings['sess-ok'] = { root: { timestamp: iso(NOW - 40 * 60_000), content: chat('still here') } };
-    recentSessions = [sess('sess-broken', 'mg-dm', 't-1'), sess('sess-ok', 'mg-dm', 't-2')];
-    topLevelSession = undefined;
-    brokenMailboxes = new Set(['sess-broken']);
-
-    await backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW });
-    expect(texts()).toEqual(['still here']);
+  it('a failed timeline read costs only the context: nothing written, nothing thrown', async () => {
+    brokenTimeline = true;
+    await expect(backfillSession(AG, NEW_SESSION, DM_MG, { created: true, now: NOW })).resolves.toBeUndefined();
+    expect(written).toHaveLength(0);
   });
 });
 
@@ -293,8 +343,9 @@ describe('backfillSession — existing session', () => {
     const echo = (JSON.parse(written[0]!.content as string) as { echo: Record<string, string> }).echo;
     expect(echo.surface).toBe('dm-timeline');
     expect(echo.label).toBe('this DM, while this conversation was idle');
-    // since-read on the target, one read per source, one write session on the target.
-    expect(opened).toEqual(['sess-cold', 'sess-old', 'sess-cold']);
+    // since-read on the target, one timeline read for the sources, one write session on the target.
+    expect(timelineReads).toEqual(['sess-old']);
+    expect(opened).toEqual(['sess-cold', 'sess-cold']);
   });
 
   it('a cold session with an empty mailbox gets the whole horizon; a missing mailbox gets nothing', async () => {

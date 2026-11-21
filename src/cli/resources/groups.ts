@@ -320,6 +320,8 @@ registerResource({
           counts.wake_signals = (
             await db.run(`DELETE FROM wake_signals WHERE session_id IN (${sessionIds})`, id)
           ).changes;
+          // The sessions' recorded top-level talk (cross-session-context timeline.ts) goes with them.
+          await db.run(`DELETE FROM conversation_timeline WHERE session_id IN (${sessionIds})`, id);
           counts.sessions = (await db.run('DELETE FROM sessions WHERE agent_group_id = ?', id)).changes;
           counts.pending_sender_approvals = (
             await db.run('DELETE FROM pending_sender_approvals WHERE agent_group_id = ?', id)
