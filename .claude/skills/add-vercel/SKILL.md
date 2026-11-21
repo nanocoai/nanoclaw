@@ -203,10 +203,13 @@ done
 
 ## Phase 6: Restart Running Containers
 
-Stop all running agent containers so they pick up the new skills on next wake:
+Stop this install's running agent containers so they pick up the new skills on next
+wake. Run it from the project root; other NanoClaw installs on the same Docker daemon
+are left alone:
 
 ```bash
-docker ps --filter label=nanoclaw-session -q | xargs -r docker stop
+source setup/lib/install-slug.sh
+docker ps -q --filter label=nanoclaw-session --filter "label=nanoclaw-install=$(_nanoclaw_install_slug)" | xargs -r docker stop
 ```
 
 ## Done
