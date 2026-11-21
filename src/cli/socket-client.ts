@@ -12,7 +12,22 @@ import { DATA_DIR } from '../config.js';
 import type { RequestFrame, ResponseFrame } from './frame.js';
 import type { Transport } from './transport.js';
 
-export const DEFAULT_SOCKET_PATH = path.join(DATA_DIR, 'ncl.sock');
+/**
+ * `ncl` CLI socket endpoint — host-shell-only (the agent-runner inside the
+ * container uses a DB transport, not this socket). On Windows Node's AF_UNIX
+ * support on NTFS hits EACCES under the service account (the daemon binds but
+ * cannot chmod the socket file, then the next start re-binds and fails), so
+ * we use a named pipe instead — auto-cleaned by the OS when the owning
+ * process exits, which also means no stale-unlink step is needed on win32.
+ */
+export function getNclSocketPath(): string {
+  if (process.platform === 'win32') {
+    return '\\\\.\\pipe\\nanoclaw-ncl';
+  }
+  return path.join(DATA_DIR, 'ncl.sock');
+}
+
+export const DEFAULT_SOCKET_PATH = getNclSocketPath();
 
 export class SocketTransport implements Transport {
   constructor(private readonly socketPath: string = DEFAULT_SOCKET_PATH) {}
