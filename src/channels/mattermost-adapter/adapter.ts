@@ -876,11 +876,14 @@ export class MattermostAdapter implements Adapter<MattermostThreadId, Mattermost
     // Mattermost puts the other participant in `data.mentions` on every DM
     // post, so only non-DM channels can report an explicit @-mention. It also
     // lists the bot for `@channel`, `@all` and `@here`; then only `@bot` counts.
-    // Both are read outside code, as the server reads mentions.
+    // Both are read outside code, as the server reads mentions. In a group
+    // message it lists every member, so only `@bot` in the text counts.
     const mentionText = textOutsideCode(message.formatted);
     message.isMention =
-      isExplicitMention(event.data, this.botUserId) &&
-      (!CHANNEL_WIDE_MENTION.test(mentionText) || this.mentionsBotHandle(mentionText));
+      data?.channel_type === 'G'
+        ? this.mentionsBotHandle(mentionText)
+        : isExplicitMention(event.data, this.botUserId) &&
+          (!CHANNEL_WIDE_MENTION.test(mentionText) || this.mentionsBotHandle(mentionText));
 
     void chat.processMessage(this, threadId, message);
   }

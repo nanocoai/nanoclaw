@@ -43,7 +43,7 @@ function callbackRequest(): Request {
 }
 
 function postedEvent(options: {
-  channelType?: 'D' | 'O';
+  channelType?: 'D' | 'G' | 'O';
   id?: string;
   mentions?: string[];
   message?: string;
@@ -252,6 +252,25 @@ describe('Mattermost posted-message threads', () => {
 
     await vi.waitFor(() => expect(processMessage).toHaveBeenCalledTimes(cases.length));
     // Frames are processed in order, so call i belongs to case i.
+    expect(processMessage.mock.calls.map((call, i) => [cases[i][0], call[2].isMention])).toEqual(cases);
+  });
+
+  it('counts a group-message post as a mention only when it names the bot', async () => {
+    const { adapter, processMessage } = await initializePostedHarness();
+    const cases: [text: string, isMention: boolean][] = [
+      ['lunch at noon?', false],
+      ['lunch at noon, @nanoclaw-bot?', true],
+      ['see `@nanoclaw-bot` in the docs', false],
+    ];
+
+    // In a group message the server lists every member in `mentions`.
+    cases.forEach(([message], i) =>
+      adapter.handleSocketEvent(
+        postedEvent({ channelType: 'G', id: `${POST_ID.slice(0, 25)}${i}`, mentions: [BOT_ID], message }),
+      ),
+    );
+
+    await vi.waitFor(() => expect(processMessage).toHaveBeenCalledTimes(cases.length));
     expect(processMessage.mock.calls.map((call, i) => [cases[i][0], call[2].isMention])).toEqual(cases);
   });
 
