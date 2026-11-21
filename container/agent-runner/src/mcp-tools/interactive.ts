@@ -11,6 +11,7 @@ import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { getDeliveryStatus, writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting, resolveDestinationThread } from '../db/session-routing.js';
 import { getCurrentReplyRoute } from '../db/session-state.js';
+import { cardProblems } from './card-parts.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -125,6 +126,23 @@ function partitionActions(card: Record<string, unknown>): { card: Record<string,
 
   return { card: { ...card, actions: valid }, dropped: actions.length - valid.length };
 }
+
+/**
+ * A part as the tool advertises it: its name, not its fields. The send_card
+ * schema reaches every provider on every request, so it stays small and plain;
+ * the fields are in the tool's instructions, and a refusal names what to fix.
+ */
+const CARD_PART_SCHEMA = Object.freeze({
+  type: 'object' as const,
+  description:
+    'A card part: { type, props } (Fields: { type, children: Field parts }). Fields per part are in the send_card instructions.',
+  properties: {
+    type: { type: 'string' as const, enum: ['Text', 'Fields', 'Table', 'Chart', 'Divider'] },
+    props: { type: 'object' as const },
+    children: { type: 'array' as const, items: { type: 'object' as const } },
+  },
+  required: ['type'],
+});
 
 function ok(text: string) {
   return { content: [{ type: 'text' as const, text }] };
@@ -269,14 +287,14 @@ export const sendCard: McpToolDefinition = {
         card: {
           type: 'object',
           description:
-            'Display card with optional title, description, text children, and URL link actions. Each action requires a non-empty label and a url that is a web link (http or https); invalid actions are dropped. Callback buttons are unsupported; use ask_user_question for choices.',
+            'Display card with optional title, description, children (text and card parts) and URL link actions. Each action requires a non-empty label and a url that is a web link (http or https); invalid actions are dropped. Callback buttons are unsupported; use ask_user_question for choices.',
           properties: {
             title: { type: 'string' },
             description: { type: 'string' },
             children: {
               type: 'array',
               description:
-                'Text content only: strings or objects with a text field. Nested action blocks are unsupported.',
+                'Text (strings or objects with a text field) and card parts: Text, Fields, Table, Chart, Divider. At most 10 parts, 1 Table (30 rows, 6 columns) and 2 Charts per card. A card with an invalid part is not sent; the result says what to fix. Nested action blocks are unsupported.',
               items: {
                 anyOf: [
                   { type: 'string' },
@@ -285,6 +303,7 @@ export const sendCard: McpToolDefinition = {
                     properties: { text: { type: 'string' } },
                     required: ['text'],
                   },
+                  CARD_PART_SCHEMA,
                 ],
               },
             },
@@ -310,6 +329,8 @@ export const sendCard: McpToolDefinition = {
     const id = generateId();
     const r = routing();
     const { card: renderable, dropped } = partitionActions(card);
+    const problems = cardProblems(renderable);
+    if (problems.length > 0) return err(`Card not sent. Fix these and send it again: ${problems.join('; ')}`);
 
     await writeMessageOut({
       id,

@@ -10,6 +10,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const fixture = vi.hoisted(() => ({
   fail: vi.fn(),
   offerPortalReminder: vi.fn(),
+  runImagePortal: vi.fn(),
+  runWindowedStep: vi.fn(),
   /** Whether `.env` already holds an answer. */
   decided: false,
 }));
@@ -19,9 +21,11 @@ vi.mock('./providers/install.js', () => ({ applyProviderSkill: vi.fn() }));
 vi.mock('./lib/bright-select.js', () => ({ brightSelect: vi.fn() }));
 vi.mock('./portal.js', () => ({
   portalEnabled: () => true,
-  runImagePortal: vi.fn(),
+  runImagePortal: fixture.runImagePortal,
   offerPortalReminder: fixture.offerPortalReminder,
 }));
+vi.mock('./lib/windowed-runner.js', () => ({ runWindowedStep: fixture.runWindowedStep }));
+vi.mock('./lib/sudo-preflight.js', () => ({ sudoUpFront: vi.fn(), dockerSudoReason: () => undefined }));
 vi.mock('./lib/registry-state.js', async (original) => ({
   ...(await original<typeof import('./lib/registry-state.js')>()),
   readAgentImagePin: () => 'reg.example.test/nanoclaw/agent@sha256:abc',
@@ -68,6 +72,7 @@ beforeEach(() => {
   vi.stubEnv('NANOCLAW_SKIP', 'environment,container,gateway,auth,mounts,service,first-chat,timezone,channel,verify');
   fixture.fail.mockRejectedValue(new Error('failure assistance finished'));
   fixture.offerPortalReminder.mockResolvedValue(false);
+  fixture.runWindowedStep.mockResolvedValue({ ok: false, terminal: { fields: {} } });
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -96,4 +101,28 @@ it('does not re-offer Echo on a re-entered run once the sandbox-image question h
 it('still offers Echo once to a run that never reached the question', async () => {
   await runWizardUntilExit();
   expect(fixture.offerPortalReminder).toHaveBeenCalledExactlyOnceWith('echo', expect.any(Function));
+});
+
+// An expired sign-in code leaves the question open (#4426). These pin what a
+// re-entered process does with it: fail()'s retry of the container step
+// starts without 'container' in NANOCLAW_SKIP and asks again; the sg-docker
+// re-exec only follows a finished container step, so it skips the question.
+it('asks the open question again in a re-entered run that has not finished the container step', async () => {
+  vi.stubEnv('NANOCLAW_SKIP', 'environment');
+  let finish!: () => void;
+  const exited = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  vi.spyOn(process, 'exit').mockImplementation((() => {
+    finish();
+  }) as typeof process.exit);
+  await import('./auto.js');
+  await exited;
+  expect(fixture.runImagePortal).toHaveBeenCalledOnce();
+  expect(fixture.fail).toHaveBeenCalledWith('container', expect.any(String), expect.any(String));
+});
+
+it('does not ask on a re-entered run past the container step', async () => {
+  await runWizardUntilExit();
+  expect(fixture.runImagePortal).not.toHaveBeenCalled();
 });

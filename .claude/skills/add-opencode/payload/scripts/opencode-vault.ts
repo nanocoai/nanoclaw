@@ -30,7 +30,11 @@ export function createOpenCodeVault(target: OpenCodeSecret, root = process.cwd()
   const resolve = () =>
     (connection ??= getCredentialStore(root).then((store) => {
       if (!store.connection) throw new Error('The selected gateway does not support provider credential connections.');
-      return store.connection({ ...target, proxyValue: OPENCODE_CREDENTIAL_PLACEHOLDER } as GatewayCredentialTarget);
+      return store.connection({
+        ...target,
+        proxyValue: OPENCODE_CREDENTIAL_PLACEHOLDER,
+        provider: 'opencode',
+      } as GatewayCredentialTarget);
     }));
   return {
     find: async (options) => (await resolve()).find(options),

@@ -24,13 +24,19 @@ export function stageGroupPersona(groupDir: string, instructions: string): boole
   }
 }
 
-/** Read a group's standing instructions without following symlinks. */
+/** Read a group's standing instructions without following symlinks or blocking. */
 export function readGroupPersona(groupDir: string): string | null {
   const file = path.join(groupDir, PERSONA_PREPEND_FILE);
   let fd: number | undefined;
   try {
-    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    if (!fs.fstatSync(fd).isFile()) return null;
+    // O_NONBLOCK: the group folder is agent-writable, and a blocking open of a
+    // writer-less FIFO here would stall the host on every spawn. The isFile
+    // check below then refuses anything that is not a regular file.
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    if (!fs.fstatSync(fd).isFile()) {
+      log.warn('Group standing instructions are not a regular file; omitting persona', { file });
+      return null;
+    }
     const content = fs.readFileSync(fd, 'utf-8').trim();
     return content || null;
   } catch (err) {

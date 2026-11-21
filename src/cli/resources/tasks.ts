@@ -387,6 +387,9 @@ async function runTaskCommand(args: Record<string, unknown>, ctx: CallerContext)
       const row = selectTask(db, id);
       if (!row) return undefined;
       const seriesKey = row.seriesId ?? row.id;
+      // An earlier occurrence's id resolves to that row alone, and its content
+      // is dropped once the series re-arms; copy the series' current payload.
+      const current = selectTask(db, seriesKey) ?? row;
       const rowId = makeTaskId(`${seriesKey}-run`);
       // recurrence=NULL is load-bearing: a run-now row must not be re-armed by
       // handleRecurrence into a phantom series.
@@ -395,7 +398,7 @@ async function runTaskCommand(args: Record<string, unknown>, ctx: CallerContext)
         seriesId: seriesKey,
         processAfter: new Date().toISOString(),
         recurrence: null,
-        content: row.content,
+        content: current.content,
       });
       return { series_id: seriesKey, row_id: rowId, status: 'pending' };
     });

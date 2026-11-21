@@ -15,6 +15,8 @@ const mock = vi.hoisted(() => ({
   image: vi.fn(),
   clearImage: vi.fn(),
   decided: true,
+  waitError: undefined as Error | undefined,
+  source: 'local' as 'local' | 'hardened',
   deviceStart: vi.fn(),
   deviceFinish: vi.fn(),
   claim: vi.fn(),
@@ -25,6 +27,7 @@ const mock = vi.hoisted(() => ({
   reconcile: vi.fn(),
   logs: vi.fn(),
   request: vi.fn(),
+  select: vi.fn(),
   result: {
     status: 'approved',
     id: 'setup-1',
@@ -64,6 +67,7 @@ vi.mock('../src/community-portal/index.js', () => ({
       return mock.claim();
     }
     async wait() {
+      if (mock.waitError) throw mock.waitError;
       return mock.result;
     }
     async save() {
@@ -93,11 +97,13 @@ vi.mock('../src/community-portal/slack-job.js', () => ({
   queueSlackJob: vi.fn(),
 }));
 vi.mock('./lib/browser.js', () => ({ openUrl: mock.open }));
+vi.mock('./lib/bright-select.js', () => ({ brightSelect: mock.select }));
 vi.mock('./registry-login.js', () => ({
   LoginError: class LoginError extends Error {
     constructor(
       message: string,
       readonly hint?: string,
+      readonly declined = false,
     ) {
       super(message);
     }
@@ -105,12 +111,26 @@ vi.mock('./registry-login.js', () => ({
   startDeviceFlow: mock.deviceStart,
   finishDeviceFlow: mock.deviceFinish,
 }));
+const line = () => (mock.decided ? String(mock.source === 'hardened') : undefined);
 vi.mock('./lib/registry-state.js', () => ({
+  HARDENED_IMAGE_ENV_KEY: 'NANOCLAW_HARDENED_IMAGE',
   readRegistryAccount: mock.account,
-  readImageSource: () => 'local',
-  imageSourceDecided: () => mock.decided,
-  writeImageSource: mock.image,
-  clearImageSource: mock.clearImage,
+  // Stateful like the `.env` line, so a test sees what a later run would read.
+  writeImageSource: (source: 'local' | 'hardened') => {
+    mock.image(source);
+    Object.assign(mock, { decided: true, source });
+  },
+  savedImageSetting: () => line(),
+  restoreImageSetting: (saved: string | undefined) => {
+    if (line() === saved) return;
+    if (saved !== undefined) {
+      mock.image(saved === 'true' ? 'hardened' : 'local');
+      Object.assign(mock, { decided: true, source: saved === 'true' ? 'hardened' : 'local' });
+      return;
+    }
+    mock.clearImage();
+    Object.assign(mock, { decided: false, source: 'local' });
+  },
 }));
 vi.mock('@clack/prompts', () => ({
   confirm: mock.confirm,
@@ -150,33 +170,37 @@ const DEVICE_FLOW = {
 const stdout: string[] = [];
 const warnings = () => mock.logs.mock.calls.map((call) => String(call[0]));
 
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.spyOn(console, 'log').mockImplementation(() => {});
+  stdout.length = 0;
+  vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: string | Uint8Array) => {
+    stdout.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write);
+  mock.local = {};
+  mock.saved = [];
+  mock.options = [];
+  mock.decided = true;
+  mock.source = 'local';
+  mock.waitError = undefined;
+  mock.account.mockReturnValue(ACCOUNT);
+  mock.identity.mockResolvedValue(IDENTITY);
+  mock.key.mockReturnValue(KEY);
+  mock.deviceStart.mockResolvedValue(DEVICE_FLOW);
+  mock.deviceFinish.mockResolvedValue({ token: 'test-install', account_id: 'acct-test' });
+  mock.claim.mockResolvedValue({ id: 'setup-1', status: 'pending' });
+  mock.register.mockResolvedValue({ deviceId: 'dev_test', accountId: 'acct-test', installId: 'install-test' });
+  mock.resume.mockResolvedValue(false);
+  mock.available.mockResolvedValue(true);
+  mock.confirm.mockResolvedValue(true);
+  mock.result.status = 'approved';
+  mock.result.choice.imageSource = 'local';
+  mock.request.mockResolvedValue({ activations: { echo: { enabled: false }, slack: { enabled: false } } });
+  mock.select.mockResolvedValue('keep');
+});
+
 describe('browser setup handoffs', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-    stdout.length = 0;
-    vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: string | Uint8Array) => {
-      stdout.push(String(chunk));
-      return true;
-    }) as typeof process.stdout.write);
-    mock.local = {};
-    mock.saved = [];
-    mock.options = [];
-    mock.decided = true;
-    mock.account.mockReturnValue(ACCOUNT);
-    mock.identity.mockResolvedValue(IDENTITY);
-    mock.key.mockReturnValue(KEY);
-    mock.deviceStart.mockResolvedValue(DEVICE_FLOW);
-    mock.deviceFinish.mockResolvedValue({ token: 'test-install', account_id: 'acct-test' });
-    mock.claim.mockResolvedValue({ id: 'setup-1', status: 'pending' });
-    mock.register.mockResolvedValue({ deviceId: 'dev_test', accountId: 'acct-test', installId: 'install-test' });
-    mock.resume.mockResolvedValue(false);
-    mock.available.mockResolvedValue(true);
-    mock.confirm.mockResolvedValue(true);
-    mock.result.status = 'approved';
-    mock.result.choice.imageSource = 'local';
-    mock.request.mockResolvedValue({ activations: { echo: { enabled: false }, slack: { enabled: false } } });
-  });
   it('registers the signed-in machine with its device key and applies the image choice without a second sign-in', async () => {
     await runImagePortal();
     expect(mock.deviceStart).not.toHaveBeenCalled();
@@ -204,7 +228,9 @@ describe('browser setup handoffs', () => {
     expect(mock.open).toHaveBeenCalledExactlyOnceWith('https://portal.example.test/?setup=test');
     expect(stdout.join('')).toContain('https://portal.example.test/?setup=test\n');
     // One link only: a bare sign-in link signs in and then leaves the perk undecided.
-    expect(stdout.join('')).not.toContain('ABCD-EFGH');
+    // The code still prints, so the user can check the sign-in page is this terminal's.
+    expect(stdout.join('')).toContain('Code: ABCD-EFGH');
+    expect(stdout.join('')).toContain('It expires in about 5 minutes.');
     expect(stdout.join('')).not.toContain(DEVICE_FLOW.device.verificationUriComplete);
     expect(stdout.join('')).not.toContain('device-secret');
     expect(mock.deviceFinish).toHaveBeenCalledExactlyOnceWith(DEVICE_FLOW);
@@ -221,10 +247,13 @@ describe('browser setup handoffs', () => {
   it('skips the stage when the device flow is declined, expires, fails to start, or the user declines the offer', async () => {
     mock.account.mockReturnValue(undefined);
     mock.deviceFinish.mockRejectedValueOnce(
-      new LoginError('The sign-in was declined in the browser.', 'Re-run setup.'),
+      new LoginError('The sign-in was declined in the browser.', 'Re-run setup if that was a mistake.', true),
     );
     await runImagePortal();
-    expect(warnings()).toContainEqual(expect.stringContaining('declined in the browser'));
+    // A decline is kept as the answer, so the hint names what still works.
+    expect(warnings()).toContainEqual(
+      'The sign-in was declined in the browser. To change that, remove NANOCLAW_HARDENED_IMAGE from .env and re-run setup. Skipping this step for now.',
+    );
     expect(mock.image).toHaveBeenCalledExactlyOnceWith('local');
     mock.deviceFinish.mockRejectedValueOnce(new LoginError('That sign-in code expired before it was approved.'));
     expect(await runSlackPortal(core(), 'Nano')).toEqual({ __portal_skip: 'slack' });
@@ -248,14 +277,77 @@ describe('browser setup handoffs', () => {
     mock.deviceFinish.mockRejectedValueOnce(new Error('disk full'));
     await expect(runImagePortal()).rejects.toThrow('disk full');
   });
+  it('keeps the sign-in driver hint where a decline saves nothing: the Echo reminder and Slack', async () => {
+    mock.account.mockReturnValue(undefined);
+    mock.decided = false;
+    const declined = () =>
+      new LoginError('The sign-in was declined in the browser.', 'Re-run setup if that was a mistake.', true);
+    const line =
+      'The sign-in was declined in the browser. Re-run setup if that was a mistake. Skipping this step for now.';
+    mock.deviceFinish.mockRejectedValueOnce(declined());
+    await runImagePortal({ browserConsent: true, apply: vi.fn() });
+    expect(warnings()).toEqual([expect.any(String), line]);
+    expect(mock.image).not.toHaveBeenCalled();
+    mock.deviceFinish.mockRejectedValueOnce(declined());
+    expect(await runSlackPortal(core(), 'Nano')).toEqual({ __portal_skip: 'slack' });
+    expect(warnings().filter((w) => w === line)).toHaveLength(2);
+  });
+  // Only a "no" settles the image question; a sign-in that fails or runs out,
+  // for any reason, answers nothing (#4426).
+  it.each([
+    ['the code expires', 'finish', 'That sign-in code expired before it was approved.', 'Re-run setup.'],
+    ['the wait times out', 'finish', 'Timed out waiting for the sign-in to be approved.', 'Re-run setup.'],
+    ['the provider is out of reach', 'start', "Couldn't reach the sign-in provider: offline", 'Re-run.'],
+    ['the registry has no browser sign-in', 'start', 'Browser authentication is not configured.', undefined],
+    ['the account service refuses the sign-in', 'finish', 'The account service rejected it.', 'Run this again.'],
+  ])('leaves the image question open when %s, so a re-run asks again', async (_, step, message, hint) => {
+    mock.account.mockReturnValue(undefined);
+    mock.decided = false;
+    const error = new LoginError(message, hint);
+    (step === 'start' ? mock.deviceStart : mock.deviceFinish).mockRejectedValueOnce(error);
+    await runImagePortal();
+    expect(warnings()).toContainEqual([message, hint, 'Skipping this step for now.'].filter(Boolean).join(' '));
+    expect(mock.image).not.toHaveBeenCalled();
+    expect(mock.clearImage).not.toHaveBeenCalled();
+    expect(mock.register).not.toHaveBeenCalled();
+    expect(mock.stop).toHaveBeenCalledOnce();
+    // The later reminder's handoff writes nothing either way.
+    (step === 'start' ? mock.deviceStart : mock.deviceFinish).mockRejectedValueOnce(error);
+    const apply = vi.fn();
+    await runImagePortal({ browserConsent: true, apply });
+    expect(mock.image).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+  });
   it('signs in a machine whose sign-in record is present but skips a stage the portal refuses to register', async () => {
     mock.account.mockReturnValue(undefined);
+    mock.decided = false;
+    // Saving the credential also saves "pull", as persistCredential does.
+    mock.deviceFinish.mockImplementation(async () => {
+      Object.assign(mock, { decided: true, source: 'hardened' });
+      return { token: 'test-install', account_id: 'acct-test' };
+    });
     mock.register.mockRejectedValueOnce(Object.assign(new Error('Too many.'), { status: 409, code: 'device_limit' }));
     await runImagePortal();
     expect(mock.deviceFinish).toHaveBeenCalledOnce();
     expect(mock.claim).not.toHaveBeenCalled();
     expect(warnings()).toContainEqual(expect.stringContaining('maximum number of devices'));
+    // "Retry this step" has to reach the question again, so that "pull" is taken back.
+    expect(mock.image).not.toHaveBeenCalled();
+    expect(mock.clearImage).toHaveBeenCalledOnce();
+    expect(mock.decided).toBe(false);
+    // A failure that throws does the same, and an earlier answer comes back as it was.
+    mock.decided = true;
+    mock.register.mockRejectedValueOnce(new Error('offline'));
+    await expect(runImagePortal()).rejects.toThrow('offline');
     expect(mock.image).toHaveBeenCalledExactlyOnceWith('local');
+    expect(mock).toMatchObject({ decided: true, source: 'local' });
+    // So does a browser step that fails after registration ("restart this step").
+    mock.decided = false;
+    mock.waitError = new Error('Setup was cancelled or failed. Restart this step.');
+    await expect(runImagePortal()).rejects.toThrow('Restart this step.');
+    expect(mock.claim).toHaveBeenCalledOnce();
+    expect(mock.clearImage).toHaveBeenCalledTimes(2);
+    expect(mock.decided).toBe(false);
   });
   it('skips the stage when the portal no longer accepts the sign-in or the device, and surfaces other failures', async () => {
     mock.register.mockRejectedValueOnce(
@@ -263,7 +355,7 @@ describe('browser setup handoffs', () => {
     );
     await runImagePortal();
     expect(warnings()).toContainEqual(expect.stringContaining('no longer valid'));
-    expect(mock.image).toHaveBeenCalledExactlyOnceWith('local');
+    expect(mock.image).not.toHaveBeenCalled();
     mock.register.mockRejectedValueOnce(Object.assign(new Error('Too many.'), { status: 409, code: 'device_limit' }));
     expect(await runSlackPortal(core(), 'Nano')).toEqual({ __portal_skip: 'slack' });
     expect(warnings()).toContainEqual(expect.stringContaining('maximum number of devices'));
@@ -522,5 +614,66 @@ describe('browser setup handoffs', () => {
       expect.objectContaining({ agentName: 'Nova', role: 'owner', ownerHandle: 'U123456789' }),
       expect.any(String),
     );
+  });
+});
+
+describe('choosing the account on a machine already signed in', () => {
+  // The answer lasts for the run, so each case loads the module afresh.
+  const fresh = async () => {
+    vi.resetModules();
+    return import('./portal.js');
+  };
+  beforeEach(() => {
+    mock.account.mockReturnValue({ ...ACCOUNT, email: 'old@example.test' });
+  });
+
+  it('names the account once per run and keeps it by default', async () => {
+    const portal = await fresh();
+    await portal.runImagePortal();
+    await portal.runSlackPortal(core(), 'Nano');
+    expect(mock.select).toHaveBeenCalledOnce();
+    expect(mock.select.mock.calls[0][0]).toMatchObject({
+      message: expect.stringContaining('old@example.test'),
+      initialValue: 'keep',
+    });
+    expect(mock.select.mock.invocationCallOrder[0]).toBeLessThan(mock.register.mock.invocationCallOrder[0]);
+    expect(mock.deviceStart).not.toHaveBeenCalled();
+    expect(mock.start).toHaveBeenCalledWith('echo', 'Nano');
+  });
+
+  it('signs in afresh through the portal for a different account', async () => {
+    const portal = await fresh();
+    mock.select.mockResolvedValue('switch');
+    mock.identity.mockResolvedValue({ ...IDENTITY, token: 'new-install', accountId: 'acct-new' });
+    mock.deviceFinish.mockResolvedValue({ token: 'new-install', account_id: 'acct-new', email: 'new@example.test' });
+    await portal.runImagePortal();
+    expect(mock.options[0].identity).toBeUndefined();
+    expect(mock.start).toHaveBeenCalledExactlyOnceWith(
+      'echo',
+      'Nano',
+      expect.objectContaining({ verification: expect.any(Object) }),
+    );
+    expect(mock.claim).toHaveBeenCalledOnce();
+    expect(warnings()).toContainEqual(expect.stringContaining('Signed in as new@example.test'));
+    expect(mock.image).toHaveBeenCalledExactlyOnceWith('local');
+  });
+
+  it('asks again in a later stage when the switch did not sign in', async () => {
+    const portal = await fresh();
+    mock.select.mockResolvedValueOnce('switch').mockResolvedValueOnce('keep');
+    mock.deviceFinish.mockRejectedValueOnce(new (await import('./registry-login.js')).LoginError('Declined.'));
+    await portal.runImagePortal();
+    await portal.runSlackPortal(core(), 'Nano');
+    expect(mock.select).toHaveBeenCalledTimes(2);
+    expect(mock.start).toHaveBeenLastCalledWith('slack', 'Nano');
+  });
+
+  it('skips the stage without opening anything when the question is cancelled', async () => {
+    const portal = await fresh();
+    mock.select.mockResolvedValue(Symbol('cancel'));
+    await portal.runImagePortal();
+    expect(mock.options).toHaveLength(0);
+    expect(mock.open).not.toHaveBeenCalled();
+    expect(mock.image).toHaveBeenCalledExactlyOnceWith('local');
   });
 });

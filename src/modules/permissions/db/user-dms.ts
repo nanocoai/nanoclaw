@@ -19,7 +19,3 @@ export async function getUserDm(userId: string, channelType: string): Promise<Us
 export async function getUserDmsForUser(userId: string): Promise<UserDm[]> {
   return getDb().all<UserDm>('SELECT * FROM user_dms WHERE user_id = ?', userId);
 }
-
-export async function deleteUserDm(userId: string, channelType: string): Promise<void> {
-  await getDb().run('DELETE FROM user_dms WHERE user_id = ? AND channel_type = ?', userId, channelType);
-}

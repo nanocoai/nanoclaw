@@ -23,6 +23,7 @@ import {
 import { getSessionDriver } from '../../drivers/index.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { reservedMountClass } from '../../modules/mount-security/index.js';
 import { getProviderHostContract } from '../../provider-contracts/registry.js';
 import { resolveProviderName } from '../../providers/provider-name.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
@@ -352,7 +353,8 @@ registerResource({
       access: 'approval',
       description:
         'Restart containers for a group. Use --id <group-id> [--rebuild] [--message <text>]. ' +
-        'From inside a container, --id is auto-filled and only the calling session is restarted. ' +
+        'From inside a container, --id is auto-filled and only the calling session is restarted; ' +
+        'an explicit --id of another group (global scope only) restarts that group’s running containers. ' +
         '--rebuild rebuilds the container image first (required for package changes). ' +
         '--message sets an on-wake instruction for the fresh container to act on when it starts — ' +
         'use this when you need to continue after the restart (e.g. verify a new tool works, notify the user). ' +
@@ -378,8 +380,10 @@ registerResource({
         }
         const message = args.message as string | undefined;
 
-        // From an agent: scope to the calling session only
-        if (ctx.caller === 'agent') {
+        // From an agent about its own group: scope to the calling session only.
+        // A foreign --id (global scope, after approval) takes the group path
+        // below; this branch would restart the caller instead (#3911).
+        if (ctx.caller === 'agent' && id === ctx.agentGroupId) {
           if (message) {
             await writeSessionMessage(id, ctx.sessionId, {
               id: `restart-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -407,7 +411,7 @@ registerResource({
           return { restarted: 1, rebuilt: !!args.rebuild };
         }
 
-        // From the host: restart all running containers in the group
+        // From the host, or an agent naming another group: restart all running containers in the group
         const count = await restartAgentGroupContainers(id, 'restarted via ncl', message);
         return { restarted: count, rebuilt: !!args.rebuild };
       },
@@ -635,6 +639,16 @@ registerResource({
 
         const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
+
+        // Stored, a path the driver reserves would make it refuse every start of the group.
+        // A copy is fine advice for install content, never for keys and certificates.
+        const reserved = await reservedMountClass(id, hostPath);
+        if (reserved === 'install-surface') {
+          throw new Error(`${hostPath} is NanoClaw's own ${reserved} content; only NanoClaw mounts it. Mount a copy.`);
+        }
+        if (reserved) {
+          throw new Error(`${hostPath} holds NanoClaw's ${reserved} keys or certificates; only NanoClaw mounts it.`);
+        }
 
         const mount: AdditionalMountConfig = {
           hostPath,

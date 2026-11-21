@@ -55,6 +55,7 @@ export const CURSOR_CREDENTIAL_TARGETS: readonly GatewayCredentialTarget[] = [
     path: '/auth/exchange_user_api_key',
     proxyValue: CURSOR_CREDENTIAL_PLACEHOLDER,
     injection: BEARER,
+    provider: 'cursor',
   },
   {
     name: 'Cursor models',
@@ -63,6 +64,7 @@ export const CURSOR_CREDENTIAL_TARGETS: readonly GatewayCredentialTarget[] = [
     path: '/v1/models',
     proxyValue: CURSOR_CREDENTIAL_PLACEHOLDER,
     injection: BEARER,
+    provider: 'cursor',
   },
 ];
 

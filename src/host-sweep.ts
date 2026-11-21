@@ -12,7 +12,7 @@
  * stable.
  */
 import { INSTALL_SLUG } from './config.js';
-import { stopOrphanedSessions } from './container-runner.js';
+import { retryPendingAdoptions, stopOrphanedSessions } from './container-runner.js';
 import { ensureEgressNetwork } from './egress-lockdown.js';
 import { getActiveSessions } from './db/sessions.js';
 import { peekSessionDriver } from './drivers/index.js';
@@ -102,12 +102,14 @@ export function startHostSweep(): void {
       },
       // Stop containers whose session or agent group was deleted: the
       // per-session reconcile only visits sessions that still have a row.
+      // Then retry adoptions a failed claim write deferred (never throws).
       'singleton:orphan-containers': async () => {
         try {
           await stopOrphanedSessions();
         } catch (err) {
           log.error('Orphaned container sweep failed', { err });
         }
+        await retryPendingAdoptions();
       },
       // Finalize any "Reject with reason…" holds whose reply window elapsed
       // (admin ghosted, or the host restarted mid-capture). Central-DB scan,

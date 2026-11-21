@@ -81,7 +81,10 @@ registerResource({
     ping: {
       access: 'open',
       description: 'Ping a widget.',
-      args: [{ name: 'target', type: 'string', description: 'Where to ping.', required: true }],
+      args: [
+        { name: 'target', type: 'string', description: 'Where to ping.', required: true },
+        { name: 'dry_run', type: 'boolean', description: 'Report only.' },
+      ],
       examples: ['ncl widgets ping --target prod'],
       handler: async (args) => ({ echo: args }),
     },
@@ -101,6 +104,10 @@ describe('strict validation wiring (declared args)', () => {
     expect(parse({ target: 'prod' })).toMatchObject({ target: 'prod' });
   });
 
+  it('accepts the dashed form of a declared underscore flag', () => {
+    expect(parse({ target: 'prod', 'dry-run': 'true' })).toMatchObject({ target: 'prod', dry_run: true });
+  });
+
   it('failure carries the verb usage block (error + fix in one round-trip)', () => {
     let message = '';
     try {
@@ -118,10 +125,8 @@ describe('strict validation wiring (declared args)', () => {
     expect(() => parse({ target: 'prod', bogus: '1' })).toThrow(/unknown flag --bogus[\s\S]*Flags:/);
   });
 
-  it('normalizes dashed flags before validating', () => {
-    // --target arrives as raw key "target"; a dashed alias like "tar-get" would
-    // normalize to underscores — prove normalize runs before validate.
-    expect(() => parse({ 'bogus-flag': '1', target: 'x' })).toThrow('unknown flag --bogus-flag');
+  it('rejects an undeclared dashed flag by the name the caller typed', () => {
+    expect(() => parse({ target: 'prod', 'bogus-flag': '1' })).toThrow('unknown flag --bogus-flag');
   });
 });
 

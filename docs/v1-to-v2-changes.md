@@ -80,7 +80,7 @@ Tasks can exist before a session is awake — the host sweep creates/wakes the c
 
 **v2:** OneCLI Agent Vault. A separate local service at `http://127.0.0.1:10254` holds secrets. Agents are *scoped* to specific secrets and the vault injects them into approved API requests as they leave the container. The container never sees the raw secret value.
 
-Note: auto-created agents default to `all` secret mode — every vault secret whose host pattern matches is injected automatically. See the "Secret modes" section of the root CLAUDE.md if you want per-agent control (`onecli agents set-secret-mode --mode selective`).
+Note: an agent group's OneCLI agent receives only the secrets attached to it. NanoClaw attaches the group's model credential on each spawn; any other secret is attached to chosen groups by the skill that adds it (`onecli agents grants attach-secret`); see `/add-onecli`.
 
 **What the automated migration does:** copies every v1 `.env` key verbatim into v2 `.env`, never overwriting existing v2 keys. Migrating credentials into the vault is a separate step owned by the gateway's own `/add-<gateway>` skill, which knows how to pull from `.env`.
 
