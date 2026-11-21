@@ -32,6 +32,8 @@ import {
   createPendingQuestion,
   getPendingQuestion,
   deletePendingQuestion,
+  createPendingApproval,
+  getPendingApproval,
   getContainerConfig,
   createContainerConfig,
   ensureContainerConfig,
@@ -451,6 +453,36 @@ describe('pending questions', () => {
     expect(result!.session_id).toBe('sess-1');
     expect(result!.title).toBe('Test');
     expect(result!.options[0].value).toBe('yes');
+  });
+
+  it('deleteSession removes the session with an unanswered question and approval', async () => {
+    await createPendingQuestion({
+      question_id: 'q-open',
+      session_id: 'sess-1',
+      message_out_id: 'msg-out-1',
+      platform_id: 'chan-1',
+      channel_type: 'discord',
+      thread_id: null,
+      title: 'Still waiting',
+      options: [{ label: 'Yes', selectedLabel: 'Yes', value: 'yes' }],
+      created_at: now(),
+    });
+    await createPendingApproval({
+      approval_id: 'appr-open',
+      session_id: 'sess-1',
+      request_id: 'req-1',
+      action: 'install_packages',
+      payload: '{}',
+      created_at: now(),
+      title: 'Approve?',
+      options_json: '[]',
+    });
+
+    await deleteSession('sess-1');
+
+    expect(await getSession('sess-1')).toBeUndefined();
+    expect(await getPendingQuestion('q-open')).toBeUndefined();
+    expect(await getPendingApproval('appr-open')).toBeUndefined();
   });
 
   it('should delete', async () => {
