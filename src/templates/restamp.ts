@@ -190,7 +190,7 @@ export async function restampAgentFromTemplate(
     const target = contextTarget(groupDir, name);
     const segments = name.split('/');
     const leaf = segments.pop()!;
-    const live = readRegularFile(target)?.toString('utf-8');
+    const live = readRegularFile(target)?.bytes.toString('utf-8');
     const wanted = newContext.get(name);
     if (wanted !== undefined) {
       if (live === wanted) {
@@ -494,10 +494,10 @@ function dirsEqual(a: string, b: string): boolean {
   for (const [rel, absA] of filesA) {
     const absB = filesB.get(rel);
     if (absB === undefined) return false;
-    if ((fs.lstatSync(absA).mode & 0o111) !== (fs.lstatSync(absB).mode & 0o111)) return false;
-    const bytesA = readRegularFile(absA);
-    const bytesB = readRegularFile(absB);
-    if (bytesA === undefined || bytesB === undefined || !bytesA.equals(bytesB)) return false;
+    const fileA = readRegularFile(absA);
+    const fileB = readRegularFile(absB);
+    if (fileA === undefined || fileB === undefined) return false;
+    if ((fileA.mode & 0o111) !== (fileB.mode & 0o111) || !fileA.bytes.equals(fileB.bytes)) return false;
   }
   return true;
 }
@@ -506,11 +506,12 @@ function dirsEqual(a: string, b: string): boolean {
 const NOT_A_REGULAR_FILE = new Set(['ENOENT', 'ENOTDIR', 'ELOOP', 'ENXIO', 'EOPNOTSUPP']);
 
 /**
- * The bytes of `file`, or undefined unless it is a regular file. Group and
- * overlay folders are container-writable, so the name can change type after
- * any earlier check: open without following a symlink or blocking on a FIFO.
+ * The bytes and mode of `file`, or undefined unless it is a regular file.
+ * Group and overlay folders are container-writable, so the name can change
+ * after any earlier check: open without following a symlink or blocking on a
+ * FIFO, and take both from that one descriptor.
  */
-function readRegularFile(file: string): Buffer | undefined {
+function readRegularFile(file: string): { bytes: Buffer; mode: number } | undefined {
   let fd: number;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -519,7 +520,8 @@ function readRegularFile(file: string): Buffer | undefined {
     throw err;
   }
   try {
-    return fs.fstatSync(fd).isFile() ? fs.readFileSync(fd) : undefined;
+    const stat = fs.fstatSync(fd);
+    return stat.isFile() ? { bytes: fs.readFileSync(fd), mode: stat.mode } : undefined;
   } finally {
     fs.closeSync(fd);
   }
