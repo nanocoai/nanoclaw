@@ -48,7 +48,8 @@ that a pending request has completed. A bare 403 does not identify whether the
 destination, credential grant, explicit policy, or upstream service denied it.
 
 
-For an account-connection request, run `ncl groups connect --host <API hostname>`.
+For an account-connection request, run `ncl groups connect --host '<API hostname>'`
+with a bare, single-quoted hostname (letters, digits, dots and hyphens only).
 This shared command returns the selected gateway's handoff for any service. Show
 its exact `connect_url` and explain `action`: `operator_console` requires operator
 configuration; `oauth` is a consent flow. `action_required` is not a connection,
