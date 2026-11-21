@@ -318,8 +318,8 @@ async function* runOneTurn(
     }
 
     // Codex also streams every sub-agent thread it spawns on this connection.
-    // Their work keeps the turn alive, but only this thread's events may
-    // retarget, fill or end it.
+    // Their work still counts as activity for the host's liveness check, but
+    // only this thread's events may retarget, fill or end it.
     if (typeof params.threadId === 'string' && params.threadId !== threadId) {
       kick();
       return;
