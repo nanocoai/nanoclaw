@@ -5,15 +5,17 @@ const fixture = vi.hoisted(() => ({
   registrations: new Map<string, ChannelRegistration>(),
   handlers: new Map<string, (event: Record<string, unknown>) => unknown>(),
   send: vi.fn(async () => ({ key: { id: 'sent' } })),
+  download: vi.fn(async () => Buffer.from('ogg')),
+  writeFile: vi.fn(),
 }));
 vi.mock('./channel-registry.js', () => ({
   registerChannelAdapter: (name: string, registration: ChannelRegistration) =>
     fixture.registrations.set(name, registration),
 }));
 vi.mock('../env.js', () => ({ readEnvFile: () => ({ WHATSAPP_ENABLED: 'true', ASSISTANT_HAS_OWN_NUMBER: 'true' }) }));
-vi.mock('fs', () => ({ default: { existsSync: () => false, mkdirSync: vi.fn(), writeFileSync: vi.fn() } }));
+vi.mock('fs', () => ({ default: { existsSync: () => false, mkdirSync: vi.fn(), writeFileSync: fixture.writeFile } }));
 vi.mock('@whiskeysockets/baileys', () => ({
-  downloadMediaMessage: async () => Buffer.from('ogg'),
+  downloadMediaMessage: fixture.download,
   makeWASocket: () => ({
     ev: {
       on: (event: string, handler: (event: Record<string, unknown>) => unknown) => fixture.handlers.set(event, handler),
@@ -124,10 +126,63 @@ it('marks a push-to-talk voice note as a voice note, and leaves other audio alon
     const attachments = onInbound.mock.calls.map(
       ([, , message]) => (message.content as { attachments?: unknown[] }).attachments,
     );
+    const data = Buffer.from('ogg').toString('base64');
     expect(attachments).toStrictEqual([
-      [{ type: 'voice', name: expect.stringMatching(/^voice-/), localPath: expect.any(String), isVoiceNote: true }],
-      [{ type: 'audio', name: expect.stringMatching(/^audio-/), localPath: expect.any(String) }],
+      [{ type: 'voice', name: expect.stringMatching(/^voice-.*\.ogg$/), data, size: 3, isVoiceNote: true }],
+      [{ type: 'audio', name: expect.stringMatching(/^audio-.*\.ogg$/), data, size: 3 }],
     ]);
+  } finally {
+    await adapter.teardown();
+  }
+});
+
+// The container mounts only the session dir, so the adapter must not stage media
+// itself: it hands the bytes to the host, whose extractAttachmentFiles writes them
+// into the session inbox and sets localPath.
+it('hands inbound media to the host as base64, never as a path of its own', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response('2.3000.123456')),
+  );
+  vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as never);
+  const adapter = (await fixture.registrations.get('whatsapp')!.factory())!;
+  const onInbound = vi.fn<ChannelSetup['onInbound']>();
+  const setup = adapter.setup({ onAction: vi.fn(), onInbound, onMetadata: vi.fn() } as unknown as ChannelSetup);
+  await vi.waitFor(() => expect(fixture.handlers.has('messages.upsert')).toBe(true));
+  fixture.handlers.get('connection.update')!({ connection: 'open' });
+  await setup;
+  fixture.download.mockClear();
+  fixture.writeFile.mockClear();
+  try {
+    await fixture.handlers.get('messages.upsert')!({
+      messages: [
+        { imageMessage: { mimetype: 'image/jpeg', caption: 'look' } },
+        { documentMessage: { mimetype: 'application/pdf', fileName: 'report.pdf' } },
+        { documentMessage: { mimetype: 'application/pdf', fileName: `${'x'.repeat(300)}.pdf` } },
+        { documentMessage: { mimetype: 'video/mp4', fileName: 'huge.mp4', fileLength: 21 * 1024 * 1024 } },
+      ].map((message, i) => ({
+        key: { remoteJid: 'c@g.us', participant: 'owner@s.whatsapp.net', id: `${i}` },
+        messageTimestamp: 1,
+        message,
+      })),
+    });
+    const contents = onInbound.mock.calls.map(
+      ([, , message]) => message.content as { text: string; attachments?: Array<Record<string, unknown>> },
+    );
+    const data = Buffer.from('ogg').toString('base64');
+    expect(contents[0].attachments).toStrictEqual([
+      { type: 'image', name: expect.stringMatching(/^image-.*\.jpg$/), data, size: 3, mimeType: 'image/jpeg' },
+    ]);
+    expect(contents[1].attachments).toStrictEqual([
+      { type: 'document', name: 'report.pdf', data, size: 3, mimeType: 'application/pdf' },
+    ]);
+    // A name the host could not write would drop the whole message there.
+    expect(contents[2].attachments?.[0].name).toMatch(/^document-\d+$/);
+    // Too large to carry inline: not downloaded, and the agent is told.
+    expect(contents[3].attachments ?? []).toEqual([]);
+    expect(contents[3].text).toContain('[document could not be downloaded]');
+    expect(fixture.download).toHaveBeenCalledTimes(3);
+    expect(fixture.writeFile).not.toHaveBeenCalled();
   } finally {
     await adapter.teardown();
   }
