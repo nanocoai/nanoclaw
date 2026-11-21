@@ -122,6 +122,79 @@ describe('channel registry', () => {
   });
 });
 
+describe('channel registry — NANOCLAW_DISABLED_CHANNELS', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    const { teardownChannelAdapters } = await import('./channel-registry.js');
+    await teardownChannelAdapters();
+    vi.resetModules();
+  });
+
+  const mockSetup = () => ({
+    onInbound: () => {},
+    onInboundEvent: () => {},
+    onMetadata: () => {},
+    onAction: () => {},
+  });
+
+  it('starts every channel when the variable is unset', async () => {
+    vi.stubEnv('NANOCLAW_DISABLED_CHANNELS', '');
+    const reg = await import('./channel-registry.js');
+    const a = createMockAdapter('chan-a');
+    const b = createMockAdapter('chan-b');
+    reg.registerChannelAdapter('chan-a', { factory: () => a });
+    reg.registerChannelAdapter('chan-b', { factory: () => b });
+
+    await reg.initChannelAdapters(mockSetup);
+
+    expect(reg.getChannelAdapterExact('chan-a')).toBe(a);
+    expect(reg.getChannelAdapterExact('chan-b')).toBe(b);
+  });
+
+  it('skips listed channels without calling their factory (trim, case-insensitive, empties ignored)', async () => {
+    vi.stubEnv('NANOCLAW_DISABLED_CHANNELS', ' Chan-A , ,,chan-c ');
+    const reg = await import('./channel-registry.js');
+    const factoryA = vi.fn(() => createMockAdapter('chan-a'));
+    const factoryC = vi.fn(() => createMockAdapter('chan-c'));
+    const b = createMockAdapter('chan-b');
+    reg.registerChannelAdapter('chan-a', { factory: factoryA });
+    reg.registerChannelAdapter('chan-b', { factory: () => b });
+    reg.registerChannelAdapter('chan-c', { factory: factoryC });
+
+    await reg.initChannelAdapters(mockSetup);
+
+    expect(factoryA).not.toHaveBeenCalled();
+    expect(factoryC).not.toHaveBeenCalled();
+    expect(reg.getChannelAdapterExact('chan-a')).toBeUndefined();
+    expect(reg.getChannelAdapterExact('chan-b')).toBe(b);
+    expect(reg.getRegisteredChannelNames()).toContain('chan-a');
+  });
+
+  it('reports a listed channel as disabled, not no-credentials, on hot-start', async () => {
+    const reg = await import('./channel-registry.js');
+    await reg.initChannelAdapters(mockSetup);
+    vi.stubEnv('NANOCLAW_DISABLED_CHANNELS', 'late-chan');
+    const factory = vi.fn(() => createMockAdapter('late-chan'));
+    reg.registerChannelAdapter('late-chan', { factory });
+
+    expect(await reg.startChannelAdapter('late-chan')).toBe('disabled');
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('still reports no-credentials for an unlisted channel without credentials', async () => {
+    const reg = await import('./channel-registry.js');
+    await reg.initChannelAdapters(mockSetup);
+    vi.stubEnv('NANOCLAW_DISABLED_CHANNELS', 'other-chan');
+    reg.registerChannelAdapter('nocreds-chan', { factory: () => null });
+
+    expect(await reg.startChannelAdapter('nocreds-chan')).toBe('no-credentials');
+  });
+});
+
 describe('channel registry — instance keying', () => {
   // Fresh module per test: the registry and activeAdapters maps are
   // module-level, and these arms register conflicting same-channelType
