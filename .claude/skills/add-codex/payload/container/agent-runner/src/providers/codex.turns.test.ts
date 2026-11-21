@@ -125,7 +125,12 @@ describe('CodexProvider active turns', () => {
     const collect = collectEvents(query.events, events).catch((error: Error) => error);
 
     await waitFor(() => fake.startCalls.length === 1);
-    fake.notify('error', { error: { message: 'stream disconnected' }, willRetry: true });
+    fake.notify('error', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      error: { message: 'stream disconnected' },
+      willRetry: true,
+    });
     await sleep(20);
 
     expect(fake.killed).toBe(false);
@@ -150,9 +155,15 @@ describe('CodexProvider active turns', () => {
     const collect = collectEvents(query.events, events).catch((error: Error) => error);
 
     await waitFor(() => fake.startCalls.length === 1);
-    fake.notify('error', { error: { message: 'stream disconnected' }, willRetry: true });
+    fake.notify('error', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      error: { message: 'stream disconnected' },
+      willRetry: true,
+    });
     await sleep(20);
     fake.notify('turn/completed', {
+      threadId: 'thread-1',
       turn: {
         status: 'failed',
         error: { message: 'terminal failure', additionalDetails: 'retry exhausted' },
@@ -179,6 +190,8 @@ describe('CodexProvider active turns', () => {
 
       await waitFor(() => fake.startCalls.length === 1);
       fake.notify('error', {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
         error: { message: 'permission denied' },
         ...(willRetry === undefined ? {} : { willRetry }),
       });
@@ -199,7 +212,12 @@ describe('CodexProvider active turns', () => {
     const collect = collectEvents(query.events, events).catch((error: Error) => error);
 
     await waitFor(() => fake.startCalls.length === 1);
-    fake.notify('error', { error: { message: 'stream disconnected' }, willRetry: true });
+    fake.notify('error', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      error: { message: 'stream disconnected' },
+      willRetry: true,
+    });
     await sleep(20);
     query.abort();
 
@@ -212,10 +230,21 @@ describe('CodexProvider active turns', () => {
 
   it('keeps the existing turn deadline active during native retries', async () => {
     const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
     let fireDeadline: (() => void) | undefined;
+    const deadlines: unknown[] = [];
+    const cleared: unknown[] = [];
     const timeout = spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) => {
-      if (ms === 10 * 60 * 1000) fireDeadline = () => callback(...args);
-      return originalSetTimeout(callback, ms, ...args);
+      const handle = originalSetTimeout(callback, ms, ...args);
+      if (ms === 10 * 60 * 1000) {
+        deadlines.push(handle);
+        fireDeadline = () => callback(...args);
+      }
+      return handle;
+    });
+    const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((handle) => {
+      cleared.push(handle);
+      return originalClearTimeout(handle);
     });
     const fake = createFakeCodexRuntime();
     const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
@@ -223,9 +252,16 @@ describe('CodexProvider active turns', () => {
     const collect = collectEvents(query.events, events).catch((error: Error) => error);
     try {
       await waitFor(() => fake.startCalls.length === 1);
-      fake.notify('error', { error: { message: 'stream disconnected' }, willRetry: true });
+      fake.notify('error', {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        error: { message: 'stream disconnected' },
+        willRetry: true,
+      });
       await sleep(20);
-      expect(fireDeadline).toBeDefined();
+      // One deadline, armed at turn start: the retry neither restarts nor cancels it.
+      expect(deadlines).toHaveLength(1);
+      expect(cleared).not.toContain(deadlines[0]);
       fireDeadline!();
 
       expect((await collect)?.message).toBe('Turn timed out after 600000ms');
@@ -235,6 +271,7 @@ describe('CodexProvider active turns', () => {
       expect(fake.killed).toBe(true);
     } finally {
       timeout.mockRestore();
+      clear.mockRestore();
       query.abort();
       await collect;
     }
@@ -249,7 +286,7 @@ describe('CodexProvider active turns', () => {
 
     await waitFor(() => fake.startCalls.length === 1);
     fake.notify('item/agentMessage/delta', { delta: 'partial answer' });
-    fake.notify('turn/completed', { turn: { status: 'interrupted', error: null, items: [] } });
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { status: 'interrupted', error: null, items: [] } });
 
     expect((await collect)?.message).toBe('Codex turn interrupted');
     expect(events.filter((event) => event.type === 'error')).toHaveLength(1);
@@ -269,6 +306,7 @@ describe('CodexProvider active turns', () => {
       await waitFor(() => fake.startCalls.length === 1);
       // failed/null is a nullable-schema control, not a claimed native emission.
       fake.notify('turn/completed', {
+        threadId: 'thread-1',
         turn: { status, error: null, items: [{ type: 'agentMessage', text: 'partial answer' }] },
       });
 
@@ -583,6 +621,35 @@ describe('CodexProvider active turns', () => {
     await collect;
 
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'first message' }]);
+  });
+
+  it("leaves the parent's text alone when a sub-agent's stream error is retried", async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({}, fake.runtime);
+    const query = provider.query({ prompt: 'prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+
+    const collect = collectEvents(query.events, events);
+    await waitFor(() => fake.startCalls.length === 1);
+    fake.notify('item/agentMessage/delta', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'm1',
+      delta: 'parent answer',
+    });
+    fake.notify('error', {
+      threadId: 'child-thread',
+      turnId: 'child-turn',
+      willRetry: true,
+      error: { message: 'Reconnecting... 1/5', additionalDetails: 'stream disconnected' },
+    });
+    await sleep(20);
+    query.end();
+    fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } });
+    await collect;
+
+    expect(events.some((event) => event.type === 'progress')).toBe(false);
+    expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'parent answer' }]);
   });
 
   for (const willRetry of [false, undefined]) {
