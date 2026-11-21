@@ -137,6 +137,22 @@ export function formatInboundText(m: InboundEmail): string {
   return `${lines.join('\n')}\n\n${body}`;
 }
 
+/**
+ * Plain text to send for one outbound message, or null when there is nothing
+ * to send. Email has no buttons and a reply can't answer a card, so an
+ * interactive question (approval cards, ask_user_question) is refused with an
+ * error instead of being dropped: the approval path then removes the pending
+ * row and tells the agent, rather than leaving a card nobody can ever act on.
+ */
+export function outboundText(content: unknown): string | null {
+  if (!content || typeof content !== 'object') return null;
+  const c = content as Record<string, unknown>;
+  if (c.type === 'ask_question') {
+    throw new Error('agentmail cannot deliver interactive questions (email has no buttons)');
+  }
+  return typeof c.text === 'string' && c.text ? c.text : null;
+}
+
 interface PersistedState {
   lastPollTime?: string;
   seen?: string[];
@@ -400,8 +416,7 @@ function createAdapter(env: AgentMailEnv): ChannelAdapter {
 
     async deliver(platformId: string, _threadId: string | null, message: OutboundMessage): Promise<string | undefined> {
       const address = platformId.replace(/^agentmail:/, '');
-      const content = message.content as Record<string, unknown>;
-      const text = typeof content.text === 'string' ? content.text : '';
+      const text = outboundText(message.content);
       if (!text) return undefined;
 
       const replyToId = lastInboundMessageId.get(platformId);

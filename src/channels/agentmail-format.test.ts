@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { formatInboundText, parseInboundAllow, senderAllowed } from './agentmail.js';
+import { formatInboundText, outboundText, parseInboundAllow, senderAllowed } from './agentmail.js';
 
 describe('agentmail inbound allowlist', () => {
   it('routes every sender when unset or empty', () => {
@@ -39,5 +39,25 @@ describe('agentmail inbound formatting', () => {
     const text = formatInboundText({ messageId: 'm2', from: 'x@y.z', text: 'hello' });
     expect(text).toContain('Subject: (no subject)');
     expect(text.endsWith('\n\nhello')).toBe(true);
+  });
+});
+
+describe('agentmail outbound text', () => {
+  it('sends plain chat text and skips empty content', () => {
+    expect(outboundText({ text: 'hello' })).toBe('hello');
+    expect(outboundText({ text: '' })).toBeNull();
+    expect(outboundText({})).toBeNull();
+    expect(outboundText(undefined)).toBeNull();
+  });
+
+  it('refuses an approval card loudly instead of dropping it', () => {
+    const card = {
+      type: 'ask_question',
+      questionId: 'appr-1',
+      title: 'Approve?',
+      question: 'Restart the agent?',
+      options: [{ label: 'Approve', value: 'approve' }],
+    };
+    expect(() => outboundText(card)).toThrow(/cannot deliver interactive questions/);
   });
 });
