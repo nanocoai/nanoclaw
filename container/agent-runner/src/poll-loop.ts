@@ -384,7 +384,7 @@ export async function processQuery(
   // (chat runs, mid-turn delivery providers only). A frame-local count, never
   // keyed by content: it feeds the result door's nudge decision ("did this
   // turn deliver anything?"). Reset at the turn boundary (the 'result'
-  // event) — NOT at the follow-up push seam: query.push() does not end the
+  // event) — NOT at the follow-up push seam: query.push(WithId)() does not end the
   // in-flight turn, and its result's nudge decision still describes the
   // turn that is streaming.
   let midTurnSent = 0;
@@ -430,6 +430,13 @@ export async function processQuery(
     unwrappedNudged: boolean;
     taskBlockNudged: boolean;
     nudgedWindow?: SeqWindow;
+    /**
+     * Id of the pushed provider input for this turn, when `query.pushWithId` was
+     * given one. The provider reports the ids a result consumed so a turn that
+     * answered several folded inputs can drop the turns that no longer need a
+     * reply.
+     */
+    inputId?: string;
   };
   const queuedTurns: QueuedTurn[] = [];
   // On a wrap-nudge retry: the rows the nudged turn wrote. The turn boundary
@@ -538,12 +545,14 @@ export async function processQuery(
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
-        query.push(prompt);
+        if (keptIds.length === 1 && query.pushWithId) query.pushWithId(prompt, keptIds[0]);
+        else query.push(prompt);
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
           routing: extractRouting(keep),
           unwrappedNudged: false,
           taskBlockNudged: false,
+          ...(keptIds.length === 1 ? { inputId: keptIds[0] } : {}),
         };
         if (answering) queuedTurns.push(next);
         else adoptTurn(next);
@@ -708,6 +717,22 @@ export async function processQuery(
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
         nudgedWindow = undefined;
+        // A provider that can answer several inputs in one turn reports the
+        // input ids this result consumed. Any queued follow-up whose id is in
+        // there was answered inside the turn and must not get a second result
+        // — otherwise later answers in the query carry that stale turn's
+        // routing until the query ends (wrong in_reply_to / thread).
+        if (event.answered?.length) {
+          const consumed = new Set(event.answered);
+          const before = queuedTurns.length;
+          for (let i = queuedTurns.length - 1; i >= 0; i--) {
+            if (queuedTurns[i].inputId && consumed.has(queuedTurns[i].inputId!)) {
+              queuedTurns.splice(i, 1);
+            }
+          }
+          const dropped = before - queuedTurns.length;
+          for (let i = 0; i < dropped; i++) archivePrompts.shift();
+        }
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
         else answering = false;
