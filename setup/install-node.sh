@@ -68,10 +68,17 @@ else
       esac
       ;;
     Linux)
+      # Non-interactive apt: setup pipes this script's output to a log, so an
+      # interactive prompt is invisible and hangs the whole run. needrestart's
+      # post-install whiptail dialog ("Which services should be restarted?")
+      # is the one that actually bit (#2514) — DEBIAN_FRONTEND alone does not
+      # suppress it; NEEDRESTART_SUSPEND makes it defer instead of prompt.
+      export DEBIAN_FRONTEND=noninteractive
+      export NEEDRESTART_SUSPEND=1
       echo "STEP: nodesource-setup"
       curl -fsSL "https://deb.nodesource.com/setup_${NODE_LINE}.x" | sudo -E /bin/bash -
       echo "STEP: apt-install-nodejs"
-      sudo apt-get install -y nodejs
+      sudo -E apt-get install -y nodejs
       ;;
     *)
       echo "STATUS: failed"
