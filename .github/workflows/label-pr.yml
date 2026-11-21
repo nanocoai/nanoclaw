@@ -333,7 +333,7 @@ jobs:
       # Known gap: a push queued behind a running run, then an edit, skips area.
       # !cancelled() keeps area labels coming when the step above fails.
       - if: ${{ !cancelled() && contains(fromJSON('["opened", "synchronize", "reopened"]'), github.event.action) }}
-        uses: actions/labeler@8558fd74291d67161a8a78ce36a881fa63b766a9 # v5.0.0
+        uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
         with:
           configuration-path: .github/labeler.yml
           # Add only. A maintainer pruning area/* down to the primary subsystem
