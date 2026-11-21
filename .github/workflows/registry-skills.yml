@@ -53,6 +53,7 @@ jobs:
       matrix:
         include:
           - { skill: add-codex, bun: true }
+          - { skill: add-copilot, bun: true }
           - { skill: add-cursor, bun: true }
           - { skill: add-deltachat, bun: false }
           - { skill: add-dial, bun: false }
