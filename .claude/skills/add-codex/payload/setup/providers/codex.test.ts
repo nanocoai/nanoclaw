@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
 
 // Mock child_process so runCodexLoginAuth never spawns a real codex CLI; the
 // spawn stand-in plays `codex login` writing auth.json into whatever
@@ -45,12 +45,27 @@ vi.mock('@clack/prompts', async (original) => ({
   confirm: (...args: unknown[]) => mockConfirm(...args),
 }));
 
+// The auth step's menus, and the gateway store it reads; both stand-ins only
+// answer when a test sets them.
+const mockSelect = vi.fn();
+vi.mock('../lib/bright-select.js', () => ({ brightSelect: (...args: unknown[]) => mockSelect(...args) }));
+const testStore: { current?: import('../gateways/credential-store.js').ProviderCredentialStore } = {};
+vi.mock('../gateways/credential-store.js', async (original) => {
+  const real = await original<typeof import('../gateways/credential-store.js')>();
+  return {
+    ...real,
+    getCredentialStore: async (...args: Parameters<typeof real.getCredentialStore>) =>
+      testStore.current ?? real.getCredentialStore(...args),
+  };
+});
+
 import * as setupLog from '../logs.js';
 import {
   buildCodexFailurePrompt,
   offerCodexFailureAssist,
   resolveCodexCli,
   runCodexApiKeyAuth,
+  runCodexAuthStep,
   runCodexInstallCheck,
   runCodexLoginAuth,
   storeFailureMessage,
@@ -1808,6 +1823,89 @@ describe('gateway store failures name their cause', () => {
       }),
     );
     expect(log.mock.calls.some((call) => String(call[0]).includes(failure.message))).toBe(true);
+  });
+});
+
+describe('runCodexAuthStep with an account already connected', () => {
+  const tty = { stdin: process.stdin.isTTY, stdout: process.stdout.isTTY };
+  function terminal(isTTY: boolean): void {
+    Object.defineProperty(process.stdin, 'isTTY', { value: isTTY, configurable: true });
+    Object.defineProperty(process.stdout, 'isTTY', { value: isTTY, configurable: true });
+  }
+  type Save = import('../gateways/credential-store.js').ProviderCredentialStore['save'];
+  let save: Mock<Save>;
+
+  beforeEach(() => {
+    save = vi.fn<Save>(async () => {});
+    testStore.current = { has: async () => true, save };
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process.stdin, 'isTTY', { value: tty.stdin, configurable: true });
+    Object.defineProperty(process.stdout, 'isTTY', { value: tty.stdout, configurable: true });
+    testStore.current = undefined;
+    mockSelect.mockReset();
+    mockPassword.mockReset();
+    mockConfirm.mockReset();
+    vi.restoreAllMocks();
+    vi.mocked(setupLog.step).mockClear();
+    vi.mocked(setupLog.userInput).mockClear();
+  });
+
+  it('offers to sign in again, and saves the new login over the stored one', async () => {
+    terminal(true);
+    mockSelect.mockResolvedValueOnce('reconnect').mockResolvedValueOnce('api');
+    mockPassword.mockResolvedValue('sk-test-new-key');
+
+    await runCodexAuthStep();
+
+    expect(mockSelect).toHaveBeenCalledTimes(2);
+    expect(String(mockSelect.mock.calls[0][0].message)).toContain('already connected');
+    expect(save).toHaveBeenCalledWith('codex', { kind: 'api-key', value: 'sk-test-new-key' });
+  });
+
+  it('keeps the stored account when asked, with no login', async () => {
+    terminal(true);
+    mockSelect.mockResolvedValueOnce('keep');
+
+    await runCodexAuthStep();
+
+    expect(mockSelect).toHaveBeenCalledTimes(1);
+    expect(save).not.toHaveBeenCalled();
+    expect(setupLog.step).toHaveBeenCalledWith('auth', 'skipped', 0, {
+      REASON: 'openai-secret-already-present',
+      PROVIDER: 'codex',
+    });
+  });
+
+  it('after Sign in again, declining a skip returns to the sign-in menu, not the keep question', async () => {
+    terminal(true);
+    mockSelect.mockResolvedValueOnce('reconnect').mockResolvedValueOnce('skip').mockResolvedValueOnce('api');
+    mockConfirm.mockResolvedValueOnce(false);
+    mockPassword.mockResolvedValue('sk-test-new-key');
+
+    await runCodexAuthStep();
+
+    expect(mockSelect.mock.calls.map(([options]) => String(options.message))).toEqual([
+      expect.stringContaining('already connected'),
+      'How would you like to connect Codex?',
+      'How would you like to connect Codex?',
+    ]);
+    expect(save).toHaveBeenCalledWith('codex', { kind: 'api-key', value: 'sk-test-new-key' });
+  });
+
+  it('without a terminal, keeps the stored account and asks nothing', async () => {
+    terminal(false);
+
+    await runCodexAuthStep();
+
+    expect(mockSelect).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(setupLog.step).toHaveBeenCalledWith('auth', 'skipped', 0, {
+      REASON: 'openai-secret-already-present',
+      PROVIDER: 'codex',
+    });
   });
 });
 
