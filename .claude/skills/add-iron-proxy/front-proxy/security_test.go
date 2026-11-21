@@ -253,18 +253,25 @@ func tunnel(t *testing.T, g *gateway, sni string) (net.Conn, *bufio.Reader, erro
 }
 
 // git and other libcurl clients send proxy credentials only after a challenge.
-func TestMissingProxyAuthChallengesAndAcceptsRetryOnSameConnection(t *testing.T) {
+// A client that waits for a challenge (git, curl with anyauth, a browser) sends its
+// identity only after the 407. Go 1.27 closes the connection after a refused CONNECT,
+// where earlier versions kept it open, and those clients then retry on a new one. The
+// front has to accept the retry either way.
+func TestMissingProxyAuthChallengesAndAcceptsRetry(t *testing.T) {
 	g, _ := fixture(t, &fixtureBridge{}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("unexpected backend request") }))
 	front := httptest.NewServer(g)
 	t.Cleanup(front.Close)
 	u, _ := url.Parse(front.URL)
-	raw, e := net.Dial("tcp", u.Host)
-	if e != nil {
-		t.Fatal(e)
+	dial := func() (net.Conn, *bufio.Reader) {
+		raw, e := net.Dial("tcp", u.Host)
+		if e != nil {
+			t.Fatal(e)
+		}
+		t.Cleanup(func() { raw.Close() })
+		raw.SetDeadline(time.Now().Add(3 * time.Second))
+		return raw, bufio.NewReader(raw)
 	}
-	t.Cleanup(func() { raw.Close() })
-	raw.SetDeadline(time.Now().Add(3 * time.Second))
-	reader := bufio.NewReader(raw)
+	raw, reader := dial()
 	io.WriteString(raw, "CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n")
 	challenge, e := http.ReadResponse(reader, &http.Request{Method: "CONNECT"})
 	if e != nil {
@@ -274,10 +281,16 @@ func TestMissingProxyAuthChallengesAndAcceptsRetryOnSameConnection(t *testing.T)
 	if challenge.StatusCode != 407 || !strings.HasPrefix(challenge.Header.Get("Proxy-Authenticate"), "Basic ") {
 		t.Fatalf("status=%d challenge=%q", challenge.StatusCode, challenge.Header.Get("Proxy-Authenticate"))
 	}
-	io.WriteString(raw, "CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\nProxy-Authorization: "+auth(g, "session-A")+"\r\n\r\n")
+	authorized := "CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\nProxy-Authorization: " + auth(g, "session-A") + "\r\n\r\n"
+	io.WriteString(raw, authorized)
 	retry, e := http.ReadResponse(reader, &http.Request{Method: "CONNECT"})
 	if e != nil {
-		t.Fatal(e)
+		// The server closed the first connection after the challenge.
+		raw, reader = dial()
+		io.WriteString(raw, authorized)
+		if retry, e = http.ReadResponse(reader, &http.Request{Method: "CONNECT"}); e != nil {
+			t.Fatal(e)
+		}
 	}
 	if retry.StatusCode != 200 {
 		t.Fatalf("retry=%d", retry.StatusCode)
