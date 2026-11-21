@@ -114,7 +114,7 @@ Then, in `composeSessionSpec`, find the `contributedEnv` literal and spread the 
 
 ### Surface `[ATOMIC]` log lines at info level
 
-> **Shared block.** This rewrites the driver's container-stderr logger, which other local-model tools (e.g. `add-ollama-tool` for `[OLLAMA]`) also edit to surface their own prefix. Touch only the `[ATOMIC]` branch and leave the rest of the block intact, so the edits coexist and removal restores it cleanly.
+> **Shared block.** This rewrites the driver's container-stderr logger, which other local-model tools (e.g. `add-ollama-tool` for `[OLLAMA]`, `add-llmman-tool` for `[LLMMAN]`) also edit to surface their own prefix. Touch only the `[ATOMIC]` branch and leave the rest of the block intact, so the edits coexist and removal restores it cleanly.
 
 Container stderr now lands in the Docker driver: in `src/drivers/docker-driver.ts`, inside `DockerHandle.start()`, find the stderr handler:
 

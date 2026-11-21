@@ -141,6 +141,7 @@ body:
         - OpenCode
         - Codex
         - Ollama
+        - llmman
         - Other provider
         - Not provider-specific
 

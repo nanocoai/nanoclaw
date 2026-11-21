@@ -14,8 +14,8 @@ This skill helps users add capabilities or modify behavior. Use AskUserQuestion 
    - Channels: `/add-telegram`, `/add-slack`, `/add-discord`, `/add-whatsapp`, `/add-signal`, `/add-imessage`, and the rest of the `/add-<channel>` family.
    - Wiring channels to agents and isolation levels: `/manage-channels`.
    - Container directory access: `/manage-mounts`.
-   - Agent providers (non-default): `/add-opencode`, `/add-codex`, `/add-ollama-provider`.
-   - MCP tools: `/add-ollama-tool`, `/add-atomic-chat-tool`.
+   - Agent providers (non-default): `/add-opencode`, `/add-codex`, `/add-ollama-provider`, `/add-llmman-provider`.
+   - MCP tools: `/add-ollama-tool`, `/add-llmman-tool`, `/add-atomic-chat-tool`.
 3. **Plan the changes** — Identify the v2 surface the change belongs to (entity model in the central DB, per-agent-group container config, per-group `CLAUDE.md`, or core code).
 4. **Implement** — Make the change on the right surface.
 5. **Test guidance** — Tell the user how to verify.

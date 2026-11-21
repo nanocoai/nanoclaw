@@ -69,9 +69,9 @@ bash migrate-v2.sh
 
 **AI 네이티브, 설계상 하이브리드.** 설치와 온보딩 흐름은 최적화된 스크립트 경로로, 빠르고 결정론적입니다. 어떤 단계에 판단이 필요할 때 — 설치 실패, 안내가 필요한 결정, 커스터마이징 등 — 제어권이 Claude Code로 매끄럽게 넘어갑니다. 설정 이후에도 모니터링 대시보드나 디버깅 UI가 없습니다. 채팅으로 문제를 설명하면 Claude Code가 처리합니다.
 
-**기능보다 스킬.** 트렁크는 특정 채널 어댑터나 대체 에이전트 프로바이더가 아니라 레지스트리와 인프라를 제공합니다. 채널(Discord, Slack, Telegram, WhatsApp, …)은 오래 유지되는 `channels` 브랜치에, 대체 프로바이더(OpenCode, Ollama)는 `providers` 브랜치에 있습니다. `/add-telegram`, `/add-opencode` 등을 실행하면 스킬이 여러분이 필요로 하는 모듈만 정확히 포크로 복사합니다. 요청하지 않은 기능은 없습니다.
+**기능보다 스킬.** 트렁크는 특정 채널 어댑터나 대체 에이전트 프로바이더가 아니라 레지스트리와 인프라를 제공합니다. 채널(Discord, Slack, Telegram, WhatsApp, …)은 오래 유지되는 `channels` 브랜치에, 대체 프로바이더(OpenCode, Ollama, llmman)는 `providers` 브랜치에 있습니다. `/add-telegram`, `/add-opencode` 등을 실행하면 스킬이 여러분이 필요로 하는 모듈만 정확히 포크로 복사합니다. 요청하지 않은 기능은 없습니다.
 
-**최고의 하니스, 최고의 모델.** NanoClaw는 Anthropic의 공식 Claude Agent SDK를 통해 Claude Code를 네이티브로 사용하므로, 최신 Claude 모델과 Claude Code의 전체 도구 세트를 누릴 수 있습니다. 여기에는 자신의 NanoClaw 포크를 직접 수정하고 확장하는 능력도 포함됩니다. 다른 프로바이더는 드롭인 옵션입니다. OpenAI의 Codex는 `/add-codex`(ChatGPT 구독 또는 API 키), OpenRouter·Google·DeepSeek 등은 OpenCode를 통한 `/add-opencode`, 로컬 오픈 웨이트 모델은 `/add-ollama-provider`로 추가합니다. 프로바이더는 에이전트 그룹별로 설정할 수 있습니다.
+**최고의 하니스, 최고의 모델.** NanoClaw는 Anthropic의 공식 Claude Agent SDK를 통해 Claude Code를 네이티브로 사용하므로, 최신 Claude 모델과 Claude Code의 전체 도구 세트를 누릴 수 있습니다. 여기에는 자신의 NanoClaw 포크를 직접 수정하고 확장하는 능력도 포함됩니다. 다른 프로바이더는 드롭인 옵션입니다. OpenAI의 Codex는 `/add-codex`(ChatGPT 구독 또는 API 키), OpenRouter·Google·DeepSeek 등은 OpenCode를 통한 `/add-opencode`, 로컬 오픈 웨이트 모델은 `/add-ollama-provider` 또는 `/add-llmman-provider`로 추가합니다. 프로바이더는 에이전트 그룹별로 설정할 수 있습니다.
 
 ## 지원 기능
 
@@ -180,7 +180,7 @@ Docker는 크로스 플랫폼 지원(macOS, Linux, 그리고 WSL2 경유 Windows
 
 **서드파티나 오픈소스 모델을 사용할 수 있나요?**
 
-네. 지원되는 경로는 `/add-opencode`(OpenCode 설정을 통한 OpenRouter, OpenAI, Google, DeepSeek 등) 또는 `/add-ollama-provider`(Ollama를 통한 로컬 오픈 웨이트 모델)입니다. 둘 다 에이전트 그룹별로 설정할 수 있으므로, 같은 설치 내에서 서로 다른 에이전트가 서로 다른 백엔드에서 실행될 수 있습니다.
+네. 지원되는 경로는 `/add-opencode`(OpenCode 설정을 통한 OpenRouter, OpenAI, Google, DeepSeek 등), `/add-ollama-provider`(Ollama를 통한 로컬 오픈 웨이트 모델) 또는 `/add-llmman-provider`(llmman을 통한 로컬 오픈 웨이트 모델)입니다. 모두 에이전트 그룹별로 설정할 수 있으므로, 같은 설치 내에서 서로 다른 에이전트가 서로 다른 백엔드에서 실행될 수 있습니다.
 
 일회성 실험의 경우, Claude API 호환 엔드포인트라면 `.env`를 통해서도 작동합니다:
 
