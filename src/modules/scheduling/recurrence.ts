@@ -111,7 +111,18 @@ export async function handleRecurrence(inDb: InboundMailbox, session: Session): 
         sessionId: session.id,
       });
     } catch (err) {
-      log.error('Failed to compute next recurrence', {
+      // A cron string can't fix itself. Clearing the recurrence retires the
+      // dead row in place — otherwise it re-parses and errors on every sweep
+      // tick, forever, and the series' next run never comes.
+      try {
+        clearRecurrence(inDb, msg.id);
+      } catch (clearErr) {
+        log.error('Failed to clear malformed recurrence after parse error', {
+          messageId: msg.id,
+          err: clearErr,
+        });
+      }
+      log.error('Cleared malformed recurrence after parse failure', {
         messageId: msg.id,
         recurrence: msg.recurrence,
         err,
