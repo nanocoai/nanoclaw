@@ -112,6 +112,11 @@ async function listModels(url: URL, fetchImpl: typeof fetch, apiKey?: string): P
 
 const MANUAL_MODEL = '__manual_model__';
 
+// Keep the MiniMax picker focused on the currently supported ordinary text
+// choices. A saved model is handled separately by chooseOpenCodeModel so an
+// existing custom or legacy id remains selectable even when discovery omits it.
+const MINIMAX_ORDINARY_MODELS = ['minimax/MiniMax-M3.1-Flash', 'minimax/MiniMax-M3'] as const;
+
 export function validateModel(model: string, provider: string): string | undefined {
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(provider)) return 'Invalid configured OpenCode provider id.';
   if (!model.startsWith(`${provider}/`) || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(model.slice(provider.length + 1))) {
@@ -183,13 +188,20 @@ export function discoverRuntimeModels(provider: string, refresh = false, chatgpt
   return models;
 }
 
+export function filterOrdinaryModelChoices(provider: string, models: string[]): string[] {
+  const valid = models.filter((id) => !validateModel(id, provider));
+  if (provider !== 'minimax') return valid;
+  const available = new Set(valid);
+  return MINIMAX_ORDINARY_MODELS.filter((id) => available.has(id));
+}
+
 function answer<T>(value: T | symbol): T {
   if (p.isCancel(value)) throw new Error('Model selection cancelled; settings unchanged.');
   return value as T;
 }
 
 export async function chooseOpenCodeModel(provider: string, models: string[], current?: string): Promise<string> {
-  const choices = models.filter((id) => !validateModel(id, provider) && id !== current);
+  const choices = filterOrdinaryModelChoices(provider, models).filter((id) => id !== current);
   const selected = answer(
     await brightSelect<string>({
       message: 'Which default model should OpenCode use?',
