@@ -72,7 +72,8 @@
 //   json-merge into:<file> key:<field>  body: a JSON object          push-if-absent
 //
 // `append` without `at:` adds to EOF; with `at:<marker>` it inserts before the
-// `// <<< <marker>` closing line of a dormant marker region (see setup/index.ts).
+// `<<< <marker>` closing line of a dormant marker region (setup/index.ts,
+// container/Dockerfile).
 // `json-merge` reads an array-of-objects JSON file and pushes the body object
 // unless an element already has body[key]===element[key] (idempotent by key).
 //

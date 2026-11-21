@@ -59,7 +59,7 @@ bash nanoclaw.sh
 `nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It:
 
 - installs or updates Node and pnpm, and installs Docker if missing
-- installs a credential gateway and offers to register your model credential with it when your runtime needs one (Claude by default, or Codex, Cursor or OpenCode if you pick one)
+- installs a credential gateway and offers to register your model credential with it when your runtime needs one (Claude by default, or Antigravity, Codex, Cursor or OpenCode if you pick one)
 - fetches a prebuilt agent image or builds one locally
 - pairs your first channel (Slack, Mattermost, Microsoft Teams, Telegram, Discord, WhatsApp, Dial, Signal, iMessage, or chat from the terminal)
 
@@ -101,15 +101,15 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 
 **AI-native, hybrid by design.** The install and onboarding flow is an optimized scripted path, fast and deterministic. When a step needs judgment, whether a failed install, a guided decision, or a customization, control passes to a coding agent: setup can hand a failed step to Claude Code, Codex or OpenCode, and your coding agent runs the customization skills. Beyond setup, core ships no monitoring dashboard or debugging UI either (optional skills such as `/add-dashboard` add one): describe the problem to your coding agent and it handles it.
 
-**Skills over features.** Trunk ships the registry and infrastructure plus a terminal channel, not chat-app adapters or alternative agent providers. Channels (Discord, Slack, Telegram, WhatsApp, …) live on a long-lived `channels` branch; alternative providers (OpenCode, Codex, Cursor) ship inside their own skill's `payload/` folder. You run `/add-telegram`, `/add-opencode`, etc. and the skill copies exactly the module(s) you need into your fork. No feature you didn't ask for.
+**Skills over features.** Trunk ships the registry and infrastructure plus a terminal channel, not chat-app adapters or alternative agent providers. Channels (Discord, Slack, Telegram, WhatsApp, …) live on a long-lived `channels` branch; alternative providers (OpenCode, Codex, Cursor, Antigravity) ship inside their own skill's `payload/` folder. You run `/add-telegram`, `/add-opencode`, etc. and the skill copies exactly the module(s) you need into your fork. No feature you didn't ask for.
 
-**Best harness, best model.** By default each agent runs Claude through Anthropic's official Claude Agent SDK, so you get the latest Claude models and Claude Code's tools. Setup's runtime picker also offers Codex, Cursor and OpenCode, and skills add them later: `/add-codex` for OpenAI's Codex (ChatGPT subscription or API key), `/add-opencode` for OpenRouter, Google, DeepSeek, local OpenAI-compatible servers and more via OpenCode, and `/add-cursor` for Cursor's local Agent SDK (Cursor account or API key). Provider is configurable per agent group.
+**Best harness, best model.** By default each agent runs Claude through Anthropic's official Claude Agent SDK, so you get the latest Claude models and Claude Code's tools. Setup's runtime picker also offers Antigravity, Codex, Cursor and OpenCode, and skills add them later: `/add-codex` for OpenAI's Codex (ChatGPT subscription or API key), `/add-opencode` for OpenRouter, Google, DeepSeek, local OpenAI-compatible servers and more via OpenCode, `/add-cursor` for Cursor's local Agent SDK (Cursor account or API key), and `/add-antigravity` for Google's Antigravity CLI (Gemini API key). Provider is configurable per agent group.
 
 ## What It Supports
 
 - **Multi-channel messaging** — WhatsApp, WhatsApp Cloud API, Telegram, Discord, Slack, Microsoft Teams, Mattermost, Signal, iMessage, Matrix, Google Chat, Webex, Linear, GitHub, WeChat, Delta Chat, Dial (SMS and voice calls), Emacs, and email via Resend. Installed on demand with `/add-<channel>` skills. Run one or many at the same time.
 - **Flexible isolation** — connect each channel to its own agent for full privacy, share one agent across many channels for unified memory with separate conversations, or fold multiple channels into a single shared session so one conversation spans many surfaces. Pick per channel via `/manage-channels`. See [docs/isolation-model.md](docs/isolation-model.md).
-- **Per-agent workspace** — each agent group has its own instructions file (`CLAUDE.md`, or `AGENTS.md` for Codex and Cursor), its own memory, its own containers (one per session), and only the mounts you allow. Nothing crosses the boundary unless you wire it to.
+- **Per-agent workspace** — each agent group has its own instructions file (`CLAUDE.md`, or `AGENTS.md` for Codex, Cursor and Antigravity), its own memory, its own containers (one per session), and only the mounts you allow. Nothing crosses the boundary unless you wire it to.
 - **Scheduled tasks**: one-off or recurring jobs executed by the agent, with optional [script gates](docs/scheduled-tasks.md) that avoid waking it when there is no work
 - **Web access** — search and fetch content from the web
 - **Container isolation** — agents are sandboxed in Docker containers (macOS/Linux/WSL2)
