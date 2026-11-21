@@ -84,9 +84,17 @@ const AUTH_ERROR_PATTERNS = [
   /Invalid auth token/i,
 ];
 
-export function classifyPingResult(exitCode: number | null, stdout: string, stderr = ''): PingResult {
-  const output = `${stdout}\n${stderr}`;
-  if (AUTH_ERROR_PATTERNS.some((re) => re.test(output))) return 'auth_error';
+function authErrorLine(text: string): string | undefined {
+  return text.split('\n').find((l) => AUTH_ERROR_PATTERNS.some((re) => re.test(l)));
+}
+
+/**
+ * `notices` is the text of the runner's flagged failure notices. Auth errors
+ * reach the socket only that way, so a real reply that mentions "not logged
+ * in" still scores ok.
+ */
+export function classifyPingResult(exitCode: number | null, stdout: string, stderr = '', notices = ''): PingResult {
+  if (authErrorLine(`${notices}\n${stderr}`)) return 'auth_error';
   if (exitCode === 2) return 'socket_error';
   if (exitCode === 4) return 'agent_failure';
   if (exitCode === 0 && stdout.trim().length > 0) return 'ok';
@@ -136,13 +144,13 @@ function parseReplies(stdout: string): PingReply[] {
 export function pingOutcome(exitCode: number | null, stdout: string, stderr: string): PingOutcome {
   const replies = parseReplies(stdout);
   const text = replies.map((r) => r.text).join('\n');
-  const result = classifyPingResult(exitCode, text, stderr);
+  const notices = replies.filter((r) => r.failureNotice).map((r) => r.text);
+  const result = classifyPingResult(exitCode, text, stderr, notices.join('\n'));
   let detail: string | undefined;
   if (result === 'agent_failure') {
-    detail = sanitizeDetail(replies.find((r) => r.failureNotice)?.text ?? '');
+    detail = sanitizeDetail(notices[0] ?? '');
   } else if (result === 'auth_error') {
-    const hit = `${text}\n${stderr}`.split('\n').find((l) => AUTH_ERROR_PATTERNS.some((re) => re.test(l)));
-    detail = sanitizeDetail(hit ?? '');
+    detail = sanitizeDetail(authErrorLine(`${notices.join('\n')}\n${stderr}`) ?? '');
   }
   return detail ? { result, detail } : { result };
 }
