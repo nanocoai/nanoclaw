@@ -2,12 +2,14 @@ import net from 'net';
 import os from 'os';
 import path from 'path';
 
-import { readEnvFile } from './env.js';
+import { readEnvFileResult } from './env.js';
 import { getContainerImageBase, getDefaultContainerImage, getInstallSlug } from './install-slug.js';
 import { isValidTimezone } from './timezone.js';
 
-// Read config values from .env (falls back to process.env).
-const envConfig = readEnvFile([
+// Read config values from .env (falls back to process.env). The result also
+// carries whether an existing .env was unreadable; security boundaries must
+// treat that as unknown rather than as the documented defaults.
+const envRead = readEnvFileResult([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
   'TZ',
@@ -24,6 +26,7 @@ const envConfig = readEnvFile([
   'NANOCLAW_ABSOLUTE_CEILING_MS',
   'NANOCLAW_CLAIM_STUCK_MS',
 ]);
+const envConfig = envRead.values;
 
 /**
  * @deprecated WhatsApp adapter copies now read the ASSISTANT_NAME .env key
@@ -108,6 +111,10 @@ export const CONTAINER_PIDS_LIMIT = process.env.CONTAINER_PIDS_LIMIT ?? envConfi
 // Egress lockdown — force all agent traffic through the selected gateway on a
 // no-internet Docker network. Off by default; consumed by src/egress-lockdown.ts.
 export const EGRESS_LOCKDOWN = (process.env.NANOCLAW_EGRESS_LOCKDOWN || envConfig.NANOCLAW_EGRESS_LOCKDOWN) === 'true';
+
+// `.env` exists but could not be read. The operator's egress setting is then
+// unknown; egress-lockdown refuses to spawn rather than guessing "off".
+export const ENV_FILE_UNREADABLE = envRead.error !== undefined;
 export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
 

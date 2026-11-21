@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { envValue, readEnvFile } from './env.js';
+import { envValue, readEnvFile, readEnvFileResult } from './env.js';
 
 /**
  * `envValue` is the single-key form of `readEnvFile` — same file, same parser,
@@ -49,5 +49,15 @@ describe('envValue', () => {
   it('keeps = inside the value', () => {
     write('TOKEN=abc=def==\n');
     expect(envValue('TOKEN', root)).toBe('abc=def==');
+  });
+
+  it('reports an existing but unreadable .env instead of treating it as absent', () => {
+    fs.mkdirSync(path.join(root, '.env'));
+
+    const result = readEnvFileResult(['TZ'], root);
+
+    expect(result.values).toEqual({});
+    expect(result.error).toBeDefined();
+    expect(readEnvFile(['TZ'], root)).toEqual({});
   });
 });
