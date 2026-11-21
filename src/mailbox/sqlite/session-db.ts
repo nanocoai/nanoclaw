@@ -95,8 +95,13 @@ export function nextEvenSeq(db: Database.Database): number {
 
 export function insertMessage(db: Database.Database, message: InboundWrite, sequence = nextEvenSeq(db)): void {
   const record = createInboundRecord(message, sequence);
+  // OR IGNORE: a delivery retry (e.g. a card whose first delivery attempt
+  // timed out but actually landed) can insert the same message id twice.
+  // Same id means same message, so the duplicate is a benign no-op rather
+  // than the UNIQUE constraint violation that was previously surfaced as a
+  // "Message delivery failed, will retry" error and drove spurious retries.
   db.prepare(
-    `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
+    `INSERT OR IGNORE INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
      VALUES (@id, @sequence, @kind, @timestamp, @status, @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @seriesId, @trigger, @sourceSessionId, @onWake)`,
   ).run({
     ...record,
