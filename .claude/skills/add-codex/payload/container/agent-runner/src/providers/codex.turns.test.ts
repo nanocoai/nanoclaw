@@ -449,43 +449,55 @@ describe('CodexProvider active turns', () => {
     const query = provider.query({ prompt: 'delegate this', cwd: '/workspace/agent' });
     const events: ProviderEvent[] = [];
 
-    const collect = collectEvents(query.events, events);
-    await waitFor(() => fake.startCalls.length === 1);
-    const activityBefore = events.filter((event) => event.type === 'activity').length;
+    let collected = false;
+    const collect = collectEvents(query.events, events).finally(() => {
+      collected = true;
+    });
+    try {
+      await waitFor(() => fake.startCalls.length === 1);
+      const activityBefore = events.filter((event) => event.type === 'activity').length;
 
-    // Codex attaches every spawned sub-agent thread to this connection, so the
-    // child's lifecycle arrives on the same stream, tagged with its own threadId.
-    fake.notify('turn/started', { threadId: 'child-thread', turn: { id: 'child-turn' } });
-    fake.notify('item/agentMessage/delta', {
-      threadId: 'child-thread',
-      turnId: 'child-turn',
-      itemId: 'm1',
-      delta: 'child ',
-    });
-    fake.notify('item/completed', {
-      threadId: 'child-thread',
-      turnId: 'child-turn',
-      item: { type: 'agentMessage', text: 'child answer' },
-    });
-    fake.notify('error', {
-      threadId: 'child-thread',
-      turnId: 'child-turn',
-      willRetry: false,
-      error: { message: 'child failed' },
-    });
-    fake.notify('turn/completed', {
-      threadId: 'child-thread',
-      turn: { id: 'child-turn', items: [{ type: 'agentMessage', text: 'child answer' }] },
-    });
-    // Child work still counts as liveness for the parent.
-    await waitFor(() => events.filter((event) => event.type === 'activity').length >= activityBefore + 5);
+      // Codex attaches every spawned sub-agent thread to this connection, so the
+      // child's lifecycle arrives on the same stream, tagged with its own threadId.
+      fake.notify('turn/started', { threadId: 'child-thread', turn: { id: 'child-turn' } });
+      fake.notify('item/agentMessage/delta', {
+        threadId: 'child-thread',
+        turnId: 'child-turn',
+        itemId: 'm1',
+        delta: 'child ',
+      });
+      fake.notify('item/completed', {
+        threadId: 'child-thread',
+        turnId: 'child-turn',
+        item: { type: 'agentMessage', text: 'child answer' },
+      });
+      fake.notify('error', {
+        threadId: 'child-thread',
+        turnId: 'child-turn',
+        willRetry: false,
+        error: { message: 'child failed' },
+      });
+      fake.notify('turn/completed', {
+        threadId: 'child-thread',
+        turn: { id: 'child-turn', items: [{ type: 'agentMessage', text: 'child answer' }] },
+      });
+      // Child work still counts as liveness for the parent.
+      await waitFor(() => events.filter((event) => event.type === 'activity').length >= activityBefore + 5);
 
-    // The parent turn is still the active one: a follow-up steers into it.
-    query.push('follow-up');
-    await waitFor(() => fake.steerCalls.length === 1);
-    query.end();
-    fake.completeTurn('parent answer');
-    await collect;
+      // The parent turn is still the active one: a follow-up steers into it.
+      query.push('follow-up');
+      await waitFor(() => fake.steerCalls.length === 1);
+      query.end();
+      fake.completeTurn('parent answer');
+      // Bounded, so a query that never finishes still fails here and reaches the finally.
+      await waitFor(() => collected);
+      await collect;
+    } finally {
+      // If a wait fails (say the child ended the parent turn), stop the query
+      // so it does not keep running into later tests.
+      query.abort();
+      await collect.catch(() => {});
+    }
 
     expect(fake.startCalls).toHaveLength(1);
     expect(fake.steerCalls).toEqual([{ threadId: 'thread-1', turnId: 'turn-1', inputText: 'follow-up' }]);
