@@ -34,7 +34,8 @@ vi.mock('./modules/mount-security/index.js', () => ({
 
 import { buildMounts, resolveProviderContribution } from './container-runner.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from './db/index.js';
-import { ensureContainerConfig } from './db/container-configs.js';
+import { ensureContainerConfig, updateContainerConfigJson } from './db/container-configs.js';
+import { registerGatewayProvider, resetGatewayProvider } from './gateway-providers/index.js';
 import { initGroupFilesystem } from './group-init.js';
 import { PERSONA_PREPEND_FILE } from './group-persona.js';
 import { log } from './log.js';
@@ -910,5 +911,75 @@ describe('derived provider spawn surfaces', () => {
     expect(initializeProviderGroupSurfaces('consumer', contract, 'diagnostic-group', GROUPS_DIR)).toContain(
       'settings.json (reconciled Diagnostic-source settings)',
     );
+  });
+});
+
+// An installed but unselected gateway: its agent skill must never reach a
+// container. Selection stays pinned by test-setup's resetGatewayProvider.
+registerGatewayProvider({
+  kind: 'inactive-fixture',
+  agentSkills: ['inactive-gateway'],
+  sessions: { ensure: async () => ({ contribution: {} }) },
+  approvals: { subscribe: async () => {} },
+} as unknown as Parameters<typeof registerGatewayProvider>[0]);
+
+describe('spawn-path project document skill selection', () => {
+  const REPO_ROOT = process.cwd();
+
+  beforeEach(() => {
+    // A source tree holding two gateways' agent skills, each carrying the
+    // resident prose a credential prohibition lives in.
+    const sourceRoot = path.join(TEST_ROOT, 'source');
+    for (const [skill, prose] of [
+      ['fixture-gateway', 'Fixture credential guidance.'],
+      ['inactive-gateway', 'Inactive gateway guidance.'],
+    ]) {
+      const skillDir = path.join(sourceRoot, 'container', 'skills', skill);
+      fs.mkdirSync(skillDir, { recursive: true });
+      fs.writeFileSync(path.join(skillDir, 'SKILL.md'), `---\nname: ${skill}\n---\n`);
+      fs.writeFileSync(path.join(skillDir, 'instructions.md'), prose);
+    }
+    for (const entry of ['CLAUDE.md', 'agent-runner']) {
+      fs.symlinkSync(path.join(REPO_ROOT, 'container', entry), path.join(sourceRoot, 'container', entry));
+    }
+    process.chdir(sourceRoot);
+    resetGatewayProvider({
+      kind: 'fixture',
+      agentSkills: ['fixture-gateway'],
+      sessions: { ensure: async () => ({ contribution: {} }) },
+      approvals: { subscribe: async () => {} },
+    } as unknown as Parameters<typeof resetGatewayProvider>[0]);
+  });
+
+  afterEach(() => {
+    process.chdir(REPO_ROOT);
+    resetGatewayProvider();
+  });
+
+  // Red if the contract path composes from the stored selection: the active
+  // gateway's skill is linked but its resident prose is missing, and the
+  // inactive gateway's prose is composed though its skill is not linked.
+  it('composes the gateway-adjusted selection the skill links follow, not the stored one', async () => {
+    const ag = group('ag-narrow-skills', 'narrow-skills');
+    await createAgentGroup(ag);
+    await ensureContainerConfig(ag.id);
+    await updateContainerConfigJson(ag.id, 'skills', ['inactive-gateway']);
+    await initGroupFilesystem(ag, { provider: 'claude' });
+
+    // The spawn order: surfaces realized once, then handed to buildMounts.
+    const config = { ...containerConfig(), skills: ['inactive-gateway'] };
+    const sess = session('narrow-session', ag.id);
+    const { provider, contribution, surfaces } = await resolveProviderContribution(sess, ag, config);
+    expect(surfaces).toBeDefined();
+    await buildMounts(ag, sess, config, provider, contribution, surfaces);
+
+    const skills = path.join(DATA_DIR, 'v2-sessions', ag.id, '.claude-shared', 'skills');
+    expect(fs.readlinkSync(path.join(skills, 'fixture-gateway'))).toBe('/app/skills/fixture-gateway');
+    expect(fs.existsSync(path.join(skills, 'inactive-gateway'))).toBe(false);
+    const doc = fs.readFileSync(path.join(GROUPS_DIR, ag.folder, 'CLAUDE.md'), 'utf-8');
+    expect(doc).toContain('# NanoClaw Skill: fixture-gateway');
+    expect(doc).toContain('Fixture credential guidance.');
+    expect(doc).not.toContain('# NanoClaw Skill: inactive-gateway');
+    expect(doc).not.toContain('Inactive gateway guidance.');
   });
 });
