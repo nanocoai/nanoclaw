@@ -47,14 +47,19 @@ const SWEEP_INTERVAL_MS = 60_000;
  */
 export const RECONCILE_CONCURRENCY = 8;
 
-let running = false;
-let queue: InProcessReconcileQueue | null = null;
-let runtimeWatch: SessionWatch | null = null;
+interface SweepGeneration {
+  queue: InProcessReconcileQueue;
+  watch: SessionWatch | null;
+  timer: { handle?: NodeJS.Timeout } | null;
+  tick: Promise<void>;
+}
+
+let current: SweepGeneration | null = null;
+const draining = new Set<Promise<void>>();
 
 /** Coalesced enqueue for the event feeds; drops harmlessly once stopped. */
 function feedEnqueue(sessionId: string): void {
-  const feedQueue = queue;
-  if (running && feedQueue) feedQueue.add(sessionKey(sessionId));
+  current?.queue.add(sessionKey(sessionId));
 }
 
 /**
@@ -65,13 +70,14 @@ function feedEnqueue(sessionId: string): void {
  * Events are hints (they may drop, duplicate, or reference foreign keys);
  * the enqueue re-reads truth, so all of that is safe by construction.
  */
-function armRuntimeWatch(): void {
+function armRuntimeWatch(generation: SweepGeneration): void {
   const driver = peekSessionDriver();
   // Raw test fakes may lack watchSessions; never crash on them.
   if (!driver || typeof driver.watchSessions !== 'function') return;
   /* eslint-disable no-catch-all/no-catch-all -- a watch backend that cannot subscribe costs latency (the resync floor covers it), never the boot */
   try {
-    runtimeWatch = driver.watchSessions(INSTALL_SLUG, (event) => {
+    generation.watch = driver.watchSessions(INSTALL_SLUG, (event) => {
+      if (current !== generation) return;
       if (event.kind !== 'terminal' || !event.key.sessionId) return;
       feedEnqueue(event.key.sessionId);
     });
@@ -82,9 +88,8 @@ function armRuntimeWatch(): void {
 }
 
 export function startHostSweep(): void {
-  if (running) return;
-  running = true;
-  queue = createReconcileQueue({
+  if (current) return;
+  const queue = createReconcileQueue({
     reconcile: reconcileSession,
     concurrency: RECONCILE_CONCURRENCY,
     singletons: {
@@ -129,35 +134,56 @@ export function startHostSweep(): void {
   // Event feeds — additive over the resync floor: mail writes and runtime
   // terminal events land as coalesced enqueues, so behavior only gets
   // faster, never different, and a lost event costs at most one tick.
+  const generation: SweepGeneration = { queue, watch: null, timer: null, tick: Promise.resolve() };
+  current = generation;
   registerReconcileEnqueue(feedEnqueue);
-  armRuntimeWatch();
-  void sweep();
+  armRuntimeWatch(generation);
+  generation.tick = sweep(generation);
 }
 
-export function stopHostSweep(): void {
-  running = false;
+/**
+ * Stop admission immediately, then drain every generation already stopping.
+ * Callers must await this before closing the DB or releasing sweep resources.
+ * A subsequent start is independent and is not included in this stop's drain.
+ */
+export async function stopHostSweep(): Promise<void> {
+  const generation = current;
+  current = null;
   registerReconcileEnqueue(null);
-  const stoppingWatch = runtimeWatch;
-  runtimeWatch = null;
-  if (stoppingWatch) {
-    /* eslint-disable no-catch-all/no-catch-all -- a watch backend that is already gone must not block shutdown */
-    try {
-      stoppingWatch.stop();
-    } catch (err) {
-      log.warn('Runtime watch feed stop failed', { err });
+  if (generation) {
+    if (generation.timer?.handle !== undefined) clearTimeout(generation.timer.handle);
+    generation.timer = null;
+    if (generation.watch) {
+      /* eslint-disable no-catch-all/no-catch-all -- a watch backend that is already gone must not block shutdown */
+      try {
+        generation.watch.stop();
+      } catch (err) {
+        log.warn('Runtime watch feed stop failed', { err });
+      }
+      /* eslint-enable no-catch-all/no-catch-all */
     }
-    /* eslint-enable no-catch-all/no-catch-all */
+    // Shutdown drops pending adds, but the tick may also be awaiting the
+    // session listing outside the queue. Both must finish before DB teardown.
+    const drain = Promise.allSettled([generation.queue.shutdown(), generation.tick]).then((results) => {
+      const failed = results.find((result) => result.status === 'rejected');
+      if (failed?.status === 'rejected') throw failed.reason;
+    });
+    draining.add(drain);
+    // Keep the tracked promise rejection handled even if a caller forgets to
+    // await; the returned stop promise still reports the drain failure.
+    void drain.then(
+      () => draining.delete(drain),
+      () => draining.delete(drain),
+    );
   }
-  const stopping = queue;
-  queue = null;
-  if (stopping) void stopping.shutdown();
+  const results = await Promise.allSettled([...draining]);
+  const failed = results.find((result) => result.status === 'rejected');
+  if (failed?.status === 'rejected') throw failed.reason;
 }
 
-async function sweep(): Promise<void> {
-  // Capture the queue for the whole tick: stopHostSweep nulls the module
-  // reference mid-flight, and a stopping queue drops adds harmlessly.
-  const tickQueue = queue;
-  if (!running || !tickQueue) return;
+async function sweep(generation: SweepGeneration): Promise<void> {
+  if (current !== generation) return;
+  const tickQueue = generation.queue;
 
   // Enqueue order matches the loop this replaces: egress re-heal, then every
   // active session, then the approvals scan; the orphan-container stop last. Keys START in that order; up to
@@ -165,18 +191,26 @@ async function sweep(): Promise<void> {
   tickQueue.add('singleton:egress-reheal');
   try {
     const sessions = await getActiveSessions();
+    if (current !== generation) return;
     for (const session of sessions) {
       tickQueue.add(sessionKey(session.id));
     }
   } catch (err) {
     log.error('Host sweep error', { err });
   }
+  if (current !== generation) return;
   tickQueue.add('singleton:approvals-scan');
   tickQueue.add('singleton:orphan-containers');
 
   // The tick ends — and the next one is armed — only after everything this
   // tick enqueued has run. Delayed backoff retries don't hold the tick open.
   await tickQueue.idle();
-  if (!running) return;
-  setTimeout(() => void sweep(), SWEEP_INTERVAL_MS);
+  if (current !== generation) return;
+  const timer: NonNullable<SweepGeneration['timer']> = {};
+  generation.timer = timer;
+  timer.handle = setTimeout(() => {
+    if (current !== generation || generation.timer !== timer) return;
+    generation.timer = null;
+    generation.tick = sweep(generation);
+  }, SWEEP_INTERVAL_MS);
 }
