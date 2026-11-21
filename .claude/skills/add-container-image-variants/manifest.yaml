@@ -1,0 +1,13 @@
+skill: add-container-image-variants
+version: 1.0.0
+description: "Per-group container images with automatic variant discovery in build script"
+core_version: 0.1.0
+adds: []
+modifies:
+  - src/types.ts
+  - src/container-runner.ts
+  - container/build.sh
+structured: {}
+conflicts: []
+depends: []
+test: "npm run build"
