@@ -24,6 +24,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import { trustGatewayCaForChromium } from './browser-trust.js';
+import { describeFatal, installFatalErrorHandlers } from './fatal-errors.js';
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 import { getTaskSeriesId } from './db/session-routing.js';
@@ -142,7 +143,9 @@ async function main(): Promise<void> {
   }
 }
 
+installFatalErrorHandlers();
+
 main().catch((err) => {
-  log(`Fatal error: ${err instanceof Error ? err.message : String(err)}`);
+  log(`Fatal error: ${describeFatal(err)}`);
   process.exit(1);
 });
