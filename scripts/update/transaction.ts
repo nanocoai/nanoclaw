@@ -208,9 +208,16 @@ export function loadState(projectRoot: string, id: string): UpdateState {
 }
 
 function currentBranch(runtime: UpdateRuntime, root: string): string {
-  const branch = git(runtime, root, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-  if (!branch) throw new Error('Update requires a named branch, not detached HEAD');
-  return branch;
+  // `--quiet` makes a detached HEAD a silent exit 1, so any output is a real git error.
+  const branch = tryGit(runtime, root, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  if (branch.ok && branch.stdout) return branch.stdout;
+  if (!branch.ok && branch.stdout) throw new Error(branch.stdout);
+  const tag = tryGit(runtime, root, ['describe', '--tags', '--exact-match', 'HEAD']);
+  const at =
+    tag.ok && tag.stdout ? `tag ${tag.stdout}` : `commit ${git(runtime, root, ['rev-parse', '--short=8', 'HEAD'])}`;
+  throw new Error(
+    `Update needs a branch, but HEAD is detached at ${at}. Make one here, then run the update again: git switch -c nanoclaw`,
+  );
 }
 
 function assertClean(runtime: UpdateRuntime, root: string, what = 'Working tree'): void {
