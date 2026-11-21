@@ -286,6 +286,8 @@ describe('prepare on a detached checkout', () => {
       // An e2e install checks out the commit under test detached, newer than the latest release.
       const { install, shas } = fixture('main');
       git(install, ['checkout', '-q', '--detach']);
+      // A stale tracking ref shows whether prepare fetched before refusing.
+      git(install, ['update-ref', 'refs/remotes/upstream/main', shas['v2.3.0']]);
       const repo = path.resolve(import.meta.dirname, '../..');
       const loader = path.join(repo, 'node_modules/tsx/dist/loader.mjs');
       const controller = path.join(repo, 'scripts/update-nanoclaw.ts');
@@ -296,6 +298,7 @@ describe('prepare on a detached checkout', () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(`HEAD is detached at commit ${shas.main.slice(0, 8)}`);
       expect(result.stderr).not.toContain('ahead-of-release');
+      expect(git(install, ['rev-parse', 'upstream/main'])).toBe(shas['v2.3.0']);
     },
   );
 });
