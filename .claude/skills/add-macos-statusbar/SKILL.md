@@ -63,15 +63,20 @@ xattr -cr dist/statusbar
 
 ### Create the launchd plist
 
-Determine the absolute project root and home directory:
+Determine the absolute project root, home directory, and this install's NanoClaw service
+label (slug-scoped, e.g. `com.nanoclaw-v2-ab12cd34`):
 
 ```bash
 pwd
 echo $HOME
+pnpm exec tsx -e "import('./src/install-slug.ts').then(m => console.log(m.getLaunchdLabel()))" 2>/dev/null
 ```
 
+Confirm `~/Library/LaunchAgents/{SERVICE_LABEL}.plist` exists. If it doesn't, the service
+was installed under another label: find it with `launchctl list | grep -i nanoclaw` and use that.
+
 Create `~/Library/LaunchAgents/com.nanoclaw.statusbar.plist`, substituting the actual values
-for `{PROJECT_ROOT}` and `{HOME}`:
+for `{PROJECT_ROOT}`, `{HOME}`, and `{SERVICE_LABEL}`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -92,6 +97,8 @@ for `{PROJECT_ROOT}` and `{HOME}`:
     <dict>
         <key>HOME</key>
         <string>{HOME}</string>
+        <key>NANOCLAW_SERVICE_LABEL</key>
+        <string>{SERVICE_LABEL}</string>
     </dict>
     <key>StandardOutPath</key>
     <string>{PROJECT_ROOT}/logs/statusbar.log</string>
