@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import {
   abandonUpdate,
   acknowledgeRequirement,
+  assertOnBranch,
   cleanupUpdate,
   cutoverUpdate,
   finishUpdate,
@@ -97,6 +98,7 @@ async function execute(args: ParsedArgs): Promise<UpdateState | PruneReport | Ch
     if (args.upstreamRef !== undefined && (args.remote !== undefined || args.channel !== undefined)) {
       throw new Error('Pass --remote [--channel], or --upstream-ref, not both');
     }
+    assertOnBranch(args.projectRoot);
     let upstreamRef = args.upstreamRef;
     let target: UpdateTarget | undefined;
     if (upstreamRef === undefined) {

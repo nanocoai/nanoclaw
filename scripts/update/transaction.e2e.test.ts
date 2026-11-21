@@ -444,6 +444,26 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(state.gatewaySelection).toBeUndefined();
   });
 
+  it('refuses a detached checkout by naming where HEAD is and the fix, before it creates anything', () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime } = fakeRuntime(fixture.install);
+    const prepare = () => prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+
+    // `git checkout v2026.11.0` leaves an install like this.
+    exec(fixture.install, 'git', ['tag', '-a', 'v9.9.9', '-m', 'release']);
+    exec(fixture.install, 'git', ['checkout', '-q', '--detach', 'v9.9.9']);
+    expect(prepare).toThrow(/detached at tag v9\.9\.9\b[\s\S]*git switch -c nanoclaw/);
+
+    exec(fixture.install, 'git', ['tag', '-d', 'v9.9.9']);
+    expect(prepare).toThrow(`detached at commit ${fixture.originalHead.slice(0, 8)}`);
+
+    expect(fs.readdirSync(process.env.NANOCLAW_UPDATE_DIR)).toEqual([]);
+    expect(exec(fixture.install, 'git', ['branch', '--list', 'backup/*'])).toBe('');
+    expect(exec(fixture.install, 'git', ['tag', '--list', 'pre-update-*'])).toBe('');
+  });
+
   it('stages through official upstream, gates a migration, completes, and can restore code plus mutable state', async () => {
     const fixture = createForkFixture({ breaking: true });
     previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
