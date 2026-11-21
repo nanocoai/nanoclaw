@@ -6,8 +6,7 @@ description: Add Google Chat channel integration via Chat SDK.
 # Add Google Chat Channel
 
 Adds Google Chat support via the Chat SDK bridge. NanoClaw doesn't ship channels
-in trunk — this skill copies the Google Chat adapter in from the `channels`
-branch.
+in trunk — this skill copies the Google Chat adapter in from its own `payload/`.
 
 The mechanical steps under **Apply** carry `nc:` directive fences: an agent
 reads the prose and applies them, and a parser can apply them deterministically
@@ -18,12 +17,12 @@ safe to re-run; anything a parser can't apply falls back to the prose beside it.
 
 ### 1. Copy the adapter and its registration test
 
-Fetch the `channels` branch and copy the Google Chat adapter and its
-registration test into `src/channels/` (overwrite — the branch is canonical):
+Copy the Google Chat adapter and its registration test from this skill's
+`payload/` into `src/channels/` (overwrite — the payload is canonical):
 
-```nc:copy from-branch:channels
-src/channels/gchat.ts
-src/channels/gchat-registration.test.ts
+```nc:copy
+payload/src/channels/gchat.ts -> src/channels/gchat.ts
+payload/src/channels/gchat-registration.test.ts -> src/channels/gchat-registration.test.ts
 ```
 
 ### 2. Register the adapter
