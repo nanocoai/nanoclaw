@@ -251,7 +251,7 @@ export function withSessionEvents(driver: SessionDriver): SessionEventsDriver {
     resync: (installSlug) => hub.resync(installSlug),
   };
   if (driver.reconcileNetworkAccess)
-    wrapped.reconcileNetworkAccess = (access) => driver.reconcileNetworkAccess!(access);
+    wrapped.reconcileNetworkAccess = (access, handle) => driver.reconcileNetworkAccess!(access, handle);
   if (driver.ensureReady) wrapped.ensureReady = (): Promise<void> => driver.ensureReady!();
   if (driver.reapResidue) wrapped.reapResidue = (installSlug): Promise<void> => driver.reapResidue!(installSlug);
   return wrapped;

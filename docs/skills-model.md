@@ -47,7 +47,7 @@ Patch skills follow the same rules: a test for every edit, and code pushed into 
 
 One honest exception: a bug fix that genuinely changes an existing line can't always be moved into a new file. That single line is the one place an upgrade can still hard-conflict. If upstream touched the same line, the fix has to be re-derived against the new code. That's fine when it's small and tested; just don't pretend it's free.
 
-(Packaging is a separate axis: some skills fetch code from a registry branch, some ship files in their own folder, some are pure instructions.)
+(Packaging is a separate axis: channel skills fetch code from a registry branch, most others ship files in their own folder, some are pure instructions.)
 
 ## What makes a good skill
 
@@ -70,9 +70,9 @@ The skill's name and description declare the capability. Runtime registration us
 
 The files a skill adds live in the skill's own folder, and the skill copies them into the project when it runs. The skill is self-contained.
 
-The exception is skills that plug into a registry: channels and providers. Their code is larger, multi-file, and has to stay in sync with the core as it changes over time. That code lives on a long-lived **registry branch** (`channels`, `providers`) that we forward-merge against main, and the skill fetches it from there (`git show origin/channels:path > path`). A frozen copy in a skill folder would go stale.
+The exception is channel skills. Channel adapter code is larger, multi-file, and has to stay in sync with the core as it changes over time. That code lives on a long-lived **registry branch** (`channels`) that we forward-merge against main, and the skill fetches it from there (`git show origin/channels:path > path`). Agent providers are just as large but keep their code in the skill's own `payload/` folder on `main`: CI applies every provider skill whose `nc:copy` block copies from its payload to the current core on every PR, so that copy cannot go stale unnoticed.
 
-This fetch is **additive, never a merge**. The skill copies in the files it needs; it does _not_ `git merge` the branch. Merging a registry branch into a customized install is exactly the conflict fight this model exists to avoid. A skill's **tests live on the branch alongside its code** and are fetched the same way; a channel's adapter travels with its registration test. A provider is the multi-point case: its code spans the host _and_ container trees plus a Dockerfile edit, so it fetches files into both trees and ships a registration test per tree. See the provider archetype in [skill-guidelines.md](skill-guidelines.md).
+Install is **additive, never a merge**. The skill copies in the files it needs; it does _not_ `git merge` a branch. Merging a registry branch into a customized install is exactly the conflict fight this model exists to avoid. A skill's **tests live alongside its code**, on the branch or in the payload, and are copied the same way; a channel's adapter travels with its registration test. A provider is the multi-point case: its code spans the host, container and setup trees, pins its CLI or SDK (`container/cli-tools.json` or an agent-runner dependency), appends one import to each of the five provider and contract barrels, and ships a registration test per tree. See the provider archetype in [skill-guidelines.md](skill-guidelines.md).
 
 Either way the skill brings its own code, from its folder or from its branch.
 

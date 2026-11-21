@@ -20,6 +20,7 @@ vi.mock('../log.js', () => ({
 }));
 
 import { closeDb, getAllAgentGroups, initTestDb, runMigrations } from '../db/index.js';
+import { createAgentGroup } from '../db/agent-groups.js';
 import { getContainerConfig } from '../db/container-configs.js';
 import { findTaskSessions } from '../db/sessions.js';
 import { PERSONA_PREPEND_FILE } from '../group-persona.js';
@@ -138,6 +139,36 @@ describe('createAgentFromTemplate', () => {
     expect(await getAllAgentGroups()).toHaveLength(0);
   });
 
+  it('takes a fresh folder when a never-spawned group holds the name (row, no folder yet)', async () => {
+    await createAgentGroup({
+      id: 'ag-unspawned',
+      name: 'Analyst',
+      folder: 'analyst',
+      agent_provider: null,
+      created_at: new Date().toISOString(),
+    });
+
+    const { group: g } = await createAgentFromTemplate('sales/sdr', { name: 'Analyst' });
+    expect(g.folder).toMatch(/^analyst-[0-9a-f]{8}$/);
+    expect(fs.existsSync(path.join(GROUPS_DIR, 'analyst'))).toBe(false);
+  });
+
+  it('refuses a colliding name whose suffixed folder would be too long to spawn', async () => {
+    const name = 'a'.repeat(60);
+    await createAgentGroup({
+      id: 'ag-long',
+      name,
+      folder: name,
+      agent_provider: null,
+      created_at: new Date().toISOString(),
+    });
+
+    await expect(createAgentFromTemplate('sales/sdr', { name })).rejects.toThrow(
+      `too long: 69 characters, at most 63 ("${name}" is already taken)`,
+    );
+    expect(await getAllAgentGroups()).toHaveLength(1);
+  });
+
   it('writes context extras at their template-relative paths', async () => {
     const { group: g } = await createAgentFromTemplate('sales/sdr', { name: 'SDR Extras' });
 
@@ -238,6 +269,12 @@ describe('createAgentFromTemplate', () => {
     // install-global timezone would only produce this if the test host itself
     // ran in JST.
     expect(row.process_after).toMatch(/T00:00:00/);
+  });
+
+  it("stamps the given provider onto the config row (a sub-agent takes its creator's)", async () => {
+    writeTemplate();
+    const { group } = await createAgentFromTemplate('sales/sdr', { provider: 'codex' });
+    expect((await getContainerConfig(group.id))?.provider).toBe('codex');
   });
 
   it('ignores an invalid timezone — the group follows the install default', async () => {

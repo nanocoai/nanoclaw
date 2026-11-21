@@ -217,7 +217,7 @@ describe('unknown-sender decline_notify flow', () => {
     expect(fyi.type).toBeUndefined(); // not ask_question
     expect(fyi.options).toBeUndefined();
     expect(fyi.text).toContain('FYI');
-    expect(fyi.text).toContain('Stranger (tg:stranger)');
+    expect(fyi.text).toContain('"Stranger" ("tg:stranger")');
     expect(fyi.text).toContain('ncl members add');
 
     // Drop recorded. (The gate writes reason 'unknown_sender_decline_notify';

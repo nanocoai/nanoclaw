@@ -61,19 +61,24 @@ rm -f data/photon-auth.json
 
 ```bash
 pnpm run build
-source setup/lib/install-slug.sh
-launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
-# systemctl --user restart $(systemd_unit)            # Linux
+bash setup/lib/restart.sh
 ```
 
 ## 7. Unwire and delete the messaging group (optional)
 
+With the service running, delete each iMessage messaging group from the
+project root. `ncl messaging-groups delete` removes the group and every row
+that points at it in one transaction; `bin/ncl messaging-groups help delete`
+lists what it clears. `bin/ncl` (not a global `ncl`) keeps the delete on this
+install.
+
 ```bash
-pnpm exec tsx scripts/q.ts data/v2.db "
-DELETE FROM messaging_group_agents WHERE messaging_group_id IN
-  (SELECT id FROM messaging_groups WHERE channel_type='imessage');
-DELETE FROM messaging_groups WHERE channel_type='imessage';
-"
+(
+  ids=$(pnpm exec tsx scripts/q.ts data/v2.db "SELECT id FROM messaging_groups WHERE channel_type='imessage'") || exit 1
+  for id in $(printf '%s\n' "$ids"); do
+    bin/ncl messaging-groups delete --id "$id" || exit 1
+  done
+)
 ```
 
 ## 8. Delete the Photon project (optional, hosted)

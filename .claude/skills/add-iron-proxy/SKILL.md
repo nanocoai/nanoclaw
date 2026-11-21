@@ -136,9 +136,16 @@ Use the existing provider-auth entry point after `/add-codex` installs the
 provider. Browser sign-in, device pairing, and API-key entry are the same for
 all gateways; `scripts/credential-store.ts` supplies Iron's custody adapter.
 Iron Control stores API keys and manages subscription refresh-token rotation
-through its native broker. Agents receive only a synthetic `auth.json` file.
-A subscription login uses a new, dedicated Codex session; never copy personal
-Codex credentials. The setup flow and provider picker stay unchanged.
+through its native broker. Agents receive only a synthetic `auth.json` file
+with placeholder tokens. For a subscription login it also carries the login's
+ChatGPT workspace id, which Codex 0.156.0 and later look up before any model
+request; the id is an identifier, not a credential, and the agent can read it.
+Setup records it next to the other non-secret Iron IDs. A login saved before
+the id was recorded keeps the placeholder, which Codex 0.156.0 and later
+reject, and the host logs a warning; Iron cannot read stored values back, so
+run the command below once to sign in again. A subscription login uses a new,
+dedicated Codex session; never copy personal Codex credentials. The setup flow
+and provider picker stay unchanged.
 
 ```bash
 pnpm exec tsx setup/index.ts --step provider-auth codex

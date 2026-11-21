@@ -185,9 +185,12 @@ CREATE TABLE pending_questions (
   thread_id      TEXT,
   title          TEXT NOT NULL,
   options_json   TEXT NOT NULL,
-  created_at     TEXT NOT NULL
+  created_at     TEXT NOT NULL,
+  question       TEXT NOT NULL DEFAULT ''        -- added by migration 026
 );
 ```
+
+`question` holds the card body so the answered card can keep it (`getAskQuestionRender`).
 
 ### 1.10 `agent_destinations`
 
@@ -440,6 +443,7 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 | 20 | `container-config-timezone` | `020-container-config-timezone.ts` | `container_configs.timezone` — per-agent-group timezone override (NULL = install-global) |
 | 21 | `approval-question-render-metadata` | `021-approval-question.ts` | `question` card-body column on all three approval tables so terminal edits retain the original request |
 | 22 | `messaging-group-detached-at` | `022-messaging-group-detached.ts` | `messaging_groups.detached_at` — records when the bot left a channel without deleting its wiring |
+| 26 | `pending-question-body` | `026-pending-question-body.ts` | `pending_questions.question` — the card body, so an answered ask_user_question card keeps its question |
 
 Numbers 5 and 6 are intentionally absent — migrations were renumbered during early development.
 

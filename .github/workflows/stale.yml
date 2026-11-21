@@ -1,0 +1,213 @@
+# Stale policy, lane A: author-blocked items only.
+#
+# Looks only at items where a maintainer asked the author for something:
+# issues labelled triage/needs-repro or triage/needs-author, and PRs labelled
+# triage/needs-author. Anything waiting on us is never marked or closed. There
+# is deliberately no general-inactivity lane; backlog cleanup is a human batch
+# close under CONTRIBUTING.md. Freeze an item with triage/keep.
+#
+#   answered  Live from merge. Removes the triage label (and `stale`) once the
+#             item's author answers, so an answered item never counts as
+#             waiting on its author.
+#   stale     DRY RUN (debug-only: true). Logs what it would mark and close and
+#             writes nothing. Arming is a separate PR with its own checklist.
+
+name: Stale
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  # Before every stale run, remove the triage label (and `stale`) from any
+  # labelled item whose author answered after the label went on: a comment,
+  # and for a PR a review, a review-thread reply, their own commit or a
+  # force-push. It runs right before the only job that reads the labels, so
+  # an answer is never more than a day late.
+  #
+  # The stale job needs this one, so if it fails nothing is marked or closed
+  # that day.
+  answered:
+    runs-on: ubuntu-26.04
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          retries: 3
+          script: |
+            const TRIAGE = ['triage/needs-repro', 'triage/needs-author'];
+            const { owner, repo } = context.repo;
+
+            // NANOCLAW-STALE-ANSWER-START
+            // True when the item's author answered after the ask. Pure, so
+            // scripts/stale-workflow.test.ts runs this exact code on fixtures.
+            function authorAnswered({ author, askedAt, comments = [], reviews = [], commits = [], events = [] }) {
+              const after = (at) => Date.parse(at) > askedAt;
+              const byAuthor = (user) => user?.login === author;
+              return (
+                comments.some((c) => byAuthor(c.user) && after(c.created_at)) ||
+                // A reply in a review thread is a review of its own.
+                reviews.some((r) => byAuthor(r.user) && after(r.submitted_at)) ||
+                // The author wrote it and committed it themselves (commit
+                // date) or in GitHub's web editor (author date, as web-flow
+                // also re-commits a rebase): a maintainer's "Update branch"
+                // merge or rebase is never an answer.
+                commits.some(
+                  (c) =>
+                    byAuthor(c.author) &&
+                    (byAuthor(c.committer)
+                      ? after(c.commit?.committer?.date)
+                      : c.committer?.login === 'web-flow' && after(c.commit?.author?.date)),
+                ) ||
+                events.some((e) => e.event === 'head_ref_force_pushed' && byAuthor(e.actor) && after(e.created_at))
+              );
+            }
+            // NANOCLAW-STALE-ANSWER-END
+
+            const items = new Map();
+            for (const label of TRIAGE) {
+              const found = await github.paginate(github.rest.issues.listForRepo, {
+                owner, repo, state: 'open', labels: label, per_page: 100,
+              });
+              for (const item of found) items.set(item.number, item);
+            }
+
+            for (const item of items.values()) {
+              const issue_number = item.number;
+              const author = item.user.login;
+              const labels = item.labels.map((l) => l.name);
+              const triage = labels.filter((name) => TRIAGE.includes(name));
+
+              // The ask is as recent as the latest time a triage label now on
+              // the item was applied.
+              const events = await github.paginate(github.rest.issues.listEvents, {
+                owner, repo, issue_number, per_page: 100,
+              });
+              const askedAt = Math.max(
+                ...events
+                  .filter((e) => e.event === 'labeled' && triage.includes(e.label?.name))
+                  .map((e) => Date.parse(e.created_at)),
+              );
+              if (!Number.isFinite(askedAt)) {
+                core.warning(`#${issue_number}: no labeled event for ${triage.join(', ')}; skipped`);
+                continue;
+              }
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number, since: new Date(askedAt).toISOString(), per_page: 100,
+              });
+              let reviews = [];
+              let commits = [];
+              if (item.pull_request) {
+                const pull = { owner, repo, pull_number: issue_number, per_page: 100 };
+                reviews = await github.paginate(github.rest.pulls.listReviews, pull);
+                commits = await github.paginate(github.rest.pulls.listCommits, pull);
+              }
+              if (!authorAnswered({ author, askedAt, comments, reviews, commits, events })) continue;
+
+              const remove = labels.filter((name) => TRIAGE.includes(name) || name === 'stale');
+              for (const name of remove) {
+                try {
+                  await github.rest.issues.removeLabel({ owner, repo, issue_number, name });
+                } catch (err) {
+                  if (err.status !== 404) throw err; // already gone
+                }
+              }
+              core.info(`#${issue_number}: the author answered after the ask; removed ${remove.join(', ')}`);
+            }
+
+  stale:
+    needs: answered
+    runs-on: ubuntu-26.04
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
+        with:
+          # DRY RUN: logs only. Arming is a separate PR.
+          debug-only: true
+
+          # The population. Nothing outside these labels is examined.
+          any-of-issue-labels: 'triage/needs-repro,triage/needs-author'
+          any-of-pr-labels: 'triage/needs-author'
+
+          days-before-issue-stale: 21
+          days-before-issue-close: 14
+          days-before-pr-stale: 21
+          days-before-pr-close: 21
+
+          stale-issue-label: 'stale'
+          stale-pr-label: 'stale'
+          remove-stale-when-updated: true
+          # An answer puts the ball back in our court, so the item leaves the
+          # population instead of starting another countdown.
+          labels-to-remove-when-unstale: 'triage/needs-repro,triage/needs-author'
+          close-issue-reason: 'not_planned'
+
+          # Never touch a contributor's branch. This is also the default; it is
+          # set explicitly so a later edit has to be deliberate.
+          delete-branch: false
+
+          # Exemptions. Every entry is a label or a piece of metadata, so none
+          # of this is a judgment call at runtime.
+          #
+          #   kind/security, kind/hardening  an unfixed vulnerability does not
+          #                                  stop being one because nobody
+          #                                  commented
+          #   priority/critical, /high       maintainer-set; if we said it
+          #                                  matters, the bot gets no vote
+          #   good first issue, help wanted  parked on purpose, for newcomers;
+          #                                  idleness is the intended state
+          #                                  ("help wanted" does not exist on
+          #                                  this repo today, so it is listed
+          #                                  as forward protection)
+          #   core-team                      our own work; nudge a colleague,
+          #                                  never close their branch
+          #   triage/keep                    the manual freeze, permanent
+          exempt-issue-labels: 'kind/security,kind/hardening,priority/critical,priority/high,good first issue,help wanted,core-team,triage/keep'
+          exempt-pr-labels: 'kind/security,kind/hardening,priority/critical,priority/high,good first issue,help wanted,core-team,triage/keep'
+
+          # Free insurance: no milestones exist today, so this costs nothing
+          # now and protects any release milestone created later. An assignee
+          # means a human took it, which means it is waiting on us.
+          exempt-all-milestones: true
+          exempt-all-assignees: true
+
+          # A draft is a work in progress by definition.
+          exempt-draft-pr: true
+
+          # Lane A alone can never produce a large sweep, so the rate-limit
+          # ceiling is set for headroom rather than for backlog scale.
+          operations-per-run: 100
+
+          stale-pr-message: >-
+            **This PR is waiting on a change from you.** A maintainer asked for something above and
+            we have not heard back, so it is now labelled `stale`. Push your change, reply to the
+            review, or leave a comment to tell us you need more time; any of these removes the label
+            automatically. If nothing arrives in 21 days we will close it, so the open queue stays
+            an honest picture of what is moving. A close here is bookkeeping, not a verdict on your
+            work. Thank you for the contribution.
+
+          close-pr-message: >-
+            **Closing this for now.** Nothing came back on the request above, so we are closing to
+            keep the review queue matched to what is actually moving. This is not a rejection. When
+            you pick it back up, open a new PR against current `main` and link this one. Thank you
+            for the work you put into it.
+
+          stale-issue-message: >-
+            **This issue is waiting on an answer from you.** A maintainer asked for something above,
+            usually a reproduction or more details, and we have not heard back, so it is now
+            labelled `stale`. Reply in a comment with what was asked. For a bug, that is the steps,
+            your NanoClaw version, and the relevant lines from `logs/nanoclaw.error.log`. A comment
+            removes the label automatically. Without an answer we will close this in 14 days,
+            because we cannot act on what we cannot see. If it closes, you can open a new issue
+            with the details at any time.
+
+          close-issue-message: >-
+            **Closing this for now.** We asked for something above and did not hear back. That is a
+            limit on what we can see from here, not a judgment on the report. If you pick it back
+            up, open a new issue with the details and link this one. Thank you for taking the time
+            to file it.

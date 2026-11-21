@@ -1,4 +1,7 @@
+import path from 'node:path';
+
 import { readEnvFile } from '../../../../src/env.js';
+import { recordProviderCredentials } from '../payload/src/gateway-providers/onecli-provider-credentials.js';
 import type {
   GatewayCredentialConnection,
   GatewayCredentialTarget,
@@ -14,6 +17,8 @@ export interface OneCliCredential {
   name: string;
   type: 'openai' | 'generic';
   hostPattern: string;
+  /** Exact path the entry is limited to; absent means the whole host. */
+  pathPattern?: string;
   injectionConfig?: KeyInjection;
   authMode?: 'oauth';
 }
@@ -78,7 +83,7 @@ export function findOneCliCredential(payload: unknown, descriptor: OneCliCredent
     secret.valueSource !== undefined && secret.valueSource !== 'inline' ? 'valueSource' : undefined,
     secret.opRef !== undefined && secret.opRef !== null ? 'opRef' : undefined,
     secret.scope !== 'project' ? 'scope' : undefined,
-    secret.pathPattern ? 'pathPattern' : undefined,
+    (secret.pathPattern || undefined) !== descriptor.pathPattern ? 'pathPattern' : undefined,
     !knownKeyMapping ? 'injectionConfig' : undefined,
     descriptor.authMode && (!isRecord(secret.metadata) || secret.metadata.authMode !== descriptor.authMode)
       ? 'metadata.authMode'
@@ -201,6 +206,7 @@ export function createOneCliCredentialConnection(
         type: descriptor.type,
         valueSource: 'inline',
         hostPattern: descriptor.hostPattern,
+        ...(descriptor.pathPattern ? { pathPattern: descriptor.pathPattern } : {}),
         value,
         ...(descriptor.injectionConfig ? { injectionConfig: descriptor.injectionConfig } : {}),
       });
@@ -234,6 +240,7 @@ export function createProviderCredentialConnection(
       // refreshes the token and injects the account header itself.
       type: target.kind === 'oauth' ? 'openai' : 'generic',
       hostPattern: target.host,
+      ...(target.path ? { pathPattern: target.path } : {}),
       ...(target.kind === 'api-key' ? { injectionConfig: target.injection } : { authMode: 'oauth' as const }),
     },
     undefined,
@@ -248,6 +255,10 @@ export function createProviderCredentialConnection(
     if (observed === undefined) throw new Error(`Look up the ${target.name} credential before keeping or saving it.`);
     return observed;
   };
+  // Groups running this provider are granted the recorded ids; keeping records too, so a retried login repairs it.
+  const record = async (id: string) => {
+    if (target.provider) await recordProviderCredentials(path.join(root, 'data'), target.provider, [id]);
+  };
   return {
     async find(options) {
       observed = await vault.find(options);
@@ -258,10 +269,12 @@ export function createProviderCredentialConnection(
       const id = require();
       if (id === null) throw new Error(`No stored ${target.name} credential to keep; enter a value.`);
       await vault.keep(id);
+      await record(id);
     },
     async save(value) {
       const id = require();
       observed = await vault.save(encodeOneCliValue(target, value), id);
+      await record(observed);
     },
   };
 }
@@ -275,7 +288,7 @@ export function encodeOneCliValue(target: GatewayCredentialTarget, value: string
   if (typeof value === 'string' || value.profile !== target.oauth.profile) {
     throw new Error(`This connection stores the ${target.oauth.profile} OAuth profile.`);
   }
-  // NanoClaw's pinned OneCLI cannot refresh this record on its own; see
+  // Unattended refresh through the pinned OneCLI is not yet verified; see
   // .claude/skills/add-onecli/references/chatgpt-oauth-refresh.md for the manual procedure.
   return JSON.stringify({
     tokens: {

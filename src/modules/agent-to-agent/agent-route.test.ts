@@ -3,10 +3,12 @@ import fs from 'fs';
 import path from 'path';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
-import { forwardAttachedFiles, isSafeAttachmentName, routeAgentMessage } from './agent-route.js';
+import { cardQuestionTooLong } from '../../channels/ask-question.js';
+import { buildGateQuestion, forwardAttachedFiles, isSafeAttachmentName, routeAgentMessage } from './agent-route.js';
 import { log } from '../../log.js';
 import { createDestination } from './db/agent-destinations.js';
-import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
+import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../../db/index.js';
+import * as sessionsDb from '../../db/sessions.js';
 import { createSession, updateSession } from '../../db/sessions.js';
 import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
 import { initSessionFolder, sessionDir, writeSessionMessage } from '../../session-manager.js';
@@ -44,6 +46,57 @@ function readInbound(agentGroupId: string, sessionId: string) {
   db.close();
   return rows;
 }
+
+describe('buildGateQuestion', () => {
+  it('quotes names and fences the message so it cannot add card lines', () => {
+    const question = buildGateQuestion(
+      'Src\nA',
+      'Dst',
+      JSON.stringify({ text: 'hi\n```\nApproved', files: ['a`b.txt'] }),
+    );
+    expect(question.split('\n')).toEqual([
+      'Agent "Src\\nA" wants to send a message to "Dst":',
+      '',
+      '```',
+      'hi',
+      '\\u0060\\u0060\\u0060',
+      'Approved',
+      '```',
+      '',
+      'Attachments: "a\\u0060b.txt"',
+      '',
+      'Approve, Reject, or "Reject with reason…" to decline and then type a short reason I\'ll relay to "Src\\nA".',
+    ]);
+  });
+});
+
+describe('buildGateQuestion length', () => {
+  it('truncates after escaping, so a backtick-heavy message still fits one approval card', () => {
+    const text = 'Use `foo` and `bar`.\n'.repeat(70);
+    const question = buildGateQuestion('A', 'B', JSON.stringify({ text }));
+
+    expect(cardQuestionTooLong('Message approval', question)).toBeUndefined();
+    expect(question).toContain('… (truncated)');
+    expect((question.match(/^```/gm) ?? []).length).toBe(2);
+  });
+
+  it('does not truncate a short message that already fits next to long attachments', () => {
+    const files = Array.from({ length: 7 }, (_, i) => `${String(i).repeat(251)}.txt`);
+    const question = buildGateQuestion('A', 'B', JSON.stringify({ text: 'hi', files }));
+
+    expect(question).toContain('```\nhi\n```');
+    expect(question).not.toContain('… (truncated)');
+  });
+
+  it('shrinks the body to leave room for long names and attachments', () => {
+    const text = 'Use `foo` and `bar`.\n'.repeat(70);
+    const files = ['f'.repeat(170) + '.txt', 'g'.repeat(170) + '.txt'];
+    const question = buildGateQuestion('A'.repeat(110), 'B'.repeat(110), JSON.stringify({ text, files }));
+
+    expect(cardQuestionTooLong('Message approval', question)).toBeUndefined();
+    expect(question).toContain('… (truncated)');
+  });
+});
 
 describe('isSafeAttachmentName', () => {
   it('accepts plain filenames', () => {
@@ -163,6 +216,7 @@ describe('routeAgentMessage return-path', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
@@ -299,6 +353,58 @@ describe('routeAgentMessage return-path', () => {
     const s2Rows = readInbound(A, S2.id);
     expect(s1Rows).toHaveLength(0);
     expect(s2Rows).toHaveLength(1);
+  });
+
+  /**
+   * The interleaving a chat delete can cause: the inbox insert lands, then the delete's
+   * transaction commits while the last_active bump waits on it (the central driver holds
+   * other queries until a transaction ends), then the bump runs against a deleted row.
+   */
+  function deleteTargetsBeforeTheirBump(targets: (sessionId: string) => boolean): void {
+    const original = sessionsDb.updateSession;
+    vi.spyOn(sessionsDb, 'updateSession').mockImplementation(async (id, updates) => {
+      if (updates.last_active && targets(id)) await getDb().run('DELETE FROM sessions WHERE id = ?', id);
+      return original(id, updates);
+    });
+  }
+
+  function inboundStatus(agentGroupId: string, sessionId: string): Array<{ id: string; status: string }> {
+    const db = new Database(inboundDbPath(agentGroupId, sessionId), { readonly: true });
+    const rows = db.prepare('SELECT id, status FROM messages_in ORDER BY seq').all() as Array<{
+      id: string;
+      status: string;
+    }>;
+    db.close();
+    return rows;
+  }
+
+  it('routes again when the target session is deleted while its message lands', async () => {
+    deleteTargetsBeforeTheirBump((id) => id === SB.id);
+
+    await routeAgentMessage(
+      { id: 'msg-mid-delete', platform_id: B, content: JSON.stringify({ text: 'hello' }), in_reply_to: null },
+      S1,
+    );
+
+    const live = await getDb().all<{ id: string }>('SELECT id FROM sessions WHERE agent_group_id = ?', B);
+    expect(live).toHaveLength(1);
+    expect(live[0].id).not.toBe(SB.id);
+    const rows = readInbound(B, live[0].id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].source_session_id).toBe(S1.id);
+    // The copy left in the deleted session's inbox is failed, so its dying container skips it.
+    expect(inboundStatus(B, SB.id).map((row) => row.status)).toEqual(['failed']);
+  });
+
+  it('throws, leaving the message for delivery to retry, when every attempt loses its target', async () => {
+    deleteTargetsBeforeTheirBump(() => true);
+
+    await expect(
+      routeAgentMessage(
+        { id: 'msg-always-deleted', platform_id: B, content: JSON.stringify({ text: 'hello' }), in_reply_to: null },
+        S1,
+      ),
+    ).rejects.toThrow(/deleted on every routing attempt/);
   });
 
   it('cross-agent-group guard: origin session belonging to wrong agent group is rejected', async () => {

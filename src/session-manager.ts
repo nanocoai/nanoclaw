@@ -8,18 +8,20 @@ import path from 'path';
 
 import { AnchoredDir } from './anchored-dir.js';
 import { deriveAttachmentName } from './attachment-naming.js';
-import { isSafeAttachmentName } from './attachment-safety.js';
+import { inboxFolderName, isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import { isUniqueViolation } from './db/errors.js';
 import {
+  bindUnboundSession,
   createSession,
   findSystemSession,
   findSessionByAgentGroup,
   findSessionForAgent,
   getSession,
   taskThreadId,
+  unbindSession,
   updateSession,
 } from './db/sessions.js';
 import { log } from './log.js';
@@ -113,6 +115,20 @@ export async function resolveSession(
     if (sessionMode === 'agent-shared') {
       const existing = await findSessionByAgentGroup(agentGroupId);
       if (existing) {
+        // A session kept without a chat (its chat was deleted) takes the chat that
+        // resumes it; cards and questions route only to the bound chat.
+        if (messagingGroupId && !existing.messaging_group_id) {
+          if (await bindUnboundSession(existing.id, messagingGroupId)) {
+            try {
+              await writeSessionRouting(agentGroupId, existing.id);
+            } catch (err) {
+              // Unbound again, so the next message that resumes it retries the routing.
+              await unbindSession(existing.id, messagingGroupId);
+              throw err;
+            }
+            existing.messaging_group_id = messagingGroupId;
+          }
+        }
         return { session: existing, created: false };
       }
     } else if (messagingGroupId) {
@@ -330,8 +346,9 @@ export async function writeSessionMessage(
  * `inbox/<msgId>` names and can turn either into a symlink at any time.
  *
  * Defenses:
- *   1. basename check on `messageId` and `filename`.
- *   2. `inbox/<messageId>` is opened as an AnchoredDir, refusing symlinks, and
+ *   1. `messageId` maps to one safe folder name (`inboxFolderName`), and
+ *      `filename` passes the basename check.
+ *   2. `inbox/<folder>` is opened as an AnchoredDir, refusing symlinks, and
  *      every attachment is written through that descriptor, so a later swap
  *      of either name cannot redirect a write.
  *   3. exclusive create: never follows or overwrites an existing entry.
@@ -352,7 +369,8 @@ function extractAttachmentFiles(
   const attachments = parsed.attachments as Array<Record<string, unknown>> | undefined;
   if (!Array.isArray(attachments)) return contentStr;
 
-  if (!isSafeAttachmentName(messageId)) {
+  const folder = inboxFolderName(messageId);
+  if (folder === null) {
     log.warn('Rejecting unsafe inbound message id', { messageId });
     return contentStr;
   }
@@ -378,7 +396,7 @@ function extractAttachmentFiles(
 
       if (inbox === undefined) {
         try {
-          inbox = AnchoredDir.open(sessionDir(agentGroupId, sessionId), ['inbox', messageId], true);
+          inbox = AnchoredDir.open(sessionDir(agentGroupId, sessionId), ['inbox', folder], true);
         } catch (err) {
           log.warn('Rejecting unsafe inbox directory', { messageId, err });
           inbox = null;
@@ -402,7 +420,7 @@ function extractAttachmentFiles(
       }
 
       att.name = filename;
-      att.localPath = `inbox/${messageId}/${filename}`;
+      att.localPath = `inbox/${folder}/${filename}`;
       delete att.data;
       changed = true;
       log.debug('Saved attachment to inbox', { messageId, filename, size: att.size });
@@ -464,10 +482,12 @@ async function runMailboxSession<T>(
 
 /**
  * Write a message directly to a session's outbound mailbox so the host delivery
- * loop picks it up. Used by the command gate to send denial responses
- * without waking a container.
+ * loop picks it up.
  *
- * The selected mailbox owns persistence and sequencing.
+ * The selected mailbox owns persistence and sequencing. With the SQLite mailbox,
+ * outbound.db belongs to the container: call this only while none is running,
+ * because across a VM file share (Docker Desktop) the two writers can't see each
+ * other's locks and writes get lost.
  */
 export function writeOutboundDirect(
   agentGroupId: string,

@@ -40,7 +40,7 @@ import os from 'os';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
-import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from '../egress-lockdown.js';
+import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork, onEgressNetworkOnly } from '../egress-lockdown.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import '../provider-contracts/index.js';
@@ -92,8 +92,12 @@ registerSessionDriver(
     new DockerSessionDriver({
       ...policy,
       networkArgsFor: dockerNetworkArgs,
-      reconcileNetworkAccess: (access) => {
-        if (access.target.kind !== 'session-container') ensureEgressNetwork(access);
+      // An adopted container keeps the network it was spawned with. Under
+      // lockdown it must match what dockerNetworkArgs gives a new one.
+      reconcileNetworkAccess: (access, attachedNetworks) => {
+        if (access.target.kind === 'session-container') return 'kept';
+        if (!ensureEgressNetwork(access)) return 'kept';
+        return onEgressNetworkOnly(attachedNetworks()) ? 'kept' : 'restart';
       },
     }),
 );
@@ -136,10 +140,24 @@ export function mountPolicy(env: NodeJS.ProcessEnv = process.env): MountPolicy {
 }
 
 let installed: SessionEventsDriver | null = null;
+let installedPolicy: MountPolicy | null = null;
 
 export function getSessionDriver(): SessionEventsDriver {
-  if (!installed) installed = createSessionDriver(configuredDriverKind());
+  if (!installed) {
+    const policy = mountPolicy();
+    installed = createSessionDriver(configuredDriverKind(), policy);
+    installedPolicy = policy;
+  }
   return installed;
+}
+
+/**
+ * The policy the selected driver enforces, read once when it was selected, so
+ * a check made before a start agrees with the start. A `.env` edit applies on
+ * restart for both. Before a driver is selected, a fresh read.
+ */
+export function sessionMountPolicy(): MountPolicy {
+  return installedPolicy ?? mountPolicy();
 }
 
 export function createSessionDriver(kind: DriverKind, overrides: Partial<MountPolicy> = {}): SessionEventsDriver {
@@ -179,6 +197,7 @@ export function resetSessionDriver(next: SessionDriver | null = null): void {
   // Tests may inject raw fakes; the probe (isSessionEventsDriver) guards resync,
   // and fake handles carry their own onTerminal where flows need it.
   installed = next as SessionEventsDriver | null;
+  installedPolicy = null;
 }
 
 export * from './driver-registry.js';

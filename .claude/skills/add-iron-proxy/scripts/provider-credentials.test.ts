@@ -114,6 +114,19 @@ it.each([
     require: false,
   });
 });
+it('limits the rule to the target path and reuses only a record with the same path', async () => {
+  const f = fixture();
+  const scoped = { ...api(), path: '/v1/exchange' };
+  const c = f.connect(scoped);
+  expect(await c.find()).toBeNull();
+  await c.save('scoped-fixture');
+  const record = [...f.records.values()].find((r) => r.name === scoped.name)!;
+  expect(record.rules).toEqual([{ host: 'models.example.test', http_methods: ['*'], paths: ['/v1/exchange'] }]);
+  expect(await f.connect(scoped).find()).toEqual({ reusable: true });
+  await expect(f.connect(api()).find()).rejects.toThrow('unexpected metadata');
+  await expect(f.connect({ ...api(), path: '/v1/other' }).find()).rejects.toThrow('unexpected metadata');
+});
+
 it('keeps a saved key without requesting its value or changing the source', async () => {
   const f = fixture();
   const c = f.connect(api());

@@ -1,3 +1,4 @@
+import net from 'net';
 import os from 'os';
 import path from 'path';
 
@@ -19,6 +20,9 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'WEBHOOK_PORT',
+  'WEBHOOK_HOST',
+  'NANOCLAW_ABSOLUTE_CEILING_MS',
+  'NANOCLAW_CLAIM_STUCK_MS',
 ]);
 
 /**
@@ -72,9 +76,9 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const CENTRAL_DB_PATH = path.join(DATA_DIR, 'v2.db');
-// Local agent-template library. Committed but ships empty (+ README). Resolved
-// once at load. Override to another LOCAL path via NANOCLAW_TEMPLATES_DIR; never
-// a remote URL, never an ncl flag, never runtime-mutable.
+// Local agent-template library: ships with only a README; setup and create_agent
+// copy library templates in (gitignored). Resolved once at load. Override to
+// another LOCAL path via NANOCLAW_TEMPLATES_DIR; never a remote URL or an ncl flag.
 export const TEMPLATES_DIR = process.env.NANOCLAW_TEMPLATES_DIR
   ? path.resolve(process.env.NANOCLAW_TEMPLATES_DIR)
   : path.resolve(PROJECT_ROOT, 'templates');
@@ -107,6 +111,13 @@ export const EGRESS_LOCKDOWN = (process.env.NANOCLAW_EGRESS_LOCKDOWN || envConfi
 export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
 
+// Global overrides for the host sweep's two stuck-container timers (see
+// src/reconcile-session.ts). Raw strings: parsed and range-checked where they
+// are consumed so a bad value falls back to the built-in default, not NaN.
+export const ABSOLUTE_CEILING_MS_RAW =
+  process.env.NANOCLAW_ABSOLUTE_CEILING_MS || envConfig.NANOCLAW_ABSOLUTE_CEILING_MS || '';
+export const CLAIM_STUCK_MS_RAW = process.env.NANOCLAW_CLAIM_STUCK_MS || envConfig.NANOCLAW_CLAIM_STUCK_MS || '';
+
 // Resolve when the listener starts so a late process override still wins.
 export function getWebhookPort(): number {
   const raw = process.env.WEBHOOK_PORT || envConfig.WEBHOOK_PORT || '3000';
@@ -115,6 +126,19 @@ export function getWebhookPort(): number {
     throw new Error(`Invalid WEBHOOK_PORT ${JSON.stringify(raw)}: expected an integer from 1 to 65535`);
   }
   return port;
+}
+
+// Loopback by default: platforms reach the port through a tunnel or reverse
+// proxy on this machine, so other hosts on the network never see it. Set an
+// IP address (0.0.0.0 for every interface) when the proxy runs elsewhere.
+export function getWebhookHost(): string {
+  const host = process.env.WEBHOOK_HOST || envConfig.WEBHOOK_HOST || '127.0.0.1';
+  if (!net.isIP(host) || host.includes('%')) {
+    throw new Error(
+      `Invalid WEBHOOK_HOST ${JSON.stringify(host)}: expected an IP address such as 127.0.0.1 or 0.0.0.0`,
+    );
+  }
+  return host;
 }
 
 // Timezone for scheduled tasks, message formatting, etc.

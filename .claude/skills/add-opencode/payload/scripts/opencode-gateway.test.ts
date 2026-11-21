@@ -116,6 +116,7 @@ describe('OpenCode through a gateway it has never heard of', () => {
       kind: 'api-key',
       host: 'openrouter.ai',
       proxyValue: 'nc-opencode-token-v1',
+      provider: 'opencode',
       injection: { headerName: 'Authorization', valueFormat: 'Bearer {value}' },
     });
     expect(calls()[0][2]).toBe(true);
@@ -150,6 +151,7 @@ describe('OpenCode through a gateway it has never heard of', () => {
       kind: 'oauth',
       host: 'chatgpt.com',
       proxyValue: 'nc-opencode-token-v1',
+      provider: 'opencode',
       oauth: { profile: 'chatgpt', clientId: expect.any(String), tokenEndpoint: 'https://auth.openai.com/oauth/token' },
     });
     expect(calls()[1]).toEqual([

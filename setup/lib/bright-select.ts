@@ -64,6 +64,10 @@ export interface BrightSelectOptions<T> {
   message: string;
   options: BrightSelectOption<T>[];
   initialValue?: T;
+  /** Closes the prompt from outside; it then resolves to a cancel symbol. */
+  signal?: AbortSignal;
+  /** Shown instead of a struck-out choice when `signal` closed the prompt; gets the abort reason. */
+  abortedLabel?: (reason: unknown) => string;
 }
 
 /**
@@ -91,6 +95,20 @@ export function flushStdin(windowMs = 50): Promise<void> {
   });
 }
 
+type Option<T> = { value: T; label?: string; hint?: string };
+
+// clack's own signal handling closes the prompt without drawing its last
+// frame, leaving the options on screen. Close it the way a cancel key does.
+class AbortableSelect<T> extends SelectPrompt<Option<T>> {
+  abort(): void {
+    this.state = 'cancel';
+    // render() is private in clack; if a release renames it, still close.
+    const render = (this as unknown as { render?: unknown }).render;
+    if (typeof render === 'function') render.call(this);
+    this.close();
+  }
+}
+
 /**
  * Matches the return shape of `p.select` — resolves to the selected value
  * on submit, or to clack's cancel symbol on Ctrl-C / Esc. Callers pass
@@ -98,14 +116,21 @@ export function flushStdin(windowMs = 50): Promise<void> {
  * `p.select`.
  */
 export async function brightSelect<T>(opts: BrightSelectOptions<T>): Promise<T | symbol> {
-  const { message, options, initialValue } = opts;
+  const { message, options, initialValue, signal, abortedLabel } = opts;
 
   await flushStdin();
-  return new SelectPrompt({
-    options: options as Array<{ value: T; label?: string; hint?: string }>,
+  const prompt = new AbortableSelect<T>({
+    options: options as Option<T>[],
     initialValue,
     render() {
       const st = this.state as PromptState;
+      if (st === 'cancel' && signal?.aborted && abortedLabel) {
+        return [
+          styleText('gray', BAR),
+          `${headerIcon('submit')}  ${message}`,
+          `${styleText('gray', BAR)}  ${styleText('dim', brandBody(abortedLabel(signal.reason)))}`,
+        ].join('\n');
+      }
       const color = stateColor(st);
       const bar = styleText(color, BAR);
       const grayBar = styleText('gray', BAR);
@@ -134,7 +159,17 @@ export async function brightSelect<T>(opts: BrightSelectOptions<T>): Promise<T |
       lines.push(styleText(color, CAP_BOT));
       return lines.join('\n');
     },
-  }).prompt() as Promise<T | symbol>;
+  });
+  const abort = (): void => prompt.abort();
+  const answer = prompt.prompt() as Promise<T | symbol>;
+  // Closing through clack resolves to its own cancel symbol, which isCancel knows.
+  if (signal?.aborted) abort();
+  else signal?.addEventListener('abort', abort, { once: true });
+  try {
+    return await answer;
+  } finally {
+    signal?.removeEventListener('abort', abort);
+  }
 }
 
 export { isCancel };

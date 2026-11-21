@@ -127,6 +127,8 @@ export function createIronCredentialConnection(
         ownedForeignIds: [foreignId, foreignId + '-account'],
       }),
   };
+  // Iron rules carry their own path globs; an exact path is a glob without wildcards.
+  const paths = target.path ? [target.path] : [];
   const replaceConfig = (header = injection.headerName) => ({
     proxy_value: target.proxyValue,
     match_headers: [ironHeaderName(header)],
@@ -162,7 +164,7 @@ export function createIronCredentialConnection(
       record.rules?.length !== 1 ||
       rule.host !== host ||
       rule.cidr ||
-      (rule.paths?.length ?? 0) ||
+      !isDeepStrictEqual(rule.paths ?? [], paths) ||
       !isDeepStrictEqual(rule.http_methods, ['*']) ||
       record.source?.source_type !== (target.kind === 'oauth' ? 'token_broker' : 'control_plane') ||
       (target.kind === 'api-key' && Object.keys(record.source.config ?? {}).length)
@@ -195,7 +197,7 @@ export function createIronCredentialConnection(
         account.rules?.length !== 1 ||
         rule.host !== target.host ||
         rule.cidr ||
-        (rule.paths?.length ?? 0) ||
+        !isDeepStrictEqual(rule.paths ?? [], paths) ||
         !isDeepStrictEqual(rule.http_methods, ['*']))
     )
       throw new Error('The Iron OAuth account has unexpected metadata; inspect it in Iron Control');
@@ -369,7 +371,7 @@ export function createIronCredentialConnection(
           source,
           inject_config: {},
           replace_config: config,
-          rules: [{ host: target.host, http_methods: ['*'] }],
+          rules: [{ host: target.host, http_methods: ['*'], ...(paths.length ? { paths } : {}) }],
           ...(login ? { labels: { [LOGIN_LABEL]: login } } : {}),
         });
       let source: unknown;
