@@ -208,16 +208,20 @@ export function loadState(projectRoot: string, id: string): UpdateState {
 }
 
 function currentBranch(runtime: UpdateRuntime, root: string): string {
-  // `--quiet` makes a detached HEAD a silent exit 1, so any output is a real git error.
-  const branch = tryGit(runtime, root, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-  if (branch.ok && branch.stdout) return branch.stdout;
-  if (!branch.ok && branch.stdout) throw new Error(branch.stdout);
+  // Empty on a detached HEAD, where `symbolic-ref --quiet` exits 1 and threw a raw "Command failed".
+  const branch = git(runtime, root, ['branch', '--show-current']);
+  if (branch) return branch;
   const tag = tryGit(runtime, root, ['describe', '--tags', '--exact-match', 'HEAD']);
   const at =
     tag.ok && tag.stdout ? `tag ${tag.stdout}` : `commit ${git(runtime, root, ['rev-parse', '--short=8', 'HEAD'])}`;
   throw new Error(
     `Update needs a branch, but HEAD is detached at ${at}. Make one here, then run the update again: git switch -c nanoclaw`,
   );
+}
+
+/** Refuse a detached HEAD before channel resolution fetches refs or reports an ahead-of-release install. */
+export function assertOnBranch(projectRoot: string, runtime = createUpdateRuntime()): void {
+  currentBranch(runtime, projectRoot);
 }
 
 function assertClean(runtime: UpdateRuntime, root: string, what = 'Working tree'): void {
