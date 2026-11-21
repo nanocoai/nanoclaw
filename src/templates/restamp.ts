@@ -465,9 +465,15 @@ function listFilesRecursive(root: string): Map<string, string> {
   for (const entry of fs.readdirSync(root, { recursive: true }) as string[]) {
     const abs = path.join(root, entry);
     // lstat: symlinks are never plugin content, so a (possibly dangling) link
-    // compares as an absent file instead of crashing the plan. An entry the
-    // container removed since the listing is absent too.
-    if (fs.lstatSync(abs, { throwIfNoEntry: false })?.isFile()) out.set(entry.split(path.sep).join('/'), abs);
+    // compares as an absent file instead of crashing the plan. So does an
+    // entry the container removed, or put under a non-folder, since the listing.
+    let stat: fs.Stats | undefined;
+    try {
+      stat = fs.lstatSync(abs);
+    } catch (err) {
+      if (!NOT_A_REGULAR_FILE.has((err as NodeJS.ErrnoException).code ?? '')) throw err;
+    }
+    if (stat?.isFile()) out.set(entry.split(path.sep).join('/'), abs);
   }
   return out;
 }

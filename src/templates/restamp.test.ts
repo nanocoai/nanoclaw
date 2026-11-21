@@ -496,19 +496,19 @@ describe('restampAgentFromTemplate', () => {
     expect(change(run.result.changes, 'skill', 'widget').action).toBe('update');
   });
 
-  it('compares a skill overlay whose file disappears after the listing', async () => {
+  it('compares a skill overlay whose entries change after the listing', async () => {
     const g = await stamp();
-    writeTemplateV2();
     const overlay = path.dirname(overlaySkill(g.id, 'widget'));
     const readdirSync = fs.readdirSync as (...args: unknown[]) => unknown;
+    // The listing names a removed file and a file under what is now a file (ENOTDIR).
     vi.spyOn(fs, 'readdirSync').mockImplementation(((dir: unknown, ...rest: unknown[]) => {
       const entries = readdirSync(dir, ...rest) as string[];
-      return dir === overlay ? [...entries, 'gone.md'] : entries;
+      return dir === overlay ? [...entries, 'gone.md', path.join('SKILL.md', 'run.sh')] : entries;
     }) as never);
 
     const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
 
-    expect(change(plan.changes, 'skill', 'widget').action).toBe('update');
+    expect(change(plan.changes, 'skill', 'widget').action).toBe('unchanged');
   });
 
   it('refuses to write context through a symlinked directory', async () => {
