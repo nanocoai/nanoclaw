@@ -60,21 +60,32 @@ async function replaceableSecret(
   const target = sameHost[0] ?? (mine.length === 1 ? mine[0] : undefined);
   const inlineLogin =
     target?.type === 'openai' && (target.valueSource === undefined || target.valueSource === 'inline');
-  return inlineLogin ? target.id : undefined;
+  if (inlineLogin) return target.id;
+  // Another one on this host would compete with it; the operator owns that entry's setup.
+  if (sameHost.length) {
+    throw new Error(
+      `The recorded Codex secret ${target!.id} on ${host} is not an inline OpenAI login. Update it in OneCLI, or delete it and sign in again.`,
+    );
+  }
+  return undefined;
 }
 
 const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.trim() !== '';
 
-/** OneCLI files a ChatGPT login without both tokens as an API key, so a partial one must not replace a working login. */
+/**
+ * OneCLI files a ChatGPT login without both tokens as an API key, and the
+ * stand-in needs the workspace id it records, so a partial login must not
+ * replace a working one.
+ */
 function chatGptLogin(file: string): string {
-  let tokens: { access_token?: unknown; refresh_token?: unknown } | undefined;
+  let tokens: { access_token?: unknown; refresh_token?: unknown; account_id?: unknown } | undefined;
   const value = fs.readFileSync(file, 'utf8');
   try {
     tokens = JSON.parse(value)?.tokens;
   } catch {
     tokens = undefined;
   }
-  if (!nonEmpty(tokens?.access_token) || !nonEmpty(tokens?.refresh_token)) {
+  if (![tokens?.access_token, tokens?.refresh_token, tokens?.account_id].every(nonEmpty)) {
     throw new Error('Codex login did not produce a complete ChatGPT session.');
   }
   return value;

@@ -211,15 +211,16 @@ describe('Codex: signing in again', () => {
     expect(exec).not.toHaveBeenCalled();
   });
 
-  it.each(['{"tokens":{"refresh_token":"fixture-refresh"}}', '{"tokens":{"access_token":"","refresh_token":""}}'])(
-    'never replaces a login with a ChatGPT session missing a token: %s',
-    async (partial) => {
-      await expect(save({ kind: 'oauth', file: loginFile(partial) })).rejects.toThrow(
-        'Codex login did not produce a complete ChatGPT session.',
-      );
-      expect(calls.map((c) => c.method)).toEqual(['GET']);
-    },
-  );
+  it.each([
+    '{"tokens":{"refresh_token":"fixture-refresh"}}',
+    '{"tokens":{"access_token":"","refresh_token":"","account_id":"acct"}}',
+    '{"tokens":{"access_token":"fixture-access","refresh_token":"fixture-refresh"}}',
+  ])('never replaces a login with a ChatGPT session missing a token: %s', async (partial) => {
+    await expect(save({ kind: 'oauth', file: loginFile(partial) })).rejects.toThrow(
+      'Codex login did not produce a complete ChatGPT session.',
+    );
+    expect(calls.map((c) => c.method)).toEqual(['GET']);
+  });
 
   it('counts every recorded secret on the host as competing, whatever its type', async () => {
     fs.writeFileSync(record, JSON.stringify({ providers: { codex: ['sec-a', 'sec-b'] }, matched: ['codex'] }));
@@ -232,6 +233,18 @@ describe('Codex: signing in again', () => {
       'Several recorded Codex secrets use chatgpt.com (sec-a, sec-b)',
     );
     expect(calls.map((c) => c.method)).toEqual(['GET']);
+  });
+
+  it('refuses to add a second secret beside a recorded one on the host it cannot replace', async () => {
+    listed = [
+      { id: 'sec-codex', name: 'Codex', type: 'openai', hostPattern: 'api.openai.com', valueSource: 'onepassword' },
+    ];
+
+    await expect(save({ kind: 'api-key', value: 'fixture-key' })).rejects.toThrow(
+      'The recorded Codex secret sec-codex on api.openai.com is not an inline OpenAI login',
+    );
+    expect(calls.map((c) => c.method)).toEqual(['GET']);
+    expect(exec).not.toHaveBeenCalled();
   });
 
   it('creates a secret as before when the recorded one is not an inline OpenAI login', async () => {
