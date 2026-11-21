@@ -25,6 +25,19 @@ export function isSessionEcho(msg: MessageInRow): boolean {
  */
 export const FAILURE_NOTICE_FIELD = 'failureNotice';
 
+/**
+ * Optional structured companion to a failure notice: which provider failed and
+ * a coarse, closed `kind`. Never carries message text, headers or tokens.
+ */
+export const PROVIDER_FAILURE_FIELD = 'providerFailure';
+
+export type ProviderFailureKind = 'auth_expired';
+
+export interface ProviderFailure {
+  provider: string;
+  kind: ProviderFailureKind;
+}
+
 /** Notice text when the provider gave no error of its own. */
 export const GENERIC_FAILURE_NOTICE =
   "Sorry, something went wrong and I couldn't answer. Whoever runs this NanoClaw can look into it using the logs: https://docs.nanoclaw.dev/operate/troubleshooting#start-here";

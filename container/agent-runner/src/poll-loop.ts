@@ -24,6 +24,8 @@ import {
   categorizeMessage,
   FAILURE_NOTICE_FIELD,
   GENERIC_FAILURE_NOTICE,
+  PROVIDER_FAILURE_FIELD,
+  type ProviderFailure,
   isClearCommand,
   isRunnerCommand,
   isSessionEcho,
@@ -580,10 +582,14 @@ export async function processQuery(
     })();
   }, ACTIVE_POLL_INTERVAL_MS);
 
+  // The dedicated error event of this query, valid only until the next event:
+  // a provider yields it immediately before throwing the same error.
+  let pendingProviderError: string | undefined;
   try {
     for await (const event of query.events) {
       handleEvent(event, routing);
       touchHeartbeat();
+      pendingProviderError = event.type === 'error' ? event.message : undefined;
 
       if (event.type === 'init') {
         queryContinuation = event.continuation;
@@ -643,8 +649,11 @@ export async function processQuery(
             // A failed turn needs a visible notice even after a partial reply.
             // Only the provider's dedicated error field is channel content;
             // unwrapped model output and raw diagnostics remain private.
-            const notice = event.error ?? GENERIC_FAILURE_NOTICE;
-            if (sendsFailureNotice(routing)) await deliverErrorResult(routing, notice);
+            // A recognized provider failure travels as structured metadata and
+            // keeps the generic text, so the raw provider phrase never leaves.
+            const providerFailure = classifyProviderFailure(providerName, event.error);
+            const notice = providerFailure ? GENERIC_FAILURE_NOTICE : (event.error ?? GENERIC_FAILURE_NOTICE);
+            if (sendsFailureNotice(routing)) await deliverErrorResult(routing, notice, providerFailure);
             // Keep the reason in the runner log, since the skipped notice may
             // be the only place it would have been recorded.
             else log(`Error result — notice not sent on this route: ${notice}`);
@@ -719,6 +728,12 @@ export async function processQuery(
     done = true;
     const cancelled = endedForCommand || signal?.aborted;
     const errMsg = err instanceof Error ? err.message : String(err);
+    // Only the error this query's provider just announced counts; any other
+    // thrown error (executor, CLI, a different message) stays unclassified.
+    const providerFailure =
+      err instanceof Error && pendingProviderError !== undefined && err.message === pendingProviderError
+        ? classifyProviderFailure(providerName, err.message)
+        : undefined;
     notifyExchangeComplete(onExchangeComplete, {
       prompt: archivePrompts[0] ?? initialPrompt,
       result: `Error: ${errMsg}`,
@@ -747,7 +762,7 @@ export async function processQuery(
           continue;
         noticed.push(target);
         try {
-          await deliverErrorResult(target, GENERIC_FAILURE_NOTICE);
+          await deliverErrorResult(target, GENERIC_FAILURE_NOTICE, providerFailure);
         } catch (noticeError) {
           log(
             `Failed to deliver query error notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
@@ -806,8 +821,31 @@ function sendsFailureNotice(routing: RoutingContext): boolean {
   return !routing.taskRun && !!routing.platformId && !!routing.channelType && !routing.failureNoticeWake;
 }
 
+/**
+ * Classify only a provider's dedicated error (`result.error`, or the `error`
+ * event the same query then throws) — never model text, tool output or
+ * unrelated exceptions. Only Codex/OpenAI auth expiry is recognized, and only
+ * in the narrow shapes the provider itself produces: `token_expired` leading
+ * the message (after an optional `Error:`), or a `401` followed by
+ * token_expired/unauthorized/auth. Quotes and braces before the match mean
+ * embedded or quoted text, which never classifies.
+ */
+const CODEX_AUTH_EXPIRED = [
+  /^(?:Error:\s*)?token_expired\b/i,
+  /^(?:Error:\s*)?[^"'`{}\n]{0,80}?\b401\b[^"'`{}\n]{0,40}?\b(?:token_expired|unauthorized|auth\w*)\b/i,
+];
+
+function classifyProviderFailure(providerName: string, error: string | undefined): ProviderFailure | undefined {
+  if (providerName !== 'codex' || !error) return undefined;
+  return CODEX_AUTH_EXPIRED.some((re) => re.test(error)) ? { provider: providerName, kind: 'auth_expired' } : undefined;
+}
+
 /** Send the dedicated provider error or a generic failure notice. */
-async function deliverErrorResult(routing: RoutingContext, text: string): Promise<void> {
+async function deliverErrorResult(
+  routing: RoutingContext,
+  text: string,
+  providerFailure?: ProviderFailure,
+): Promise<void> {
   log('Error result notice — delivering to channel');
   await writeMessageOut({
     id: generateId(),
@@ -816,7 +854,11 @@ async function deliverErrorResult(routing: RoutingContext, text: string): Promis
     platform_id: routing.platformId,
     channel_type: routing.channelType,
     thread_id: routing.threadId,
-    content: JSON.stringify({ text: stripHarnessTagArtifacts(text), [FAILURE_NOTICE_FIELD]: true }),
+    content: JSON.stringify({
+      text: stripHarnessTagArtifacts(text),
+      [FAILURE_NOTICE_FIELD]: true,
+      ...(providerFailure ? { [PROVIDER_FAILURE_FIELD]: providerFailure } : {}),
+    }),
   });
 }
 
