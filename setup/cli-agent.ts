@@ -16,7 +16,7 @@ import path from 'path';
 import { log } from '../src/log.js';
 import { emitStatus } from './status.js';
 
-function parseArgs(args: string[]): {
+export function parseArgs(args: string[]): {
   displayName: string;
   agentName?: string;
   folder?: string;
