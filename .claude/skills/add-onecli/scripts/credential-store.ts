@@ -29,15 +29,24 @@ function listSecrets(): SecretSummary[] {
   }
 }
 
+type SecretsRequest = ReturnType<typeof oneCliSecretsRequest>;
+
 /**
  * The recorded secret a new login replaces: the one on the login's host, else
  * the only one. Only an inline `openai` secret, whose host and login details
- * OneCLI derives again from the new value.
+ * OneCLI derives again from the new value. Read through the same management
+ * connection that writes, so both act on one vault.
  */
-function replaceableSecret(root: string, provider: string, host: string): string | undefined {
+async function replaceableSecret(
+  root: string,
+  provider: string,
+  host: string,
+  request: () => SecretsRequest,
+): Promise<string | undefined> {
   const recorded = readProviderCredentials(path.join(root, 'data')).providers[provider] ?? [];
   if (!recorded.length) return undefined;
-  const mine = listSecrets().filter(
+  const listed = (await request()('', 'GET')) as SecretSummary[] | { data?: SecretSummary[] };
+  const mine = (Array.isArray(listed) ? listed : (listed.data ?? [])).filter(
     (s) =>
       typeof s.id === 'string' &&
       recorded.includes(s.id) &&
@@ -45,7 +54,28 @@ function replaceableSecret(root: string, provider: string, host: string): string
       (s.valueSource === undefined || s.valueSource === 'inline'),
   );
   const sameHost = mine.filter((s) => s.hostPattern === host);
-  return (sameHost.length === 1 ? sameHost[0] : mine.length === 1 ? mine[0] : undefined)?.id;
+  // Two logins holding one refresh token invalidate each other, so never fill both.
+  if (sameHost.length > 1) {
+    throw new Error(
+      `Several recorded Codex secrets use ${host} (${sameHost.map((s) => s.id).join(', ')}). Delete all but one in OneCLI, then sign in again.`,
+    );
+  }
+  return (sameHost[0] ?? (mine.length === 1 ? mine[0] : undefined))?.id;
+}
+
+/** OneCLI files a ChatGPT login without both tokens as an API key, so a partial one must not replace a working login. */
+function chatGptLogin(file: string): string {
+  let tokens: { access_token?: unknown; refresh_token?: unknown } | undefined;
+  const value = fs.readFileSync(file, 'utf8');
+  try {
+    tokens = JSON.parse(value)?.tokens;
+  } catch {
+    tokens = undefined;
+  }
+  if (typeof tokens?.access_token !== 'string' || typeof tokens.refresh_token !== 'string') {
+    throw new Error('Codex login did not produce a complete ChatGPT session.');
+  }
+  return value;
 }
 
 export function createCredentialStore(root = process.cwd()): ProviderCredentialStore {
@@ -67,11 +97,12 @@ export function createCredentialStore(root = process.cwd()): ProviderCredentialS
       // Signing in again replaces the value in place: groups already granted
       // the secret keep it, and no second Codex secret competes for the host.
       // Through the management API, so the value never appears in argv.
-      const existing = replaceableSecret(root, provider, host);
+      let request: SecretsRequest | undefined;
+      const connect = () => (request ??= oneCliSecretsRequest('Codex', undefined, undefined, globalThis.fetch, root));
+      const existing = await replaceableSecret(root, provider, host, connect);
       if (existing) {
-        const value = credential.kind === 'oauth' ? fs.readFileSync(credential.file, 'utf8') : credential.value;
-        const request = oneCliSecretsRequest('Codex', undefined, undefined, globalThis.fetch, root);
-        await request(`/${encodeURIComponent(existing)}`, 'PATCH', { value: value.trim() });
+        const value = credential.kind === 'oauth' ? chatGptLogin(credential.file) : credential.value;
+        await connect()(`/${encodeURIComponent(existing)}`, 'PATCH', { value: value.trim() });
         return;
       }
       const temporary =

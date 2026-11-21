@@ -50,9 +50,10 @@ function ensureAnswer<T>(value: T | symbol): T {
   return value as T;
 }
 
-export async function runCodexAuthStep(): Promise<void> {
+/** `menuOnly` returns from a declined skip to the sign-in menu, past the stored-account question. */
+export async function runCodexAuthStep(menuOnly = false): Promise<void> {
   const store = await getCredentialStore();
-  if (await store.has('codex')) {
+  if (!menuOnly && (await store.has('codex'))) {
     // A stored sign-in that expired or was revoked looks the same as a working
     // one, so someone at a terminal can replace it. Without one, keep it.
     const choice =
@@ -115,7 +116,7 @@ export async function runCodexAuthStep(): Promise<void> {
         initialValue: false,
       }),
     );
-    if (!confirmed) return runCodexAuthStep();
+    if (!confirmed) return runCodexAuthStep(true);
     setupLog.step('auth', 'skipped', 0, { REASON: 'user-skipped', PROVIDER: 'codex' });
     p.log.warn(brandBody('Codex sign-in skipped. Add an OpenAI account to your gateway before using Codex groups.'));
     return;

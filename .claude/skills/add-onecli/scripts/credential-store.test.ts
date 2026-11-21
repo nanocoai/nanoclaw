@@ -12,7 +12,7 @@ if (!getProviderHostContract('codex'))
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const exec = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', () => ({ execFileSync: exec }));
 import { createCredentialStore } from './credential-store.js';
@@ -137,36 +137,89 @@ it('Codex: after the one-time match found nothing, a later same-named key is not
   }
 });
 
-it('Codex: signing in again updates the recorded secret in place, so no second Codex secret is created', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-replace-'));
-  const file = path.join(root, 'data', 'onecli', 'provider-credentials.json');
-  const fetchMock = vi.fn(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
-  vi.stubGlobal('fetch', fetchMock);
-  vi.stubEnv('ONECLI_URL', 'http://onecli.test:10254');
-  vi.stubEnv('ONECLI_API_KEY', 'fixture-management-key');
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify({ providers: { codex: ['sec-codex'] }, matched: ['codex'] }));
-    exec.mockReturnValue(
-      JSON.stringify({
-        data: [{ id: 'sec-codex', name: 'Codex', type: 'openai', hostPattern: 'chatgpt.com', valueSource: 'inline' }],
+describe('Codex: signing in again', () => {
+  const login = '{"tokens":{"access_token":"fixture-access","refresh_token":"fixture-refresh","account_id":"acct"}}';
+  let root: string;
+  let record: string;
+  let calls: Array<{ url: string; method: string; body?: unknown }>;
+  let listed: unknown[];
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-replace-'));
+    record = path.join(root, 'data', 'onecli', 'provider-credentials.json');
+    fs.mkdirSync(path.dirname(record), { recursive: true });
+    fs.writeFileSync(record, JSON.stringify({ providers: { codex: ['sec-codex'] }, matched: ['codex'] }));
+    calls = [];
+    listed = [{ id: 'sec-codex', name: 'Codex', type: 'openai', hostPattern: 'chatgpt.com', valueSource: 'inline' }];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url, method: String(init.method), body: init.body ? JSON.parse(String(init.body)) : undefined });
+        return new Response(JSON.stringify(init.method === 'GET' ? listed : { success: true }), { status: 200 });
       }),
     );
-    const login = path.join(root, 'auth.json');
-    fs.writeFileSync(login, '{"tokens":{"refresh_token":"fixture-refresh"}}\n');
-
-    await createCredentialStore(root).save('codex', { kind: 'oauth', file: login });
-
-    expect(exec.mock.calls.some(([, args]) => args[1] === 'create')).toBe(false);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('http://onecli.test:10254/v1/secrets/sec-codex');
-    expect(init.method).toBe('PATCH');
-    expect(JSON.parse(String(init.body))).toEqual({ value: '{"tokens":{"refresh_token":"fixture-refresh"}}' });
-    expect(JSON.parse(fs.readFileSync(file, 'utf8')).providers).toEqual({ codex: ['sec-codex'] });
-  } finally {
+    vi.stubEnv('ONECLI_URL', 'http://onecli.test:10254');
+  });
+  afterEach(() => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     fs.rmSync(root, { recursive: true, force: true });
-  }
+  });
+  const save = (credential: Parameters<ReturnType<typeof createCredentialStore>['save']>[1]) =>
+    createCredentialStore(root).save('codex', credential);
+  const loginFile = (content: string) => {
+    const file = path.join(root, 'auth.json');
+    fs.writeFileSync(file, `${content}\n`);
+    return file;
+  };
+
+  it('updates the recorded secret in place, so no second Codex secret is created', async () => {
+    await save({ kind: 'oauth', file: loginFile(login) });
+
+    expect(exec).not.toHaveBeenCalled();
+    expect(calls).toEqual([
+      { url: 'http://onecli.test:10254/v1/secrets', method: 'GET', body: undefined },
+      { url: 'http://onecli.test:10254/v1/secrets/sec-codex', method: 'PATCH', body: { value: login } },
+    ]);
+    expect(JSON.parse(fs.readFileSync(record, 'utf8')).providers).toEqual({ codex: ['sec-codex'] });
+  });
+
+  it('moves the only recorded secret to an API key, through the same connection', async () => {
+    await save({ kind: 'api-key', value: 'fixture-key' });
+
+    expect(exec).not.toHaveBeenCalled();
+    expect(calls[1]).toEqual({
+      url: 'http://onecli.test:10254/v1/secrets/sec-codex',
+      method: 'PATCH',
+      body: { value: 'fixture-key' },
+    });
+  });
+
+  it('refuses two recorded logins on one host instead of filling both or adding a third', async () => {
+    fs.writeFileSync(record, JSON.stringify({ providers: { codex: ['sec-a', 'sec-b'] }, matched: ['codex'] }));
+    listed = ['sec-a', 'sec-b'].map((id) => ({ id, name: 'Codex', type: 'openai', hostPattern: 'chatgpt.com' }));
+
+    await expect(save({ kind: 'oauth', file: loginFile(login) })).rejects.toThrow(
+      'Several recorded Codex secrets use chatgpt.com (sec-a, sec-b)',
+    );
+    expect(calls.map((c) => c.method)).toEqual(['GET']);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('never replaces a login with a ChatGPT session missing a token', async () => {
+    await expect(
+      save({ kind: 'oauth', file: loginFile('{"tokens":{"refresh_token":"fixture-refresh"}}') }),
+    ).rejects.toThrow('Codex login did not produce a complete ChatGPT session.');
+    expect(calls.map((c) => c.method)).toEqual(['GET']);
+  });
+
+  it('creates a secret as before when the recorded one is not an inline OpenAI login', async () => {
+    listed = [{ id: 'sec-codex', name: 'Codex', type: 'generic', hostPattern: 'chatgpt.com' }];
+    exec.mockReturnValueOnce('{"id":"sec-new"}');
+
+    await save({ kind: 'api-key', value: 'fixture-key' });
+
+    expect(exec.mock.calls[0][1].slice(0, 2)).toEqual(['secrets', 'create']);
+    expect(calls.map((c) => c.method)).toEqual(['GET']);
+    expect(JSON.parse(fs.readFileSync(record, 'utf8')).providers).toEqual({ codex: ['sec-codex', 'sec-new'] });
+  });
 });

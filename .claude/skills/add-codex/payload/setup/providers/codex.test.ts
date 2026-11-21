@@ -1847,6 +1847,7 @@ describe('runCodexAuthStep with an account already connected', () => {
     testStore.current = undefined;
     mockSelect.mockReset();
     mockPassword.mockReset();
+    mockConfirm.mockReset();
     vi.restoreAllMocks();
     vi.mocked(setupLog.step).mockClear();
     vi.mocked(setupLog.userInput).mockClear();
@@ -1876,6 +1877,22 @@ describe('runCodexAuthStep with an account already connected', () => {
       REASON: 'openai-secret-already-present',
       PROVIDER: 'codex',
     });
+  });
+
+  it('after Sign in again, declining a skip returns to the sign-in menu, not the keep question', async () => {
+    terminal(true);
+    mockSelect.mockResolvedValueOnce('reconnect').mockResolvedValueOnce('skip').mockResolvedValueOnce('api');
+    mockConfirm.mockResolvedValueOnce(false);
+    mockPassword.mockResolvedValue('sk-test-new-key');
+
+    await runCodexAuthStep();
+
+    expect(mockSelect.mock.calls.map(([options]) => String(options.message))).toEqual([
+      expect.stringContaining('already connected'),
+      'How would you like to connect Codex?',
+      'How would you like to connect Codex?',
+    ]);
+    expect(save).toHaveBeenCalledWith('codex', { kind: 'api-key', value: 'sk-test-new-key' });
   });
 
   it('without a terminal, keeps the stored account and asks nothing', async () => {
