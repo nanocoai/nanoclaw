@@ -478,13 +478,6 @@ export interface ChatSdkBridgeConfig {
 }
 
 /**
- * Split `text` into chunks no larger than `limit`, preferring paragraph
- * breaks, then line breaks, then a hard character cut as a last resort.
- * Preserves code fences only structurally — a fenced block that straddles a
- * chunk boundary will render as two independent blocks on the receiving
- * platform, which is the same behavior as manually re-opening a fence.
- */
-/**
  * Decode the actual option value from a button callback. Buttons are encoded
  * with an integer index (to keep under Telegram's 64-byte callback_data cap),
  * and the real value is looked up via `resolveQuestionRender(questionId)`.
@@ -595,19 +588,77 @@ function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff;
 }
 
+/** A code fence line: ``` or ~~~ (three or more) after optional indentation, then an optional info string. */
+const REPLY_FENCE_LINE = /^[ \t]*(`{3,}|~{3,})(.*)$/;
+
+/**
+ * The fence `text` leaves open at its end: the line that opened it and the
+ * marker that closes it. Undefined when every fence in `text` is closed.
+ */
+function openFenceAtEnd(text: string): { opener: string; closer: string } | undefined {
+  let open: { line: string; marker: string } | undefined;
+  for (const line of text.split('\n')) {
+    const match = REPLY_FENCE_LINE.exec(line);
+    if (!match) continue;
+    const [, marker, rest] = match;
+    if (!open) {
+      // A backtick fence's info string can't hold a backtick: ```a``` is inline code.
+      if (marker[0] === '`' && rest.includes('`')) continue;
+      open = { line: line.trim(), marker };
+    } else if (marker[0] === open.marker[0] && marker.length >= open.marker.length && rest.trim() === '') {
+      open = undefined;
+    }
+  }
+  return open && { opener: open.line, closer: open.marker };
+}
+
+/**
+ * Split `text` into chunks no larger than `limit`, preferring paragraph
+ * breaks, then line breaks, then a hard character cut as a last resort.
+ * A code fence that straddles a cut is closed at the end of its chunk and
+ * reopened, info string included, at the start of the next one, so the code
+ * after the cut still renders as code.
+ */
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
   let remaining = text;
-  while (remaining.length > limit) {
-    let cut = remaining.lastIndexOf('\n\n', limit);
-    if (cut <= 0) cut = remaining.lastIndexOf('\n', limit);
-    if (cut <= 0) cut = remaining.lastIndexOf(' ', limit);
-    if (cut <= 0) cut = limit;
+  // Length of a fence line reopened at the start of `remaining`; a cut must land past it.
+  let reopened = 0;
+  const findCut = (max: number): number => {
+    let cut = remaining.lastIndexOf('\n\n', max);
+    if (cut <= reopened) cut = remaining.lastIndexOf('\n', max);
+    if (cut <= reopened) cut = remaining.lastIndexOf(' ', max);
+    if (cut <= reopened) cut = max;
+    // A part holding only the reopened fence line would never get shorter.
+    if (reopened > 0 && remaining.slice(reopened, cut).trim() === '') cut = max;
     // A lone half of an emoji can't be encoded: Slack's client throws "URI malformed" and retries for ~30 min.
     if (cut > 1 && isHighSurrogate(remaining.charCodeAt(cut - 1))) cut--;
-    chunks.push(remaining.slice(0, cut).trimEnd());
-    remaining = remaining.slice(cut).trimStart();
+    return cut;
+  };
+  while (remaining.length > limit) {
+    let cut = findCut(limit);
+    let chunk = remaining.slice(0, cut).trimEnd();
+    let fence = openFenceAtEnd(chunk);
+    // Only reopen when the fence lines leave most of the next chunk for code.
+    if (fence && fence.opener.length + fence.closer.length + 2 < limit / 2) {
+      // Leave room for the closing marker.
+      cut = findCut(limit - fence.closer.length - 1);
+      chunk = remaining.slice(0, cut).trimEnd();
+      fence = openFenceAtEnd(chunk);
+    } else {
+      fence = undefined;
+    }
+    if (fence) {
+      chunks.push(`${chunk}\n${fence.closer}`);
+      // Drop only the line break at the cut: the next line's indentation is code.
+      remaining = `${fence.opener}\n${remaining.slice(cut).replace(/^\n+/, '')}`;
+      reopened = fence.opener.length;
+    } else {
+      chunks.push(chunk);
+      remaining = remaining.slice(cut).trimStart();
+      reopened = 0;
+    }
   }
   if (remaining.length > 0) chunks.push(remaining);
   return chunks;

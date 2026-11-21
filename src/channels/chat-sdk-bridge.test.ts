@@ -102,6 +102,35 @@ describe('splitForLimit', () => {
     expect(splitForLimit('😀😀', 1).join('')).toBe('😀😀');
   });
 
+  it('closes and reopens a code fence that straddles a cut', () => {
+    const code = Array.from({ length: 12 }, (_, i) => `    total_${i} = compute(__name__, *args)`);
+    const text = ['Here is the script:', '', '```python', 'def main(*args):', ...code, '```', '', 'Done.'].join('\n');
+    const chunks = splitForLimit(text, 200);
+
+    expect(chunks.length).toBeGreaterThan(2);
+    for (const c of chunks) {
+      expect(c.length).toBeLessThanOrEqual(200);
+      // Every part opens and closes its own fences, so the code in it renders as code.
+      expect((c.match(/^```/gm) ?? []).length % 2).toBe(0);
+    }
+    for (const c of chunks.slice(2, -1)) expect(c.startsWith('```python\n    total_')).toBe(true);
+    // Without fence and blank lines the parts add up to the original text, indentation included.
+    const lines = chunks.flatMap((c) => c.split('\n')).filter((l) => l !== '' && !l.startsWith('```'));
+    expect(lines).toEqual(['Here is the script:', 'def main(*args):', ...code, 'Done.']);
+  });
+
+  it('reopens a ~~~ fence with its own marker', () => {
+    const text = ['~~~~sh', ...Array.from({ length: 20 }, (_, i) => `echo ${i} \`date\``), '~~~~'].join('\n');
+    const chunks = splitForLimit(text, 80);
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) {
+      expect(c.length).toBeLessThanOrEqual(80);
+      expect(c.startsWith('~~~~sh\n')).toBe(true);
+      expect(c.endsWith('\n~~~~')).toBe(true);
+    }
+  });
+
   it('delivers a long emoji reply as parts that each encode', async () => {
     const { calls, postMessage } = makePostCapture();
     const bridge = createChatSdkBridge({
