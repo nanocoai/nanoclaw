@@ -1,0 +1,31 @@
+{
+  "_comment": "Recorded 18 Nov 2026 from Claude Code CLI 2.1.280 (agent SDK 0.3.280) against a local stand-in Messages API: input A answering, B and C pushed, CLI answered B and C in one turn. This is that turn's first assistant frame; user_message_uuids are the client uuids sent with B and C.",
+  "frame": {
+    "type": "assistant",
+    "message": {
+      "id": "msg_2",
+      "type": "message",
+      "role": "assistant",
+      "model": "claude-sonnet-5-5",
+      "content": [
+        {
+          "type": "text",
+          "text": "ok 2"
+        }
+      ],
+      "stop_reason": null,
+      "stop_sequence": null,
+      "usage": {
+        "input_tokens": 10,
+        "output_tokens": 1
+      },
+      "context_management": null
+    },
+    "parent_tool_use_id": null,
+    "session_id": "19eaafce-b149-4530-9df7-4dd4a6ba38ed",
+    "uuid": "0d4e07b8-d5c4-48ca-ad80-442adfb5e0f8",
+    "timestamp": "2026-11-18T09:54:34.971Z",
+    "user_message_uuid": "fa72038c-e9ac-45f7-8f23-caaf752a3b32",
+    "user_message_uuids": ["fbfc4571-cfa7-430f-9a8c-880704e00384", "fa72038c-e9ac-45f7-8f23-caaf752a3b32"]
+  }
+}
