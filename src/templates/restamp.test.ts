@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { execFileSync, spawn } from 'child_process';
+import { execFileSync, spawn, type ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -174,49 +174,61 @@ function replaceDirectoryAfterOpen(directory: string, outside: string): string {
   return moved;
 }
 
-// Writes the marker (argv[2]), then opens the FIFO (argv[1]) for writing, which frees a read stuck on it.
+// After 3 s, writes the marker (argv[2]), then retries opening the FIFO (argv[1])
+// for writing until that works: that frees a read stuck on it, even one that
+// started late.
 const UNBLOCK_FIFO = `
   const fs = require('fs');
-  setTimeout(() => {
-    fs.writeFileSync(process.argv[2], '');
+  const [fifo, marker] = process.argv.slice(1);
+  const unblock = () => {
     try {
-      fs.closeSync(fs.openSync(process.argv[1], fs.constants.O_WRONLY | fs.constants.O_NONBLOCK));
-    } catch {}
-  }, 1000);
+      fs.closeSync(fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK));
+    } catch (err) {
+      if (err.code === 'ENXIO') setTimeout(unblock, 50);
+    }
+  };
+  setTimeout(() => {
+    fs.writeFileSync(marker, '');
+    unblock();
+  }, 3000);
 `;
 
 /**
  * Run `plan` and swap `file` for a FIFO the moment the host opens or reads it
  * by path: the worst case of a race with the container. A helper process
- * frees a read stuck on the FIFO a second later, so a regression fails
- * instead of hanging the worker. The plan was stuck if it returned only after
- * the helper's marker; "the FIFO had a reader" misfires when another process
- * on the machine (a file indexer) opens the new FIFO.
+ * frees a read stuck on the FIFO, so a regression fails instead of hanging
+ * the worker. The plan was stuck if it returned only after the helper's
+ * marker. ("Did the FIFO have a reader?" misfires when another process, such
+ * as a file indexer, opens the new FIFO.)
  */
 async function planWithFifoSwap<T>(
   file: string,
   plan: () => Promise<T>,
 ): Promise<{ result: T; swapped: boolean; stuck: boolean }> {
   const marker = path.join(TEST_ROOT, 'fifo-helper-fired');
-  let swapped = false;
-  let helperExited!: Promise<unknown>;
+  const helpers: ChildProcess[] = [];
   for (const method of ['openSync', 'readFileSync'] as const) {
     const original = fs[method] as (...args: unknown[]) => unknown;
     vi.spyOn(fs, method).mockImplementation(((target: unknown, ...rest: unknown[]) => {
-      if (!swapped && target === file) {
-        swapped = true;
+      if (helpers.length === 0 && target === file) {
         fs.rmSync(file);
         execFileSync('mkfifo', [file]);
-        const helper = spawn(process.execPath, ['-e', UNBLOCK_FIFO, file, marker], { stdio: 'ignore' });
-        helperExited = new Promise((resolve) => helper.once('exit', resolve));
+        helpers.push(spawn(process.execPath, ['-e', UNBLOCK_FIFO, file, marker], { stdio: 'ignore' }));
       }
       return original(target, ...rest);
     }) as never);
   }
-  const result = await plan();
-  const stuck = fs.existsSync(marker);
-  if (swapped) await helperExited;
-  return { result, swapped, stuck };
+  try {
+    const result = await plan();
+    return { result, swapped: helpers.length > 0, stuck: fs.existsSync(marker) };
+  } finally {
+    for (const helper of helpers) {
+      if (helper.exitCode !== null || helper.signalCode !== null) continue;
+      const exited = new Promise((resolve) => helper.once('exit', resolve));
+      helper.kill();
+      await exited;
+    }
+  }
 }
 
 beforeEach(async () => {
