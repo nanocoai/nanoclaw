@@ -174,44 +174,49 @@ function replaceDirectoryAfterOpen(directory: string, outside: string): string {
   return moved;
 }
 
-// Exits 1 when a reader was waiting on the FIFO (the write-open succeeds), 0 when none was.
+// Writes the marker (argv[2]), then opens the FIFO (argv[1]) for writing, which frees a read stuck on it.
 const UNBLOCK_FIFO = `
   const fs = require('fs');
   setTimeout(() => {
+    fs.writeFileSync(process.argv[2], '');
     try {
       fs.closeSync(fs.openSync(process.argv[1], fs.constants.O_WRONLY | fs.constants.O_NONBLOCK));
-      process.exit(1);
-    } catch {
-      process.exit(0);
-    }
+    } catch {}
   }, 1000);
 `;
 
 /**
- * Swap `file` for a FIFO the moment the host opens or reads it by path: the
- * worst case of a race with the container. A helper process, started only
- * once the FIFO exists, opens it for writing a second later; that frees a
- * host read stuck on it, so a regression fails instead of hanging the
- * worker. Resolves true if a read was stuck.
+ * Run `plan` and swap `file` for a FIFO the moment the host opens or reads it
+ * by path: the worst case of a race with the container. A helper process
+ * frees a read stuck on the FIFO a second later, so a regression fails
+ * instead of hanging the worker. The plan was stuck if it returned only after
+ * the helper's marker; "the FIFO had a reader" misfires when another process
+ * on the machine (a file indexer) opens the new FIFO.
  */
-function swapToFifoWhenOpened(file: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    let swapped = false;
-    for (const method of ['openSync', 'readFileSync'] as const) {
-      const original = fs[method] as (...args: unknown[]) => unknown;
-      vi.spyOn(fs, method).mockImplementation(((target: unknown, ...rest: unknown[]) => {
-        if (!swapped && target === file) {
-          swapped = true;
-          fs.rmSync(file);
-          execFileSync('mkfifo', [file]);
-          spawn(process.execPath, ['-e', UNBLOCK_FIFO, file], { stdio: 'ignore' }).once('exit', (code) =>
-            resolve(code === 1),
-          );
-        }
-        return original(target, ...rest);
-      }) as never);
-    }
-  });
+async function planWithFifoSwap<T>(
+  file: string,
+  plan: () => Promise<T>,
+): Promise<{ result: T; swapped: boolean; stuck: boolean }> {
+  const marker = path.join(TEST_ROOT, 'fifo-helper-fired');
+  let swapped = false;
+  let helperExited!: Promise<unknown>;
+  for (const method of ['openSync', 'readFileSync'] as const) {
+    const original = fs[method] as (...args: unknown[]) => unknown;
+    vi.spyOn(fs, method).mockImplementation(((target: unknown, ...rest: unknown[]) => {
+      if (!swapped && target === file) {
+        swapped = true;
+        fs.rmSync(file);
+        execFileSync('mkfifo', [file]);
+        const helper = spawn(process.execPath, ['-e', UNBLOCK_FIFO, file, marker], { stdio: 'ignore' });
+        helperExited = new Promise((resolve) => helper.once('exit', resolve));
+      }
+      return original(target, ...rest);
+    }) as never);
+  }
+  const result = await plan();
+  const stuck = fs.existsSync(marker);
+  if (swapped) await helperExited;
+  return { result, swapped, stuck };
 }
 
 beforeEach(async () => {
@@ -455,23 +460,25 @@ describe('restampAgentFromTemplate', () => {
   it('reads a context file without blocking when it turns into a FIFO', async () => {
     const g = await stamp();
     writeTemplateV2();
-    const stuck = swapToFifoWhenOpened(path.join(GROUPS_DIR, g.folder, 'playbook.md'));
+    const run = await planWithFifoSwap(path.join(GROUPS_DIR, g.folder, 'playbook.md'), () =>
+      restampAgentFromTemplate('sales/sdr', g.id, { apply: false }),
+    );
 
-    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
-
-    expect(await stuck, 'the plan blocked on a FIFO').toBe(false);
-    expect(change(plan.changes, 'context', 'playbook.md').action).toBe('create');
+    expect(run.swapped).toBe(true);
+    expect(run.stuck, 'the plan blocked on a FIFO').toBe(false);
+    expect(change(run.result.changes, 'context', 'playbook.md').action).toBe('create');
   });
 
   it('compares a skill overlay without blocking when a file turns into a FIFO', async () => {
     const g = await stamp();
     writeTemplateV2();
-    const stuck = swapToFifoWhenOpened(overlaySkill(g.id, 'widget'));
+    const run = await planWithFifoSwap(overlaySkill(g.id, 'widget'), () =>
+      restampAgentFromTemplate('sales/sdr', g.id, { apply: false }),
+    );
 
-    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
-
-    expect(await stuck, 'the plan blocked on a FIFO').toBe(false);
-    expect(change(plan.changes, 'skill', 'widget').action).toBe('update');
+    expect(run.swapped).toBe(true);
+    expect(run.stuck, 'the plan blocked on a FIFO').toBe(false);
+    expect(change(run.result.changes, 'skill', 'widget').action).toBe('update');
   });
 
   it('refuses to write context through a symlinked directory', async () => {
