@@ -978,7 +978,8 @@ describe('spawn-path project document skill selection', () => {
 
     const skills = path.join(DATA_DIR, 'v2-sessions', ag.id, '.claude-shared', 'skills');
     expect(fs.readlinkSync(path.join(skills, 'fixture-gateway'))).toBe('/app/skills/fixture-gateway');
-    expect(fs.existsSync(path.join(skills, 'inactive-gateway'))).toBe(false);
+    // Links target container paths, dangling on the host: check the entry itself.
+    expect(fs.readdirSync(skills)).not.toContain('inactive-gateway');
     const doc = fs.readFileSync(path.join(GROUPS_DIR, ag.folder, 'CLAUDE.md'), 'utf-8');
     expect(doc).toContain('# NanoClaw Skill: fixture-gateway');
     expect(doc).toContain('Fixture credential guidance.');
