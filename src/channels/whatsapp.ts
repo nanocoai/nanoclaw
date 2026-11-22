@@ -39,7 +39,6 @@ import {
 import type { GroupMetadata, WAMessageKey, WAMessage, WASocket } from '@whiskeysockets/baileys';
 
 import { isSafeAttachmentName } from '../attachment-safety.js';
-import { DATA_DIR } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -107,6 +106,13 @@ const GROUP_METADATA_CACHE_TTL_MS = 60_000; // 1 min for outbound sends
 const SENT_MESSAGE_CACHE_MAX = 256;
 const RECONNECT_DELAY_MS = 5000;
 const PENDING_QUESTIONS_MAX = 64;
+/**
+ * Inbound media rides to the host as base64 in the message row, so it is capped
+ * (as iMessage caps inline media). Larger files get the "could not be downloaded" note.
+ */
+const MAX_INBOUND_MEDIA_BYTES = 20 * 1024 * 1024;
+/** Longest filename (bytes) the host can write; a longer one would drop the whole message. */
+const MAX_ATTACHMENT_NAME_BYTES = 255;
 
 /** Normalize an option label to a slash command: "Approve" → "/approve" */
 function optionToCommand(option: string): string {
@@ -380,6 +386,16 @@ export function appendMediaFailureNote(content: string, failures: string[]): str
   return content ? `${content}\n${note}` : note;
 }
 
+/** An inbound attachment for the host to stage; see downloadInboundMedia. */
+type InboundAttachment = {
+  type: string;
+  name: string;
+  data: string;
+  size: number;
+  mimeType?: string;
+  isVoiceNote?: boolean;
+};
+
 /** Map file extension to Baileys media message type. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function buildMediaMessage(data: Buffer, filename: string, ext: string, caption?: string): any {
@@ -601,13 +617,18 @@ registerChannelAdapter('whatsapp', {
       }
     }
 
-    /** Download media from an inbound message, save to /workspace/attachments/. */
+    /**
+     * Download media from an inbound message. The bytes go to the host as base64
+     * `data`; the host's extractAttachmentFiles writes them into the session's
+     * inbox/<message_id>/, the directory the container mounts, and sets localPath.
+     * (The router fans a message out to sessions, so the adapter has no session dir.)
+     */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async function downloadInboundMedia(
       msg: WAMessage,
       normalized: any,
     ): Promise<{
-      attachments: Array<{ type: string; name: string; localPath: string; isVoiceNote?: boolean }>;
+      attachments: InboundAttachment[];
       failures: string[];
     }> {
       const mediaTypes: Array<{ key: string; type: string; ext: string }> = [
@@ -616,7 +637,7 @@ registerChannelAdapter('whatsapp', {
         { key: 'audioMessage', type: 'audio', ext: '.ogg' },
         { key: 'documentMessage', type: 'document', ext: '' },
       ];
-      const results: Array<{ type: string; name: string; localPath: string; isVoiceNote?: boolean }> = [];
+      const results: InboundAttachment[] = [];
       const failures: string[] = [];
       for (const { key, type: mediaType, ext } of mediaTypes) {
         if (!normalized[key]) continue;
@@ -624,6 +645,12 @@ registerChannelAdapter('whatsapp', {
         // flagged for transcription modules that read isVoiceNote.
         const isVoiceNote = key === 'audioMessage' && normalized[key].ptt === true;
         const type = isVoiceNote ? 'voice' : mediaType;
+        const declaredSize = Number(normalized[key].fileLength ?? 0);
+        if (declaredSize > MAX_INBOUND_MEDIA_BYTES) {
+          log.warn('Inbound media too large, not downloaded', { type, size: declaredSize, msgId: msg.key.id });
+          failures.push(type);
+          continue;
+        }
         try {
           // Pass reuploadRequest so Baileys can ask WhatsApp to re-upload the
           // media when the direct CDN fetch fails or the media URL has expired
@@ -637,27 +664,34 @@ registerChannelAdapter('whatsapp', {
           );
           // documentMessage.fileName is attacker-controlled and rides through
           // WhatsApp's E2E channel — Meta can't sanitize it server-side. Without
-          // this guard, a `..`-laden fileName escapes attachDir on path.join.
+          // this guard, a `..`-laden fileName escapes the inbox on path.join.
+          // The host checks it again where it writes; this keeps the typed fallback name.
           const rawFilename = normalized[key].fileName;
           const fallback = `${type}-${Date.now()}${ext}`;
-          const filename = isSafeAttachmentName(rawFilename) ? rawFilename : fallback;
+          const filename =
+            isSafeAttachmentName(rawFilename) && Buffer.byteLength(rawFilename) <= MAX_ATTACHMENT_NAME_BYTES
+              ? rawFilename
+              : fallback;
           if (rawFilename && filename !== rawFilename) {
-            log.warn('Refused unsafe attachment filename — would escape attachments dir', {
+            log.warn('Refused unsafe or over-long attachment filename', {
               rawFilename,
               replacement: filename,
             });
           }
-          const attachDir = path.join(DATA_DIR, 'attachments');
-          fs.mkdirSync(attachDir, { recursive: true });
-          const filePath = path.join(attachDir, filename);
-          fs.writeFileSync(filePath, buffer);
+          if (buffer.length > MAX_INBOUND_MEDIA_BYTES) {
+            log.warn('Inbound media too large, dropped', { type, size: buffer.length, msgId: msg.key.id });
+            failures.push(type);
+            continue;
+          }
           results.push({
             type,
             name: filename,
-            localPath: `attachments/${filename}`,
+            data: buffer.toString('base64'),
+            size: buffer.length,
+            ...(normalized[key].mimetype && { mimeType: normalized[key].mimetype as string }),
             ...(isVoiceNote && { isVoiceNote }),
           });
-          log.info('Media downloaded', { type, filename });
+          log.info('Media downloaded', { type, filename, size: buffer.length, msgId: msg.key.id });
         } catch (err) {
           log.warn('Failed to download media', { type, err });
           failures.push(type);
