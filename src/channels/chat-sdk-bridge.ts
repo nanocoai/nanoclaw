@@ -56,6 +56,8 @@ interface ConnectionAwareAdapter extends Adapter {
 export interface ReplyContext {
   text: string;
   sender: string;
+  /** The part of `text` the user selected when replying (Telegram partial quote). */
+  quote?: string;
 }
 
 // ---------------------------------------------------------------------------

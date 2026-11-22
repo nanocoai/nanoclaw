@@ -220,6 +220,26 @@ describe('reply_to + quoted_message rendering', () => {
     expect(result).toContain('Yes, on my way!</message>');
   });
 
+  it('renders the selected part of a partial quote', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'why?',
+      replyTo: { sender: 'Bob', text: 'First point. Second point.', quote: 'Second point.' },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<quoted_message from="Bob">First point. Second point.</quoted_message>');
+    expect(result).toContain('<quoted_part>Second point.</quoted_part>');
+  });
+
+  it('omits quoted_part when the quote is the whole message', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'ok',
+      replyTo: { sender: 'Bob', text: 'Same', quote: 'Same' },
+    });
+    expect(formatMessages(getPendingMessages())).not.toContain('quoted_part');
+  });
+
   it('omits reply_to and quoted_message when no reply context', () => {
     insertMessage('m1', 'chat', { sender: 'Alice', text: 'plain' });
     const result = formatMessages(getPendingMessages());
