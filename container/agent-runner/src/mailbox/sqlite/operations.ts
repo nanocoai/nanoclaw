@@ -47,7 +47,26 @@ export function sqliteGetPendingMessages(isFirstPoll: boolean, limit: number): M
       ({ message_id }) => message_id,
     ),
   );
-  const unclaimed = pending.filter(({ id }) => !acked.has(id));
+  // ncl stops waiting after 30 seconds. Both idle and active-turn polls
+  // already read these rows; retire abandoned replies before they take a
+  // batch slot. Question answers have a caller-selected deadline.
+  const expiresBefore = Date.now() - 10 * 60_000;
+  const expired: string[] = [];
+  const unclaimed = pending.filter((row) => {
+    if (acked.has(row.id)) return false;
+    if (row.kind === 'system' && Date.parse(sqliteTimestamp(row.timestamp)) <= expiresBefore) {
+      try {
+        if (JSON.parse(row.content)?.type === 'cli_response') {
+          if (expired.length < 500) expired.push(row.id);
+          return false;
+        }
+      } catch {
+        // Leave malformed system messages for their consumers.
+      }
+    }
+    return true;
+  });
+  sqliteMarkCompleted(expired);
   const wake = unclaimed.filter(({ trigger }) => trigger === 1).slice(0, limit);
   const remaining = limit - wake.length;
   const context = remaining > 0 ? unclaimed.filter(({ trigger }) => trigger === 0).slice(-remaining) : [];
