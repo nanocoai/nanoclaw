@@ -2,7 +2,7 @@
  * WhatsApp channel adapter (v2) — native Baileys v7 implementation.
  *
  * Implements ChannelAdapter directly (no Chat SDK bridge) using
- * @whiskeysockets/baileys 7.0.0-rc.9 (pinned — last release, unmaintained).
+ * @whiskeysockets/baileys 7.0.0-rc14 (pinned exactly in package.json).
  * Ports proven v1 infrastructure: getMessage fallback, outgoing queue,
  * group metadata cache, LID mapping, reconnection with backoff.
  *
