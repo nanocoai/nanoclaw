@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 
 import {
   assembleReleaseBody,
@@ -206,7 +207,7 @@ describe('release workflow safeguards', () => {
     expect(releaseWorkflow).not.toContain('release.mjs environment');
     expect(releaseWorkflow).toContain('EXPECTED_REVIEWERS=\'["glifocat"]\'\n              PREVENT_SELF_REVIEW=false');
     expect(releaseWorkflow).toContain(
-      'EXPECTED_REVIEWERS=\'["amit-shafnir","gavrielc","glifocat","omri-maya","zvi-fried"]\'\n              PREVENT_SELF_REVIEW=true',
+      'EXPECTED_REVIEWERS=\'["amit-shafnir","gavrielc","glifocat","omri-maya","zvi-fried"]\'\n              PREVENT_SELF_REVIEW=false',
     );
     expect(releaseWorkflow).toContain('environments/${ENVIRONMENT}/deployment-branch-policies');
     expect(releaseWorkflow).toContain(
@@ -658,6 +659,225 @@ describe('release workflow target check', () => {
         stdout: '::error::target_sha must be a full lowercase 40-character commit SHA\n',
       });
     }
+  });
+});
+
+describe('release workflow main protection check', () => {
+  type Step = { name?: string; if?: string; run?: string };
+  const verify = parseYaml(releaseWorkflow).jobs.verify as { steps: Step[] };
+  const names = verify.steps.map((s) => s.name);
+  const step = verify.steps.find((s) => s.name === 'Verify main protects the release workflow')!;
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const teamRule = (patterns: string[], minimumApprovals = 1, type = 'Team') => ({
+    type: 'pull_request',
+    ruleset_id: 1,
+    parameters: {
+      required_approving_review_count: 1,
+      required_reviewers: [{ file_patterns: patterns, minimum_approvals: minimumApprovals, reviewer: { id: 7, type } }],
+    },
+  });
+
+  /** Runs the step's script with `gh` stubbed to print main's active rules, one per line, as `--jq '.[]'` does. */
+  function run(rules: unknown[], apiFails = false) {
+    const root = mkdtempSync(path.join(tmpdir(), 'release-main-rules-'));
+    dirs.push(root);
+    mkdirSync(path.join(root, 'bin'));
+    writeFileSync(path.join(root, 'rules.jsonl'), rules.map((rule) => JSON.stringify(rule)).join('\n'));
+    writeFileSync(
+      path.join(root, 'bin/gh'),
+      [
+        '#!/bin/sh',
+        `[ "$*" = "api --paginate repos/nanocoai/nanoclaw/rules/branches/main?per_page=100 --jq .[]" ] || exit 2`,
+        apiFails ? 'exit 1' : `cat '${path.join(root, 'rules.jsonl')}'`,
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    return spawnSync('bash', ['-c', step.run!], {
+      cwd: root,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${path.join(root, 'bin')}:${process.env.PATH}`,
+        GITHUB_REPOSITORY: 'nanocoai/nanoclaw',
+        RUNNER_TEMP: root,
+      },
+    });
+  }
+
+  it('runs for stable versions, after the environment check and before any target code', () => {
+    expect(step.if).toBe("${{ !contains(inputs.version, '-') }}");
+    expect(names.indexOf('Verify main protects the release workflow')).toBe(
+      names.indexOf('Verify protected release environment') + 1,
+    );
+  });
+
+  it('passes when a team must approve every change under .github/', { timeout: 30_000 }, () => {
+    expect(run([{ type: 'deletion' }, teamRule(['.github/**'])]).status).toBe(0);
+    // Another active ruleset may hold the rule.
+    expect(run([teamRule(['src/**']), teamRule(['.github/**', 'container/**'], 2)]).status).toBe(0);
+  });
+
+  it('fails closed without that rule or a readable rule list', { timeout: 30_000 }, () => {
+    for (const rules of [
+      [],
+      [{ type: 'pull_request', parameters: { required_approving_review_count: 1, required_reviewers: [] } }],
+      [{ type: 'pull_request', parameters: { required_approving_review_count: 1 } }],
+      [teamRule(['.github/**'], 0)],
+      [teamRule(['.github/workflows/**'])],
+      [teamRule(['.github/**', '!.github/workflows/release.yml'])],
+      [teamRule(['.github/**'], 1, 'User')],
+    ]) {
+      expect(run(rules).status).not.toBe(0);
+    }
+    expect(run([teamRule(['.github/**'])], true).status).not.toBe(0);
+    expect(run([]).stdout).toContain("::error::main must require a team's approval (at least 1) for .github/**");
+  });
+});
+
+describe('release workflow stable publish approval', () => {
+  type Step = { name?: string; if?: string; env?: Record<string, string>; run?: string };
+  const publish = parseYaml(releaseWorkflow).jobs.publish as { permissions: unknown; steps: Step[] };
+  const step = publish.steps.find((s) => s.name === 'Check stable publish approval')!;
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  type Person = { id: number | null; login: string; type: string };
+  const ids: Record<string, number> = { glifocat: 1, 'zvi-fried': 2, gavrielc: 3 };
+  const person = (login: string, type = 'User'): Person => ({ id: ids[login.toLowerCase()] ?? 99, login, type });
+  const who = (p: string | Person) => (typeof p === 'string' ? person(p) : p);
+  const approval = (user: string | Person, environment = 'release', state = 'approved') => ({
+    state,
+    comment: '',
+    user: who(user),
+    environments: [{ name: environment }],
+  });
+
+  /** Runs the step's script on attempt 3, with `gh` stubbed to answer the attempt and approval-history reads. */
+  function run(
+    history: unknown,
+    actor: string | Person,
+    triggering: string | Person = actor,
+    failing?: 'attempts' | 'approvals',
+  ) {
+    const root = mkdtempSync(path.join(tmpdir(), 'release-approval-'));
+    dirs.push(root);
+    mkdirSync(path.join(root, 'bin'));
+    const attempt = { run_attempt: 3, actor: who(actor), triggering_actor: who(triggering) };
+    writeFileSync(path.join(root, 'attempts.json'), JSON.stringify(attempt));
+    writeFileSync(path.join(root, 'approvals.json'), JSON.stringify(history));
+    const answer = (read: 'attempts' | 'approvals') =>
+      failing === read ? 'exit 1' : `cat '${path.join(root, `${read}.json`)}'`;
+    writeFileSync(
+      path.join(root, 'bin/gh'),
+      [
+        '#!/bin/sh',
+        'case "$*" in',
+        `  "api repos/nanocoai/nanoclaw/actions/runs/42/attempts/3") ${answer('attempts')} ;;`,
+        `  "api repos/nanocoai/nanoclaw/actions/runs/42/approvals") ${answer('approvals')} ;;`,
+        '  *) exit 2 ;;',
+        'esac',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const summary = path.join(root, 'summary.md');
+    writeFileSync(summary, '');
+    const result = spawnSync('bash', ['-c', step.run!], {
+      cwd: root,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${path.join(root, 'bin')}:${process.env.PATH}`,
+        GITHUB_REPOSITORY: 'nanocoai/nanoclaw',
+        GITHUB_RUN_ID: '42',
+        GITHUB_RUN_ATTEMPT: '3',
+        GITHUB_STEP_SUMMARY: summary,
+        RUNNER_TEMP: root,
+        RUN_ACTOR: attempt.actor.login,
+        RUN_TRIGGERING_ACTOR: attempt.triggering_actor.login,
+        SELF_APPROVAL_ALLOWLIST: step.env!.SELF_APPROVAL_ALLOWLIST,
+      },
+    });
+    return { status: result.status, stdout: result.stdout, summary: readFileSync(summary, 'utf8') };
+  }
+
+  it('runs first in the stable publish job, with read access to the run and the allowlist in the workflow', () => {
+    expect(publish.steps[0]).toBe(step);
+    expect(step.if).toBe("${{ !contains(inputs.version, '-') }}");
+    expect(publish.permissions).toEqual({ actions: 'read', contents: 'write' });
+    expect(step.env).toMatchObject({
+      SELF_APPROVAL_ALLOWLIST: 'glifocat',
+      RUN_ACTOR: '${{ github.actor }}',
+      RUN_TRIGGERING_ACTOR: '${{ github.triggering_actor }}',
+    });
+    // A refusal must stop the job: nothing may run on after a failed step.
+    expect(releaseWorkflow).not.toMatch(/continue-on-error|always\(\)|failure\(\)|cancelled\(\)/);
+  });
+
+  it('passes an approval by a second release reviewer', { timeout: 30_000 }, () => {
+    const result = run([approval('zvi-fried')], 'gavrielc');
+    expect(result.status).toBe(0);
+    expect(result.summary).toContain('- Approved by: `zvi-fried`');
+    expect(result.summary).toContain('- Result: approved by a second person');
+    expect(run([approval('zvi-fried', 'Release')], 'gavrielc').status).toBe(0);
+  });
+
+  it('passes a self-approval by an allowlisted maintainer, whatever the login case', { timeout: 30_000 }, () => {
+    expect(run([approval('glifocat')], 'glifocat').status).toBe(0);
+    const result = run([approval('glifocat')], 'Glifocat', 'zvi-fried');
+    expect(result.status).toBe(0);
+    expect(result.summary).toContain('- Result: self-approved by allowlisted maintainer glifocat');
+  });
+
+  it('refuses a self-approval by anyone else, as dispatcher or re-runner, in any attempt', { timeout: 30_000 }, () => {
+    const refused = run([approval('gavrielc')], 'gavrielc');
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).toContain(
+      '::error::Stable publish refused: self-approved by gavrielc, who is not on SELF_APPROVAL_ALLOWLIST.',
+    );
+    expect(refused.summary).toContain('- Result: self-approved by gavrielc, who is not on SELF_APPROVAL_ALLOWLIST');
+    expect(run([approval('Zvi-Fried')], 'glifocat', 'zvi-fried').status).toBe(1);
+    expect(run([approval('zvi-fried')], 'zvi-fried', 'glifocat').status).toBe(1);
+    // A second person approved one attempt; the dispatcher approved another.
+    expect(run([approval('zvi-fried'), approval('gavrielc')], 'gavrielc').status).toBe(1);
+    // Same account under a new login: the account id still matches.
+    expect(run([approval({ id: 3, login: 'gavrielc-renamed', type: 'User' })], 'gavrielc').status).toBe(1);
+  });
+
+  it('refuses a run started or re-run by an app instead of a person', { timeout: 30_000 }, () => {
+    const bot = { id: 41898282, login: 'github-actions[bot]', type: 'Bot' };
+    const refused = run([approval('zvi-fried')], bot);
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).toContain('::error::Stable publish refused: started by github-actions[bot], not a person.');
+    expect(run([approval('glifocat')], 'zvi-fried', bot).status).toBe(1);
+  });
+
+  it('fails closed without an approval of the release environment or a readable history', { timeout: 30_000 }, () => {
+    for (const history of [
+      [],
+      [approval('zvi-fried', 'prerelease')],
+      [approval('zvi-fried', 'release', 'rejected')],
+      [approval('zvi-fried', 'release', 'pending')],
+      [approval('')],
+      [approval({ id: null, login: 'zvi-fried', type: 'User' })],
+      [{ ...approval('zvi-fried'), user: null }],
+      { message: 'Not Found' },
+    ]) {
+      expect(run(history, 'gavrielc').status).not.toBe(0);
+    }
+    expect(run([approval('zvi-fried')], 'gavrielc', 'gavrielc', 'approvals').status).not.toBe(0);
+    expect(run([approval('zvi-fried')], 'gavrielc', 'gavrielc', 'attempts').status).not.toBe(0);
+    // Without a known dispatcher or re-runner there is nothing to compare the approver to.
+    expect(run([approval('zvi-fried')], '', 'gavrielc').status).not.toBe(0);
+    expect(run([approval('zvi-fried')], { id: null, login: 'gavrielc', type: 'User' }).status).not.toBe(0);
+    expect(run([], 'glifocat').stdout).toContain(
+      '::error::Stable publish refused: no approval of the release environment in this run.',
+    );
   });
 });
 
