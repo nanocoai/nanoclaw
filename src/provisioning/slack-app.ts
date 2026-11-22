@@ -42,6 +42,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { upsertEnvKey } from '../env-file.js';
+
 const SLACK_API = 'https://slack.com/api';
 
 /** The deployed managed-Slack broker. Overridable via SLACK_SERVICE_BASE. */
@@ -287,6 +289,74 @@ function readEnvSetting(key: string, projectRoot: string): string | undefined {
  */
 export function readManagerToken(projectRoot = process.cwd()): string | undefined {
   return readEnvSetting('SLACK_MANAGER_TOKEN', projectRoot);
+}
+
+/**
+ * Exchange the stored refresh token for a fresh manager token.
+ *
+ * Slack expires an app configuration token 12 hours after it is generated, and
+ * `tooling.tokens.rotate` is the only way to get another one without a trip to
+ * api.slack.com. That matters most for the flow this file exists to serve:
+ * `create_agent` provisioning a Slack bot on demand is, by construction, rare
+ * and unscheduled, so the direct-mode credential is stale far more often than
+ * not and the Slack leg fails with `token_expired`.
+ *
+ * The rotate response carries its own successor, so seeding
+ * SLACK_MANAGER_REFRESH_TOKEN once keeps the chain going indefinitely.
+ *
+ * Persisting before returning is not optional. Rotation invalidates the refresh
+ * token it consumed, so a crash between the call and the write strands the
+ * install with no way back except generating both by hand — the failure this is
+ * meant to remove. Both values are written before the new token is handed out,
+ * and a write failure is surfaced rather than swallowed.
+ *
+ * No auth header: the method takes the refresh token as an argument and
+ * requires no scopes.
+ */
+export async function rotateManagerToken(projectRoot = process.cwd()): Promise<string | undefined> {
+  const refreshToken = readEnvSetting('SLACK_MANAGER_REFRESH_TOKEN', projectRoot);
+  if (!refreshToken) return undefined;
+
+  const res = await fetch(`${SLACK_API}/tooling.tokens.rotate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ refresh_token: refreshToken }).toString(),
+  });
+  const rotated = (await res.json()) as SlackApiResponse & {
+    token?: string;
+    refresh_token?: string;
+    exp?: number;
+  };
+
+  if (!rotated.ok || !rotated.token || !rotated.refresh_token) {
+    throw new Error(
+      `tooling.tokens.rotate failed: ${rotated.error ?? 'no token in response'}. ` +
+        'Generate a new configuration token and refresh token at api.slack.com/apps ' +
+        'and set SLACK_MANAGER_TOKEN and SLACK_MANAGER_REFRESH_TOKEN.',
+    );
+  }
+
+  upsertEnvKey(projectRoot, 'SLACK_MANAGER_REFRESH_TOKEN', rotated.refresh_token);
+  upsertEnvKey(projectRoot, 'SLACK_MANAGER_TOKEN', rotated.token);
+  return rotated.token;
+}
+
+/**
+ * The manager token to actually provision with: rotated when a refresh token is
+ * configured, otherwise whatever is stored.
+ *
+ * Rotation is unconditional rather than gated on a stored expiry. A rotate costs
+ * one request and always yields a full 12 hours, while tracking `exp` means
+ * persisting a third value and still guessing at clock skew — and guessing wrong
+ * means the provisioning run fails, which is the whole failure being removed.
+ *
+ * A configured-but-broken refresh chain throws rather than falling back to the
+ * stored token. Falling back would turn a clear "your refresh token is dead"
+ * into `token_expired` from a later call, which is the error this hides.
+ */
+export async function readProvisioningToken(projectRoot = process.cwd()): Promise<string | undefined> {
+  const rotated = await rotateManagerToken(projectRoot);
+  return rotated ?? readManagerToken(projectRoot);
 }
 
 // ---------------------------------------------------------------------------
