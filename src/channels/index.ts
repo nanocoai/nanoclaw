@@ -39,6 +39,9 @@ import './whatsapp-cloud.js';
 // resend (email)
 import './resend.js';
 
+// mailtrap (email)
+import './mailtrap.js';
+
 // matrix
 import './matrix.js';
 
