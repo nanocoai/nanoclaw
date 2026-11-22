@@ -35,7 +35,7 @@ vi.mock('./modules/mount-security/index.js', () => ({
 import { buildMounts, resolveProviderContribution } from './container-runner.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from './db/index.js';
 import { ensureContainerConfig, updateContainerConfigJson } from './db/container-configs.js';
-import { registerGatewayProvider, resetGatewayProvider } from './gateway-providers/index.js';
+import { getGatewayProvider, registerGatewayProvider, resetGatewayProvider } from './gateway-providers/index.js';
 import { initGroupFilesystem } from './group-init.js';
 import { PERSONA_PREPEND_FILE } from './group-persona.js';
 import { log } from './log.js';
@@ -915,7 +915,8 @@ describe('derived provider spawn surfaces', () => {
 });
 
 // An installed but unselected gateway: its agent skill must never reach a
-// container. Selection stays pinned by test-setup's resetGatewayProvider.
+// container. Registered for the whole file but never selected: the suite below
+// pins the selection to its 'fixture' gateway.
 registerGatewayProvider({
   kind: 'inactive-fixture',
   agentSkills: ['inactive-gateway'],
@@ -925,8 +926,10 @@ registerGatewayProvider({
 
 describe('spawn-path project document skill selection', () => {
   const REPO_ROOT = process.cwd();
+  let previousGateway: ReturnType<typeof getGatewayProvider>;
 
   beforeEach(() => {
+    previousGateway = getGatewayProvider();
     // A source tree holding two gateways' agent skills, each carrying the
     // resident prose a credential prohibition lives in.
     const sourceRoot = path.join(TEST_ROOT, 'source');
@@ -953,7 +956,7 @@ describe('spawn-path project document skill selection', () => {
 
   afterEach(() => {
     process.chdir(REPO_ROOT);
-    resetGatewayProvider();
+    resetGatewayProvider(previousGateway);
   });
 
   // Red if the contract path composes from the stored selection: the active
