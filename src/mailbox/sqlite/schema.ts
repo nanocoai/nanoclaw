@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS messages_in (
   on_wake        INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_messages_in_series ON messages_in(series_id);
+-- The runner polls for pending messages in seq order.
+CREATE INDEX IF NOT EXISTS idx_messages_in_status_seq ON messages_in(status, seq);
 -- The mention-sticky wake check and the conversation root find their first
 -- waking or silent row without a scan or a sort.
 CREATE INDEX IF NOT EXISTS idx_messages_in_trigger_seq ON messages_in("trigger", seq);

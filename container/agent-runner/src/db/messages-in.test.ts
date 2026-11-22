@@ -7,9 +7,9 @@
  * task) out of the batch — without it, the wake fires but the work itself
  * never reaches the agent.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb } from '../mailbox/sqlite/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
 import { getPendingMessages, markProcessing } from './messages-in.js';
 
 beforeEach(() => {
@@ -104,6 +104,35 @@ describe('trigger=1 rows never crowded out', () => {
 });
 
 describe('claimed-but-unsynced rows never hide new work', () => {
+  it('looks up a pending message by ID in the ack index', () => {
+    insertMessage('new', 2, 'chat', { text: 'hello' });
+    markProcessing(['old']);
+    const outbound = getOutboundDb();
+    const prepare = spyOn(outbound, 'prepare');
+    let queries: string[];
+    try {
+      expect(getPendingMessages().map((row) => row.id)).toEqual(['new']);
+      queries = prepare.mock.calls.map(([sql]) => sql).filter((sql) => sql.includes('processing_ack'));
+    } finally {
+      prepare.mockRestore();
+    }
+    expect(queries).toHaveLength(1);
+    const plan = outbound.prepare(`EXPLAIN QUERY PLAN ${queries[0]}`).all() as Array<{ detail: string }>;
+    expect(plan.map(({ detail }) => detail).join('\n')).toMatch(/SEARCH processing_ack .*\(message_id=\?\)/);
+  });
+
+  it('filters claimed messages across lookup batches before applying the prompt limit', () => {
+    const unread = ['msg-0', 'msg-501', 'msg-999'];
+    const claimed: string[] = [];
+    for (let i = 0; i < 1000; i++) {
+      const id = `msg-${i}`;
+      insertMessage(id, i * 2, 'chat', { text: id });
+      if (!unread.includes(id)) claimed.push(id);
+    }
+    markProcessing(claimed);
+    expect(getPendingMessages().map((row) => row.id)).toEqual(unread);
+  });
+
   // Claimed rows stay status='pending' in inbound.db until the host sweep
   // syncs processing_ack back (~60s). The ack filter must run BEFORE the cap
   // windowing: windowing first lets a cap-sized claimed batch fill the

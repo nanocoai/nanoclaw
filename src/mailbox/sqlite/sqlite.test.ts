@@ -165,6 +165,28 @@ describe('SQLite mailbox canonical serialization', () => {
     expect(wrapSqliteInbound(bare).wakeEvidence()).toBe('chatter');
   });
 
+  it.each(['fresh', 'upgraded'])('finds pending messages in seq order using an index (%s inbox)', (kind) => {
+    const db = new Database(':memory:');
+    databases.push(db);
+    db.exec(INBOUND_SCHEMA);
+    if (kind === 'upgraded') {
+      db.exec('DROP INDEX IF EXISTS idx_messages_in_status_seq');
+      migrateMessagesInTable(db);
+    }
+
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN SELECT * FROM messages_in
+         WHERE status = 'pending' AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
+           AND (on_wake = 0 OR ? = 1)
+         ORDER BY seq ASC`,
+      )
+      .all(0) as Array<{ detail: string }>;
+    const details = plan.map(({ detail }) => detail).join('\n');
+    expect(details).toContain('SEARCH messages_in USING INDEX idx_messages_in_status_seq (status=?)');
+    expect(details).not.toContain('TEMP B-TREE');
+  });
+
   it('answers the wake check and the conversation root from an index, also on inboxes made before it', () => {
     const legacy = new Database(':memory:');
     databases.push(legacy);
