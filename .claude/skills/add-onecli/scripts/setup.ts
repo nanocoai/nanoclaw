@@ -420,7 +420,7 @@ async function pollGatewayHealth(
       if (res.ok) return 'ok';
       result = 'incompatible';
     } catch {
-      result = 'unreachable';
+      // A failed retry must not discard an earlier HTTP response.
     }
     const delayMs = Math.min(1000, deadline - Date.now());
     if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));

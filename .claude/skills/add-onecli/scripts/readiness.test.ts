@@ -141,6 +141,43 @@ describe('OneCLI readiness deadline', () => {
     expect(v1Calls).toBe(3);
   });
 
+  it('keeps an earlier /v1 404 when the last probe is cut off by the deadline', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    // Drive cancellation on the same fake clock as responses and retries.
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), ms);
+      return controller.signal;
+    });
+    const aborted = vi.fn();
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/api/health')) return new Response(null, { status: 200 });
+      const signal = init!.signal!;
+      return new Promise<Response>((resolve, reject) => {
+        const onAbort = () => {
+          clearTimeout(timer);
+          aborted();
+          reject(signal.reason);
+        };
+        const timer = setTimeout(() => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(new Response(null, { status: 404 }));
+        }, 30);
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+    });
+
+    // The first /v1 probe takes 30 ms and the retry waits 1 s, leaving 15 ms.
+    const readiness = pollGatewayReadiness('http://gateway.test', 1045, fetchImpl);
+    await vi.advanceTimersByTimeAsync(1045);
+
+    expect(aborted).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+    await expect(readiness).resolves.toEqual({ healthy: true, v1Status: 'incompatible' });
+  });
+
   it('bounds requests and retry sleeps by the remaining budget without extending it', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
