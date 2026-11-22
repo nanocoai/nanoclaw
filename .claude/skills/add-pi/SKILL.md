@@ -47,11 +47,12 @@ files and the container image alone.
 ## Install
 
 Install and refresh require host contract version 1 and credential-connection
-seam version 1. The compatibility predicate below guards every subsequent step,
-so an unsupported core receives no partial payload or dependency changes.
+seam version 2 or later. The compatibility predicate below guards every
+subsequent step, so an unsupported core receives no partial payload or
+dependency changes.
 
 ```nc:run effect:refresh capture:pi_core_ready validate:^yes$
-node -e "const fs=require('fs'); const p='src/provider-contracts/registry.ts', g='setup/gateways/credential-store.ts'; if(fs.existsSync(p) && /PROVIDER_HOST_CONTRACT_SEAM_VERSION = 1/.test(fs.readFileSync(p,'utf8')) && fs.existsSync(g) && /PROVIDER_CREDENTIAL_CONNECTION_SEAM_VERSION = 1/.test(fs.readFileSync(g,'utf8'))) console.log('yes'); else console.log('no')"
+node -e "const fs=require('fs'); const p='src/provider-contracts/registry.ts', g='setup/gateways/credential-store.ts'; if(fs.existsSync(p) && /PROVIDER_HOST_CONTRACT_SEAM_VERSION = 1/.test(fs.readFileSync(p,'utf8')) && fs.existsSync(g) && /PROVIDER_CREDENTIAL_CONNECTION_SEAM_VERSION = ([2-9]|[1-9][0-9])/.test(fs.readFileSync(g,'utf8'))) console.log('yes'); else console.log('no')"
 ```
 
 Copy only the files listed below from this skill's `payload/` to the matching
