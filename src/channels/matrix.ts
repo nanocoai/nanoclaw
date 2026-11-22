@@ -12,14 +12,22 @@
  *   MATRIX_INVITE_AUTOJOIN_ALLOWLIST — comma-separated user IDs allowed to invite
  *   MATRIX_RECOVERY_KEY         — enable E2EE cross-signing
  *   MATRIX_DEVICE_ID            — stable device ID across restarts
+ *
+ * Additional accounts: MATRIX_INSTANCES=<name>[,...] with MATRIX_<KEY>_<NAME>
+ * credentials; see ./matrix-instances.ts.
  */
 import { createMatrixAdapter } from '@beeper/chat-adapter-matrix';
 
 import { log } from '../log.js';
-import { readEnvFile } from '../env.js';
-import type { ChannelDefaults } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import {
+  buildMatrixConfig,
+  claimMatrixAccount,
+  MATRIX_INSTANCE_NAME_RE,
+  readMatrixInstanceNames,
+} from './matrix-instances.js';
 
 /**
  * Assumes a dedicated bot account on a homeserver (the common install).
@@ -32,19 +40,6 @@ const MATRIX_DEFAULTS: ChannelDefaults = {
   group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'request_approval' },
   mentions: 'platform',
 };
-
-const ENV_KEYS = [
-  'MATRIX_BASE_URL',
-  'MATRIX_ACCESS_TOKEN',
-  'MATRIX_USERNAME',
-  'MATRIX_PASSWORD',
-  'MATRIX_USER_ID',
-  'MATRIX_BOT_USERNAME',
-  'MATRIX_DEVICE_ID',
-  'MATRIX_RECOVERY_KEY',
-  'MATRIX_INVITE_AUTOJOIN',
-  'MATRIX_INVITE_AUTOJOIN_ALLOWLIST',
-] as const;
 
 /**
  * Wrap the Matrix adapter so DM conversations are identified by user handle
@@ -157,69 +152,78 @@ function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): 
   return adapter;
 }
 
-registerChannelAdapter('matrix', {
-  factory: () => {
-    const env = readEnvFile([...ENV_KEYS]);
-    if (!env.MATRIX_BASE_URL) return null;
-    if (!env.MATRIX_ACCESS_TOKEN && !(env.MATRIX_USERNAME && env.MATRIX_PASSWORD)) return null;
+/** Build the bridge for one account: `name` undefined is the default account, else instance `matrix-<name>`. */
+function createMatrixBridge(name?: string): ChannelAdapter | null {
+  const config = buildMatrixConfig(name);
+  if (!config) return null;
 
-    for (const key of ENV_KEYS) {
-      if (env[key]) process.env[key] = env[key];
-    }
+  const instanceKey = name ? `matrix-${name}` : 'matrix';
+  const holder = claimMatrixAccount(config, instanceKey);
+  if (holder !== undefined) {
+    log.warn('Matrix account already in use by another instance, skipping', { instance: instanceKey, holder });
+    return null;
+  }
 
-    // Default: auto-join room invites so DMs work without manual acceptance
-    if (!process.env.MATRIX_INVITE_AUTOJOIN) {
-      process.env.MATRIX_INVITE_AUTOJOIN = 'true';
-    }
+  const matrixAdapter = wrapWithDmResolution(createMatrixAdapter(config));
+  const bridge = createChatSdkBridge({
+    adapter: matrixAdapter,
+    instance: name ? instanceKey : undefined,
+    concurrency: 'concurrent',
+    supportsThreads: false,
+    defaults: MATRIX_DEFAULTS,
+  });
 
-    const matrixAdapter = wrapWithDmResolution(createMatrixAdapter());
-    const bridge = createChatSdkBridge({
-      adapter: matrixAdapter,
-      concurrency: 'concurrent',
-      supportsThreads: false,
-      defaults: MATRIX_DEFAULTS,
+  // Matrix user IDs contain ":" (e.g. "@user:matrix.org") which the shared
+  // permissions module interprets as already-prefixed. Wrap onInbound to
+  // ensure senderId always carries the "matrix:" channel prefix so user
+  // records match between init-first-agent and inbound routing.
+  const origSetup = bridge.setup.bind(bridge);
+  bridge.setup = async (hostConfig) => {
+    const origOnInbound = hostConfig.onInbound.bind(hostConfig);
+    await origSetup({
+      ...hostConfig,
+      onInbound: (platformId, threadId, message) => {
+        if (message.content && typeof message.content === 'object') {
+          const content = message.content as Record<string, unknown>;
+          if (typeof content.senderId === 'string' && !content.senderId.startsWith('matrix:')) {
+            content.senderId = `matrix:${content.senderId}`;
+          }
+        }
+        return origOnInbound(platformId, threadId, message);
+      },
     });
 
-    // Matrix user IDs contain ":" (e.g. "@user:matrix.org") which the shared
-    // permissions module interprets as already-prefixed. Wrap onInbound to
-    // ensure senderId always carries the "matrix:" channel prefix so user
-    // records match between init-first-agent and inbound routing.
-    const origSetup = bridge.setup.bind(bridge);
-    bridge.setup = async (hostConfig) => {
-      const origOnInbound = hostConfig.onInbound.bind(hostConfig);
-      await origSetup({
-        ...hostConfig,
-        onInbound: (platformId, threadId, message) => {
-          if (message.content && typeof message.content === 'object') {
-            const content = message.content as Record<string, unknown>;
-            if (typeof content.senderId === 'string' && !content.senderId.startsWith('matrix:')) {
-              content.senderId = `matrix:${content.senderId}`;
-            }
-          }
-          return origOnInbound(platformId, threadId, message);
-        },
-      });
-
-      // Wait for Matrix sync to reach PREPARED state before returning from setup.
-      // Without this, the host's delivery poll and sweep timer start immediately
-      // and can starve the SDK's sync generator microtask queue, blocking
-      // incremental syncs so new inbound messages never get dispatched.
-      await new Promise<void>((resolve) => {
-        const check = setInterval(() => {
-          if ((matrixAdapter as unknown as { liveSyncReady?: boolean }).liveSyncReady) {
-            log.info('Matrix sync ready');
-            clearInterval(check);
-            resolve();
-          }
-        }, 500);
-        setTimeout(() => {
+    // Wait for Matrix sync to reach PREPARED state before returning from setup.
+    // Without this, the host's delivery poll and sweep timer start immediately
+    // and can starve the SDK's sync generator microtask queue, blocking
+    // incremental syncs so new inbound messages never get dispatched.
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if ((matrixAdapter as unknown as { liveSyncReady?: boolean }).liveSyncReady) {
+          log.info('Matrix sync ready');
           clearInterval(check);
           resolve();
-        }, 30_000);
-      });
-    };
+        }
+      }, 500);
+      setTimeout(() => {
+        clearInterval(check);
+        resolve();
+      }, 30_000);
+    });
+  };
 
-    return bridge;
-  },
-  defaults: MATRIX_DEFAULTS,
-});
+  return bridge;
+}
+
+registerChannelAdapter('matrix', { factory: () => createMatrixBridge(), defaults: MATRIX_DEFAULTS });
+
+// Named accounts: registered unconditionally for every listed name so a
+// missing credential is reported at boot instead of leaving an account
+// silently absent, and offline creation paths resolve the same defaults.
+for (const name of readMatrixInstanceNames()) {
+  if (!MATRIX_INSTANCE_NAME_RE.test(name)) {
+    log.warn('MATRIX_INSTANCES name must match ^[a-z0-9][a-z0-9-]*$, skipping', { name });
+    continue;
+  }
+  registerChannelAdapter(`matrix-${name}`, { factory: () => createMatrixBridge(name), defaults: MATRIX_DEFAULTS });
+}
