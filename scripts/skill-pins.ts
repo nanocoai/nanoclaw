@@ -31,7 +31,7 @@ export const NOT_COVERED = `${PINS_DIR}/not-covered.json`;
 const SKILLS_DIR = '.claude/skills';
 const CLI_TOOLS = 'container/cli-tools.json';
 
-const GENERATE = 'pnpm run skill-pins:generate';
+export const GENERATE = 'pnpm run skill-pins:generate';
 const SYNC = 'pnpm run skill-pins:sync';
 
 const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;

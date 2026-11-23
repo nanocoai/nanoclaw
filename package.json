@@ -25,6 +25,7 @@
     "skill-pins:generate": "tsx scripts/skill-pins.ts --generate",
     "skill-pins:check": "tsx scripts/skill-pins.ts --check",
     "skill-pins:sync": "tsx scripts/skill-pins.ts --sync",
+    "skill-pins:channels": "tsx scripts/channels-pins.ts",
     "prepare": "husky",
     "setup": "tsx setup/index.ts",
     "setup:auto": "tsx setup/auto.ts",

@@ -259,6 +259,27 @@ jobs:
           REGISTRY_PROVIDERS_SHA: ${{ inputs.providers_sha }}
         run: pnpm exec tsx scripts/test-registry-skills.ts --old-channel-refresh 7203e00dc271cc2ea9ea84bb130731b8ca00319e
 
+  # PRs into channels run no CI, so main checks that the channels tip installs
+  # the adapter versions the skills pin. Out of `registry gate` for the same
+  # reason as combined-channels: drift on channels must not block main PRs.
+  channels-pins:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.core_sha || github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: git fetch --no-tags --depth=1 origin +refs/heads/channels:refs/remotes/origin/channels
+      - name: The channels package.json installs the versions skills pin
+        run: pnpm run skill-pins:channels origin/channels
+
   provider-promotion:
     if: always()
     needs: [test, combined-providers, pre-contract-providers, old-provider-refresh, provider-payload-switch]
