@@ -527,19 +527,16 @@ jobs:
             BRANCH=${MOVE%%:*}
             # The plan came from a step that ran code from disk: take only what it may ask for.
             # A pre-release was approved for beta only, so it never moves stable.
-            case "$RELEASE_VERSION:$MOVE" in
-              *-*:stable:*) ALLOWED=false ;;
-              *:stable:update | *:stable:create | *:beta:update | *:beta:create) ALLOWED=true ;;
+            case "$MOVE" in
+              stable:update | stable:create | beta:update | beta:create) ALLOWED=true ;;
               *) ALLOWED=false ;;
             esac
-            case "$ALLOWED" in
-              true) ;;
-              *)
-                echo "::error::Unexpected planned move: $MOVE"
-                FAILED="$FAILED $MOVE"
-                continue
-                ;;
-            esac
+            case "$RELEASE_VERSION" in *-*) [ "$BRANCH" = beta ] || ALLOWED=false ;; esac
+            if [ "$ALLOWED" != true ]; then
+              echo "::error::Unexpected planned move: $MOVE"
+              FAILED="$FAILED $MOVE"
+              continue
+            fi
             # A failure, not a warning: a stale branch hands new installs old code, and only a red job gets seen.
             if [ -z "${GH_TOKEN:-}" ]; then
               echo "::error::Branch $BRANCH was not moved: CHANNEL_BRANCH_TOKEN is not set. An admin must push it."

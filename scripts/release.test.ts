@@ -1234,16 +1234,27 @@ describe('release workflow channel branch step', () => {
 
   it('never moves stable for a pre-release, whatever the plan says', { timeout: 30_000 }, () => {
     const f = fixture({ existing: ['stable', 'beta'] });
-    const result = run(f, { version: '2026.11.0-beta.1', moves: 'stable:update beta:update' });
+    const result = run(f, { version: '2026.11.0-beta.1', moves: 'stable:update unexpected:beta:create beta:update' });
     expect(result.status).toBe(1);
     expect(result.calls).toEqual([patch('beta', f.target)]);
     expect(result.stdout).toContain('::error::Unexpected planned move: stable:update');
+    expect(result.stdout).toContain('::error::Unexpected planned move: unexpected:beta:create');
   });
 
   it("hands the plan step's outputs to the move step", () => {
-    expect(releaseWorkflow).toContain('id: channel-plan');
-    expect(releaseWorkflow).toContain('MOVES: ${{ steps.channel-plan.outputs.moves }}');
-    expect(releaseWorkflow).toContain('PLAN_FAILED: ${{ steps.channel-plan.outputs.failed }}');
+    type Step = { id?: string; name?: string; env?: Record<string, string> };
+    const steps = (parseYaml(releaseWorkflow) as { jobs: { publish: { steps: Step[] } } }).jobs.publish.steps;
+    const planAt = steps.findIndex((step) => step.name === 'Plan the channel branch moves');
+    const moveAt = steps.findIndex((step) => step.name === 'Move the channel branches');
+    expect(steps[planAt]?.id).toBe('channel-plan');
+    expect(moveAt).toBe(planAt + 1);
+    expect(steps[moveAt]?.env).toEqual({
+      GH_TOKEN: '${{ secrets.CHANNEL_BRANCH_TOKEN }}',
+      MOVES: '${{ steps.channel-plan.outputs.moves }}',
+      PLAN_FAILED: '${{ steps.channel-plan.outputs.failed }}',
+      RELEASE_VERSION: '${{ inputs.version }}',
+      TARGET_SHA: '${{ inputs.target_sha }}',
+    });
     expect(planScript).toContain('echo "moves=${MOVES# }" >> "$GITHUB_OUTPUT"');
     expect(planScript).toContain('echo "failed=${FAILED# }" >> "$GITHUB_OUTPUT"');
   });
