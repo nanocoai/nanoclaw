@@ -76,6 +76,7 @@ payload/container/agent-runner/src/providers/pi.turns.test.ts -> container/agent
 payload/container/agent-runner/src/providers/pi.ts -> container/agent-runner/src/providers/pi.ts
 payload/src/provider-contracts/pi.ts -> src/provider-contracts/pi.ts
 payload/src/providers/pi.ts -> src/providers/pi.ts
+payload/setup/providers/pi.test.ts -> setup/providers/pi.test.ts
 payload/setup/providers/pi.ts -> setup/providers/pi.ts
 ```
 
@@ -151,10 +152,18 @@ Files there are operator-owned and survive container restarts.
 
 1. Store the ChatGPT login in the gateway once:
    `pnpm exec tsx setup/index.ts --step provider-auth codex`.
-2. `provider-auth pi` → **ChatGPT subscription (Codex)** verifies it and records
-   `openai-codex` in `PI_GATEWAY_PROVIDERS`. There is nothing else to do: the
-   container writes the `openai-codex` placeholder and the gateway injects the
-   real token and account header by host.
+2. `provider-auth pi` → **ChatGPT subscription (Codex)** verifies it, records
+   `openai-codex` in `PI_GATEWAY_PROVIDERS`, and grants the stored login to pi's
+   groups. There is nothing else to do: the container writes the `openai-codex`
+   placeholder and the gateway injects the real token and account header by host.
+
+The grant is a separate step because the login is recorded under `codex` and a
+spawn attaches only the credentials recorded for the group's own provider.
+Reconciling that entry and recording its id against `pi` is one seam call pair —
+`find()` then `keep()` — with no value read, rewritten, or copied. A gateway that
+cannot address the record leaves the grant undone: setup warns rather than
+failing a working login, and the first turn then reports `401 access restricted`.
+Re-run the step, or attach the secret in the gateway.
 
 ### API-key providers
 
@@ -185,8 +194,11 @@ hand, and no manual `grants` call is needed for the key this step saves.
 That relies on `provider: 'pi'` on the credential target in
 `setup/providers/pi.ts`. If a fork drops it, the key is stored but never
 granted, and every turn fails with `401 access restricted` while the gateway
-log shows `access restricted host=api.<provider>`. Non-model secrets are
-opt-in everywhere: grant those with the gateway's own skill (`/add-onecli`:
+log shows `access restricted host=api.<provider>`. The ChatGPT login is the one
+credential whose *record* belongs to another provider (`codex`, written by its
+own step), which is why `provider-auth pi` grants that one explicitly — `keep()`
+records the existing id under `pi` without touching the login. Non-model secrets
+are opt-in everywhere: grant those with the gateway's own skill (`/add-onecli`:
 `onecli agents grants attach-secret --id <agent-id> --secret-id <secret-id>`,
 verified with `onecli agents grants list --id <agent-id>`).
 
@@ -194,14 +206,26 @@ verified with `onecli agents grants list --id <agent-id>`).
 
 pi would otherwise start on its built-in default provider (Anthropic), which
 the gateway usually holds no key for, so the container writes `settings.json`
-with `defaultProvider` and `defaultModel` for the single provider recorded in
-`PI_GATEWAY_PROVIDERS`; the model is pi's own default for that provider.
+with `defaultProvider` for the single provider recorded in
+`PI_GATEWAY_PROVIDERS`.
 
-Override it without touching the container by editing
+The model comes from the first of: the group's `--model`, a `defaultModel` you
+authored in `settings.json`, `PI_DEFAULT_MODEL`, pi's own default for that
+provider. A subscription login stops at pi's default on purpose: pi's catalog
+lists every model of such a provider as available, including ids the account
+cannot call (Codex's order opens with `gpt-5.3-codex-spark`, which a ChatGPT
+account rejects), so a guess is worse than pi's own pick.
+
+Change it without touching the container by editing
 `data/v2-sessions/<group-id>/.pi-shared/settings.json` (`defaultProvider` /
-`defaultModel` / `models.json` custom providers), or set `PI_DEFAULT_PROVIDER`
-and optional `PI_DEFAULT_MODEL` in `.env`. Operator-authored settings are never
-overwritten. `ANTHROPIC_BASE_URL` and friends are not read by the pi provider.
+`defaultModel` / `models.json` custom providers), or by setting
+`PI_DEFAULT_PROVIDER` and optional `PI_DEFAULT_MODEL` in `.env`. Values this
+skill wrote are marked in `pi-gateway-defaults.json` beside the settings and are
+replaced when a later spawn resolves a different one, so `PI_DEFAULT_MODEL`
+reaches an install that has already run; values you authored are never
+overwritten and outrank the environment. A resumed session is moved to the
+resolved model, so a change does not wait for a new session.
+`ANTHROPIC_BASE_URL` and friends are not read by the pi provider.
 
 ## Select a group
 
@@ -294,6 +318,7 @@ pi: choosing a channel with no installer, such as `wechat`, leaves no group.
 | First reply is `"The agent run failed."`; `session_state` shows `continuation:claude` | Provider switch never reached `container_configs` — the runner defaulted to claude | `ncl groups config update --provider pi --id <group>` + `ncl groups restart --id <group>` |
 | Every turn fails with a model-auth error | No gateway credential for the selected provider | `pnpm exec tsx setup/index.ts --step provider-auth pi` (or `provider-auth codex` for ChatGPT) |
 | Model calls fail with `401 access restricted`; the gateway log shows `forward: access restricted host=api.<provider>` | The saved secret was never attached to this group's agent — typically a credential target missing `provider: 'pi'`, or a gateway older than 1.44 where per-agent grants do not exist | Check `data/onecli/provider-credentials.json` records `pi`, then grant by hand (`onecli agents grants attach-secret --id <agent-id> --secret-id <secret-id>`) and retry |
+| First turn fails with `The '<id>' model is not supported when using Codex with a ChatGPT account` | pi's catalog offers models a subscription account cannot call, and something pinned one | Set `PI_DEFAULT_MODEL` in `.env` to a model the account serves (for example `gpt-6.1-sol`) and restart the group; the next spawn rewrites the default and moves a resumed session to it |
 | pi logs "found no auth.json" | The group's `.pi-shared/` was removed or the group was created before this skill | Restart the group (re-prepares the file); the container rewrites placeholders on the next turn |
 | `Unknown provider: pi. Registered: claude` | Barrels not wired in the running build | Re-run the install, then `./container/build.sh build` |
 | Model requests blocked by the gateway | The model host is not declared | Use a supported provider, or add its host to the host contract's `modelDomains` and refresh |

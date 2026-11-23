@@ -19,7 +19,11 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { readEnvFile } from '../../src/env.js';
-import { getCredentialStore, type GatewayCredentialTarget } from '../gateways/credential-store.js';
+import {
+  getCredentialStore,
+  type GatewayCredentialTarget,
+  type ProviderCredentialStore,
+} from '../gateways/credential-store.js';
 import { brightSelect } from '../lib/bright-select.js';
 import { brandBody } from '../lib/theme.js';
 import { upsertEnvVar } from '../set-env.js';
@@ -29,6 +33,19 @@ const GATEWAY_PROVIDERS_KEY = 'PI_GATEWAY_PROVIDERS';
 /** Must equal PI_CREDENTIAL_PLACEHOLDER / PI_CHATGPT_PROVIDER_ID in the container payload. */
 const PLACEHOLDER = 'gateway-managed';
 const CHATGPT_PROVIDER_ID = 'openai-codex';
+
+/**
+ * The ChatGPT login pi reuses rather than owns, as the gateway stores it. Codex
+ * recorded it under this name and host, and `find()` addresses an entry by the
+ * name its own provider gave it — so a grant has to ask for `Codex`, not for pi.
+ * The client id and token endpoint are OpenAI's public Codex values: `keep()`
+ * reads an existing entry and never rewrites the token, so they only describe
+ * the profile the record already has.
+ */
+const CHATGPT_RECORD_NAME = 'Codex';
+const CHATGPT_RECORD_HOST = 'chatgpt.com';
+const CHATGPT_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+const CHATGPT_TOKEN_ENDPOINT = 'https://auth.openai.com/oauth/token';
 
 interface ApiKeyProvider {
   id: string;
@@ -111,6 +128,45 @@ function recordGatewayProvider(root: string, providerId: string): void {
   upsertEnvVar(GATEWAY_PROVIDERS_KEY, providers.join(','), root);
 }
 
+/**
+ * Attach the gateway's existing ChatGPT login to pi's groups.
+ *
+ * `provider-auth codex` records the login under `codex`, and a spawn grants a
+ * group only the credentials recorded for the group's own provider — so without
+ * this a pi group is handed nothing and its first turn dies with
+ * `401 access restricted`, with the vault holding a perfectly good login. The
+ * seam has no verb for "grant an existing entry to another provider"; `find()`
+ * followed by `keep()` is exactly that, since `keep()` reconciles the observed
+ * entry and records its id against `target.provider`.
+ *
+ * Returns false when the gateway cannot address the record — the caller warns
+ * rather than failing a working login over a grant it could not perform.
+ *
+ * Exported for the setup test: the seam is the only thing that can be faked here,
+ * and a real vault is not available in a unit test.
+ */
+export async function grantChatGptLogin(store: ProviderCredentialStore): Promise<boolean> {
+  if (!store.connection) return false;
+  try {
+    const connection = store.connection({
+      name: CHATGPT_RECORD_NAME,
+      host: CHATGPT_RECORD_HOST,
+      proxyValue: PLACEHOLDER,
+      provider: 'pi',
+      kind: 'oauth',
+      oauth: { profile: 'chatgpt', clientId: CHATGPT_CLIENT_ID, tokenEndpoint: CHATGPT_TOKEN_ENDPOINT },
+    });
+    if (!(await connection.find())) return false;
+    await connection.keep();
+    return true;
+  } catch {
+    // Recorded state lives with the gateway, so a lookup that throws (no
+    // management connection, an adapter that cannot address this record) is the
+    // same outcome as one that finds nothing: pi has no grant yet.
+    return false;
+  }
+}
+
 async function runPiAuthStep(): Promise<void> {
   const store = await getCredentialStore();
   if (!store.connection) {
@@ -155,7 +211,16 @@ async function runPiAuthStep(): Promise<void> {
     }
     if (connected) {
       recordGatewayProvider(process.cwd(), CHATGPT_PROVIDER_ID);
-      p.log.success(brandBody('The gateway already holds a ChatGPT login — pi will use it.'));
+      if (await grantChatGptLogin(store)) {
+        p.log.success(brandBody('The gateway already holds a ChatGPT login — pi will use it.'));
+      } else {
+        p.log.warn(
+          brandBody(
+            'The gateway holds a ChatGPT login but it could not be granted to pi groups; their turns will fail with 401 access restricted.',
+          ),
+        );
+        console.log(k.dim('   Re-run this step, or attach the existing secret to the pi provider in your gateway.'));
+      }
       return;
     }
     p.log.warn(
