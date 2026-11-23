@@ -67,9 +67,9 @@ update_channel_decide() {
   case "$channel" in stable|beta|edge) ;; *) channel= ;; esac
 
   # data/ holds the upgrade marker and the database: an existing install keeps
-  # the channel it has. The install id alone is only a trace of an earlier
-  # launch that stopped before setup began.
-  if [ -n "$(ls -A "$root/data" 2>/dev/null | grep -v '^install-id$')" ]; then echo none; return 0; fi
+  # the channel it has. The install id and setup's lock files are only traces
+  # of an earlier run that was stopped before it saved anything.
+  if [ -n "$(ls -A "$root/data" 2>/dev/null | grep -v -e '^install-id$' -e '^setup-mutation\.lock')" ]; then echo none; return 0; fi
 
   [ "$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$root" && pwd -P)" ] || { echo none; return 0; }
   branch=$(git -C "$root" symbolic-ref --quiet --short HEAD 2>/dev/null) || { echo none; return 0; }

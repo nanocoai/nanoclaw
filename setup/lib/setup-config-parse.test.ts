@@ -95,6 +95,11 @@ describe('update channel setting', () => {
     ]);
   });
 
+  it('treats a blank value as unset, as nanoclaw.sh does', () => {
+    expect(readFromEnv({ NANOCLAW_UPDATE_CHANNEL: '  ' })).toEqual({});
+    expect(envErrors({ NANOCLAW_UPDATE_CHANNEL: '  ' })).toEqual([]);
+  });
+
   it('still accepts any gateway kind, whose options are filled in at runtime', () => {
     expect(parseFlags(['--gateway-provider', 'anything']).errors).toEqual([]);
     expect(envErrors({ NANOCLAW_GATEWAY_PROVIDER: 'anything' })).toEqual([]);

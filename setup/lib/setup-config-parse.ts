@@ -56,7 +56,8 @@ export function envErrors(env: NodeJS.ProcessEnv = process.env): string[] {
   const errors: string[] = [];
   for (const e of CONFIG) {
     const raw = env[envVarFor(e)];
-    if (e.type !== 'enum' || raw === undefined || raw === '' || coerce(e, raw) !== undefined) continue;
+    // A blank value counts as unset, as it does in nanoclaw.sh and readFromEnv.
+    if (e.type !== 'enum' || raw === undefined || raw.trim() === '' || coerce(e, raw) !== undefined) continue;
     errors.push(`Invalid value for ${envVarFor(e)}: ${raw} (use one of: ${e.options.map((o) => o.value).join(', ')})`);
   }
   return errors;
