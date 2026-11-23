@@ -666,13 +666,10 @@ registerResource({
           throw new Error(`${hostPath} holds NanoClaw's ${reserved} keys or certificates; only NanoClaw mounts it.`);
         }
 
-        // Read-only remains the default: with neither flag, no `readonly` key is
-        // stored, and `validateMount` treats an absent key as a read-only request.
-        // `--rw` is the explicit opt-in that stores `readonly: false` — the only
-        // value the mount-security gate accepts as a read-write *request*, and
-        // still granted only if the matched allowlist root allows read-write.
-        // Only `--rw` requests write. `--readonly false` used to store read-only (the
-        // string "false" was truthy), so it must not quietly start granting write.
+        // Read-only stays the default: no flag stores no `readonly` key, which
+        // `validateMount` reads as read-only. Only `--rw` stores `readonly: false`.
+        // `--readonly false` used to store read-only (the string "false" was truthy),
+        // so it must not start granting write now.
         const [ro, rw, readonlyArg] = (['ro', 'rw', 'readonly'] as const).map((f) => parseMountFlag(args, f));
         const readWrite = rw === true;
         const readOnly = ro === true || readonlyArg === true;
