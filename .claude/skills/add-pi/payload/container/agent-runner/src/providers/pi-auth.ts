@@ -18,7 +18,8 @@
  * The provider therefore also fills `settings.json` with a `defaultProvider`
  * and `defaultModel` — the model id is looked up from pi's own runtime catalog
  * (`selectGatewayModel`), never hardcoded, so it follows whatever pi version is
- * installed. Operator-authored values are never overwritten.
+ * installed. Operator-authored values are never overwritten; values this module
+ * wrote itself are, so an environment change still lands on a live install.
  */
 import { randomUUID } from 'crypto';
 import fs from 'fs';
@@ -35,6 +36,9 @@ const JWT_CLAIM_PATH = 'https://api.openai.com/auth';
 
 /** Far-future expiry: the placeholder is never refreshed, and pi must not try. */
 const PLACEHOLDER_EXPIRES = Date.UTC(2100, 0, 1);
+
+/** Records the `settings.json` defaults this module wrote, so it recognises its own work later. */
+const MANAGED_DEFAULTS_FILE = 'pi-gateway-defaults.json';
 
 export interface PiGatewayAuthOptions {
   /**
@@ -54,6 +58,8 @@ export interface GatewayModelCatalog {
   getModel(providerId: string, modelId: string): ModelCatalogEntry | undefined;
   getModels(providerId?: string): readonly ModelCatalogEntry[];
   getAvailableSnapshot(): readonly ModelCatalogEntry[];
+  /** pi's `ModelRuntime` answers whether the provider's live auth is a subscription. Absent in test stubs. */
+  isUsingSubscription?(providerId: string): boolean;
 }
 
 export interface PiSettingsInput {
@@ -137,11 +143,39 @@ function readObject(file: string): Record<string, unknown> {
   return {};
 }
 
-/** Read pi's operator-facing settings, if any. */
-export function readPiSettings(agentDir: string): PiSettingsInput {
-  const settings = readObject(path.join(agentDir, 'settings.json'));
+function readDefaultsFile(file: string): PiSettingsInput {
+  const settings = readObject(file);
   const provider = typeof settings.defaultProvider === 'string' ? settings.defaultProvider : undefined;
   const model = typeof settings.defaultModel === 'string' ? settings.defaultModel : undefined;
+  return { ...(provider ? { defaultProvider: provider } : {}), ...(model ? { defaultModel: model } : {}) };
+}
+
+/** Read pi's operator-facing settings, if any. */
+export function readPiSettings(agentDir: string): PiSettingsInput {
+  return readDefaultsFile(path.join(agentDir, 'settings.json'));
+}
+
+/**
+ * The defaults this module wrote on an earlier spawn, if any. Kept beside
+ * `settings.json` rather than inside it: pi owns that file's schema, so a
+ * marker key there would be pi's to reject.
+ */
+export function readManagedDefaults(agentDir: string): PiSettingsInput {
+  return readDefaultsFile(path.join(agentDir, MANAGED_DEFAULTS_FILE));
+}
+
+/**
+ * The settings values an operator authored, with the ones this module wrote
+ * filtered out. A value still equal to what we last wrote is ours, not theirs —
+ * that distinction is what lets a changed `PI_DEFAULT_MODEL` reach an install
+ * that has already booted once. Anything else was edited by hand and outranks
+ * the environment, as it did before this file existed.
+ */
+export function operatorAuthoredSettings(agentDir: string): PiSettingsInput {
+  const settings = readPiSettings(agentDir);
+  const managed = readManagedDefaults(agentDir);
+  const provider = settings.defaultProvider === managed.defaultProvider ? undefined : settings.defaultProvider;
+  const model = settings.defaultModel === managed.defaultModel ? undefined : settings.defaultModel;
   return { ...(provider ? { defaultProvider: provider } : {}), ...(model ? { defaultModel: model } : {}) };
 }
 
@@ -176,20 +210,52 @@ export function initializePiGatewayAuth(agentDir: string, options: PiGatewayAuth
   if (changed) writeJsonAtomic(agentDir, 'auth.json', auth);
 }
 
-/** Fill pi's `settings.json` default provider/model, leaving operator values alone. */
+/**
+ * Fill pi's `settings.json` default provider/model, leaving operator values
+ * alone. A value this module wrote on an earlier spawn is still ours to
+ * replace: without that, the first spawn's guess would shadow `PI_DEFAULT_MODEL`
+ * forever. The write is recorded so the next spawn can tell the two apart.
+ */
 export function ensurePiSettings(agentDir: string, input: PiSettingsInput): void {
-  const defaultProvider = input.defaultProvider?.trim();
-  const defaultModel = input.defaultModel?.trim();
-  if (!defaultProvider && !defaultModel) return;
+  const next = { defaultProvider: input.defaultProvider?.trim(), defaultModel: input.defaultModel?.trim() };
+  if (!next.defaultProvider && !next.defaultModel) return;
   const settings = readObject(path.join(agentDir, 'settings.json'));
+  const managed = readManagedDefaults(agentDir);
+  const recorded: PiSettingsInput = { ...managed };
   let changed = false;
-  if (defaultProvider && settings.defaultProvider === undefined) {
-    settings.defaultProvider = defaultProvider;
-    changed = true;
-  }
-  if (defaultModel && settings.defaultModel === undefined) {
-    settings.defaultModel = defaultModel;
-    changed = true;
+  for (const key of ['defaultProvider', 'defaultModel'] as const) {
+    const value = next[key];
+    // Silent on a key this call has no opinion about: a subscription spawn
+    // pins the provider and leaves the model to pi.
+    if (!value) continue;
+    const current = settings[key];
+    const ours = current === undefined || (typeof current === 'string' && current === managed[key]);
+    if (!ours) {
+      delete recorded[key];
+      continue;
+    }
+    if (current !== value) {
+      settings[key] = value;
+      changed = true;
+    }
+    recorded[key] = value;
   }
   if (changed) writeJsonAtomic(agentDir, 'settings.json', settings);
+  const sameAsBefore = recorded.defaultProvider === managed.defaultProvider && recorded.defaultModel === managed.defaultModel;
+  if (!sameAsBefore) writeJsonAtomic(agentDir, MANAGED_DEFAULTS_FILE, { ...recorded });
+}
+
+/**
+ * Whether the live credential for `providerId` is a subscription login. pi's
+ * catalog lists every model of a subscription provider as available, including
+ * ids the account cannot call (Codex's catalog opens with `gpt-5.3-codex-spark`,
+ * which a ChatGPT account rejects outright), so a caller that wants a default
+ * model has to ask the runtime rather than trust catalog order.
+ */
+export function usesSubscription(catalog: GatewayModelCatalog, providerId: string): boolean {
+  try {
+    return catalog.isUsingSubscription?.(providerId) === true;
+  } catch {
+    return false;
+  }
 }

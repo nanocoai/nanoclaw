@@ -10,10 +10,13 @@ import {
   buildPlaceholderAccessToken,
   ensurePiSettings,
   initializePiGatewayAuth,
+  operatorAuthoredSettings,
   parseGatewayProviders,
+  readManagedDefaults,
   readPiSettings,
   resolveDefaultProvider,
   selectGatewayModel,
+  usesSubscription,
 } from './pi-auth.js';
 
 const roots: string[] = [];
@@ -161,6 +164,89 @@ describe('ensurePiSettings / readPiSettings', () => {
       defaultModel: 'x',
       theme: 'dark',
     });
+  });
+
+  // Without this, the first spawn's guess shadows PI_DEFAULT_MODEL forever:
+  // the value it wrote looks exactly like one the operator chose.
+  it('replaces the default it wrote itself when a later spawn resolves a different one', () => {
+    const agentDir = path.join(root(), 'agent');
+    ensurePiSettings(agentDir, { defaultProvider: 'openai-codex', defaultModel: 'gpt-5.3-codex-spark' });
+    ensurePiSettings(agentDir, { defaultProvider: 'openai-codex', defaultModel: 'gpt-6.1-sol' });
+    expect(readPiSettings(agentDir)).toEqual({ defaultProvider: 'openai-codex', defaultModel: 'gpt-6.1-sol' });
+    expect(readManagedDefaults(agentDir)).toEqual({ defaultProvider: 'openai-codex', defaultModel: 'gpt-6.1-sol' });
+  });
+
+  it('stops claiming a key once an operator edits it', () => {
+    const agentDir = path.join(root(), 'agent');
+    ensurePiSettings(agentDir, { defaultProvider: 'openai-codex', defaultModel: 'gpt-5.3-codex-spark' });
+    fs.writeFileSync(
+      path.join(agentDir, 'settings.json'),
+      JSON.stringify({ defaultProvider: 'openai-codex', defaultModel: 'operator-choice' }),
+    );
+    ensurePiSettings(agentDir, { defaultProvider: 'openai-codex', defaultModel: 'gpt-6.1-sol' });
+    expect(readPiSettings(agentDir)).toEqual({ defaultProvider: 'openai-codex', defaultModel: 'operator-choice' });
+    // The model is theirs now; the provider it agrees with is still ours.
+    expect(readManagedDefaults(agentDir)).toEqual({ defaultProvider: 'openai-codex' });
+  });
+
+  it('pins only the provider when a spawn has no model to assert', () => {
+    const agentDir = path.join(root(), 'agent');
+    ensurePiSettings(agentDir, { defaultProvider: 'openai-codex' });
+    expect(readPiSettings(agentDir)).toEqual({ defaultProvider: 'openai-codex' });
+    expect(readManagedDefaults(agentDir)).toEqual({ defaultProvider: 'openai-codex' });
+  });
+});
+
+describe('operatorAuthoredSettings', () => {
+  it('hides what this module wrote and surfaces what it did not', () => {
+    const agentDir = path.join(root(), 'agent');
+    ensurePiSettings(agentDir, { defaultProvider: 'openai-codex', defaultModel: 'gpt-5.3-codex-spark' });
+    expect(operatorAuthoredSettings(agentDir)).toEqual({});
+
+    fs.writeFileSync(
+      path.join(agentDir, 'settings.json'),
+      JSON.stringify({ defaultProvider: 'openai-codex', defaultModel: 'operator-choice' }),
+    );
+    expect(operatorAuthoredSettings(agentDir)).toEqual({ defaultModel: 'operator-choice' });
+  });
+
+  it('treats a settings file with no record of its own as entirely operator-authored', () => {
+    const agentDir = path.join(root(), 'agent');
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(agentDir, 'settings.json'),
+      JSON.stringify({ defaultProvider: 'deepseek', defaultModel: 'deepseek-v4-pro' }),
+    );
+    expect(operatorAuthoredSettings(agentDir)).toEqual({
+      defaultProvider: 'deepseek',
+      defaultModel: 'deepseek-v4-pro',
+    });
+  });
+});
+
+describe('usesSubscription', () => {
+  const catalog = (isUsingSubscription?: (provider: string) => boolean): GatewayModelCatalog => ({
+    getModel: () => undefined,
+    getModels: () => [],
+    getAvailableSnapshot: () => [],
+    ...(isUsingSubscription ? { isUsingSubscription } : {}),
+  });
+
+  it('reports what the runtime says about the provider', () => {
+    expect(usesSubscription(catalog((provider) => provider === 'openai-codex'), 'openai-codex')).toBe(true);
+    expect(usesSubscription(catalog(() => false), 'openai-codex')).toBe(false);
+  });
+
+  it('treats a runtime that cannot answer as an ordinary key', () => {
+    expect(usesSubscription(catalog(), 'openai-codex')).toBe(false);
+    expect(
+      usesSubscription(
+        catalog(() => {
+          throw new Error('auth unreadable');
+        }),
+        'openai-codex',
+      ),
+    ).toBe(false);
   });
 });
 

@@ -23,6 +23,7 @@ import { SessionManager, type ModelRuntime } from '@earendil-works/pi-coding-age
 import { AssistantMessageEventStream } from '@earendil-works/pi-ai';
 
 import { PiProvider, type PiMemorySessionHook } from './pi.js';
+import { readPiSettings } from './pi-auth.js';
 import type { ProviderEvent } from './types.js';
 
 const MEMORY_HOOK: PiMemorySessionHook = {
@@ -85,20 +86,33 @@ function holdOpen(): (stream: AssistantMessageEventStream) => void {
 interface ScriptedCall {
   context: { systemPrompt?: unknown; messages: Array<{ role: string; content: Array<{ type: string; text?: string }> }> };
   options: { signal?: AbortSignal };
+  model: { provider: string; id: string };
 }
 
-function createFakeModelRuntime(script: Array<(stream: AssistantMessageEventStream) => void>): {
+interface FakeRuntimeOptions {
+  /** Models the runtime reports; defaults to the single FAKE_MODEL. */
+  models?: Array<typeof FAKE_MODEL>;
+  /** Providers whose live credential is a subscription login rather than a key. */
+  subscriptions?: string[];
+}
+
+function createFakeModelRuntime(
+  script: Array<(stream: AssistantMessageEventStream) => void>,
+  options: FakeRuntimeOptions = {},
+): {
   runtime: ModelRuntime;
   calls: ScriptedCall[];
   complete(index: number, text: string): void;
 } {
   const calls: ScriptedCall[] = [];
   const streams: AssistantMessageEventStream[] = [];
+  const models = options.models ?? [FAKE_MODEL];
+  const subscriptions = new Set(options.subscriptions ?? []);
   const runtime = {
-    getModel: () => FAKE_MODEL,
-    getModels: () => [FAKE_MODEL],
-    getAvailable: async () => [FAKE_MODEL],
-    getAvailableSnapshot: () => [FAKE_MODEL],
+    getModel: (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id),
+    getModels: (provider?: string) => (provider ? models.filter((model) => model.provider === provider) : models),
+    getAvailable: async () => models,
+    getAvailableSnapshot: () => models,
     getProviders: () => [],
     getProvider: () => undefined,
     getRegisteredProviderIds: () => [],
@@ -106,7 +120,7 @@ function createFakeModelRuntime(script: Array<(stream: AssistantMessageEventStre
     hasConfiguredAuth: () => true,
     checkAuth: async () => ({ ok: true }),
     isUsingOAuth: () => false,
-    isUsingSubscription: () => false,
+    isUsingSubscription: (provider: string) => subscriptions.has(provider),
     getAuth: async () => ({ auth: { apiKey: 'test-key' } }),
     getProviderAuthStatus: () => ({ configured: true }),
     getError: () => undefined,
@@ -118,10 +132,10 @@ function createFakeModelRuntime(script: Array<(stream: AssistantMessageEventStre
     unregisterProvider: () => {},
     registerNativeProvider: () => {},
     refresh: async () => ({ providers: [], errors: [] }),
-    streamSimple: (_model: unknown, context: ScriptedCall['context'], options: ScriptedCall['options']) => {
+    streamSimple: (model: ScriptedCall['model'], context: ScriptedCall['context'], options: ScriptedCall['options']) => {
       const stream = new AssistantMessageEventStream();
       const index = calls.length;
-      calls.push({ context, options });
+      calls.push({ context, options, model });
       streams.push(stream);
       // Real model streams honor the abort signal. Without this an aborted
       // turn would hang the prompt promise and leak the session.
@@ -340,5 +354,111 @@ describe('PiProvider instructions injection', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/** Run one turn against a fresh provider and drain its events. */
+async function runTurn(
+  fake: ReturnType<typeof createFakeModelRuntime>,
+  dir: string,
+  continuation?: string,
+): Promise<void> {
+  const provider = new PiProvider({}, fake.runtime);
+  provider.registerMemorySessionHook(MEMORY_HOOK);
+  const query = provider.query({ prompt: 'hey', cwd: dir, ...(continuation ? { continuation } : {}) });
+  const done = collectEvents(query.events, []);
+  query.end();
+  await done;
+}
+
+/** Apply env for the duration of `body`, restoring what was there afterwards. */
+async function withEnv(vars: Record<string, string>, body: () => Promise<void>): Promise<void> {
+  const previous = new Map(Object.keys(vars).map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(vars)) process.env[key] = value;
+  try {
+    await body();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+const CODEX_SPARK = { ...FAKE_MODEL, id: 'gpt-5.3-codex-spark', name: 'Codex Spark', provider: 'openai-codex' };
+const DEEPSEEK_FLASH = { ...FAKE_MODEL, id: 'deepseek-v4-flash', name: 'DeepSeek Flash', provider: 'deepseek' };
+const DEEPSEEK_PRO = { ...FAKE_MODEL, id: 'deepseek-v4-pro', name: 'DeepSeek Pro', provider: 'deepseek' };
+
+describe('PiProvider gateway model defaults', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-defaults-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const agentDir = (): string => path.join(dir, '.pi', 'agent');
+
+  // pi's catalog lists every model of a subscription provider as available, and
+  // Codex's order opens with a model a ChatGPT account rejects outright. pi also
+  // keeps its own curated default per provider, so guessing is strictly worse.
+  it('pins only the provider when the login is a subscription', async () => {
+    await withEnv({ PI_GATEWAY_PROVIDERS: 'openai-codex' }, async () => {
+      const fake = createFakeModelRuntime([say('ok')], {
+        models: [CODEX_SPARK],
+        subscriptions: ['openai-codex'],
+      });
+      await runTurn(fake, dir);
+      expect(readPiSettings(agentDir())).toEqual({ defaultProvider: 'openai-codex' });
+    });
+  });
+
+  it('still writes a catalog model for a key-backed provider', async () => {
+    await withEnv({ PI_GATEWAY_PROVIDERS: 'deepseek' }, async () => {
+      const fake = createFakeModelRuntime([say('ok')], { models: [DEEPSEEK_FLASH] });
+      await runTurn(fake, dir);
+      expect(readPiSettings(agentDir())).toEqual({ defaultProvider: 'deepseek', defaultModel: 'deepseek-v4-flash' });
+    });
+  });
+
+  // The first spawn writes a default of its own; without the managed-defaults
+  // record it would look operator-authored forever and PI_DEFAULT_MODEL would be
+  // ignored on every later spawn.
+  it('lets PI_DEFAULT_MODEL replace the default an earlier spawn wrote', async () => {
+    const models = [DEEPSEEK_FLASH, DEEPSEEK_PRO];
+    await withEnv({ PI_GATEWAY_PROVIDERS: 'deepseek' }, async () => {
+      await runTurn(createFakeModelRuntime([say('first')], { models }), dir);
+      expect(readPiSettings(agentDir()).defaultModel).toBe('deepseek-v4-flash');
+
+      const second = createFakeModelRuntime([say('second')], { models });
+      await withEnv({ PI_DEFAULT_MODEL: 'deepseek-v4-pro' }, () => runTurn(second, dir));
+      expect(readPiSettings(agentDir()).defaultModel).toBe('deepseek-v4-pro');
+      expect(second.calls[0]!.model.id).toBe('deepseek-v4-pro');
+    });
+  });
+
+  it('switches a resumed session to the configured default instead of its recorded model', async () => {
+    const sessionsDir = path.join(dir, '.pi', 'sessions');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    const manager = SessionManager.create(dir, sessionsDir);
+    manager.appendMessage({
+      role: 'user',
+      content: [{ type: 'text', text: 'old question' }],
+      timestamp: Date.now(),
+    } as never);
+    manager.appendMessage(assistantMessage('old answer') as never);
+    const resumable = manager.getSessionFile()!;
+    expect(fs.existsSync(resumable)).toBe(true);
+
+    const switched = { ...FAKE_MODEL, id: 'fake-model-2', name: 'Fake Model 2' };
+    await withEnv({ PI_GATEWAY_PROVIDERS: 'fake', PI_DEFAULT_MODEL: 'fake-model-2' }, async () => {
+      const fake = createFakeModelRuntime([say('ok')], { models: [FAKE_MODEL, switched] });
+      await runTurn(fake, dir, resumable);
+      // The transcript recorded `fake-model`; a resumed session keeps it unless
+      // the provider moves the session, which is what a changed default needs.
+      expect(fake.calls[0]!.model.id).toBe('fake-model-2');
+    });
   });
 });

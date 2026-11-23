@@ -12,7 +12,14 @@ import {
 } from '@earendil-works/pi-coding-agent';
 
 import { getPiMcpTools } from './mcp-to-pi.js';
-import { ensurePiSettings, initializePiGatewayAuth, parseGatewayProviders, readPiSettings, selectGatewayModel } from './pi-auth.js';
+import {
+  ensurePiSettings,
+  initializePiGatewayAuth,
+  operatorAuthoredSettings,
+  parseGatewayProviders,
+  selectGatewayModel,
+  usesSubscription,
+} from './pi-auth.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -378,17 +385,36 @@ export class PiProvider implements AgentProvider {
       // Resolve the start provider/model from pi's own catalog — no model id is
       // hardcoded here, so a pi upgrade changes the answer with no code change.
       // Without it pi falls back to the first provider the gateway's injected
-      // ANTHROPIC_* env makes look available. Operator settings win.
-      const current = readPiSettings(agentDir);
+      // ANTHROPIC_* env makes look available. Only an operator's own settings
+      // count as an explicit default: a value this module wrote on an earlier
+      // spawn has to stay replaceable, or `PI_DEFAULT_MODEL` would never reach
+      // an install that has already booted once.
+      const current = operatorAuthoredSettings(agentDir);
+      // A group-level --model wins over the group's settings default, and it
+      // may name either `provider/model` or a bare model id.
+      const requestedModel = this.modelName ?? current.defaultModel ?? process.env.PI_DEFAULT_MODEL;
       const model = selectGatewayModel(
         modelRuntime,
         providers,
         current.defaultProvider ?? process.env.PI_DEFAULT_PROVIDER,
-        // A group-level --model wins over the group's settings default, and it
-        // may name either `provider/model` or a bare model id.
-        this.modelName ?? current.defaultModel ?? process.env.PI_DEFAULT_MODEL,
+        requestedModel,
       );
-      if (model) ensurePiSettings(agentDir, { defaultProvider: model.provider, defaultModel: model.id });
+      // pi's catalog lists every model of a subscription provider as available,
+      // including ids the account cannot call (Codex's order opens with
+      // `gpt-5.3-codex-spark`, which a ChatGPT account rejects), so our guess is
+      // worse than pi's own curated per-provider default. Unless the operator
+      // named a model, pin only the provider and let pi pick.
+      const leaveModelToPi = Boolean(model && !requestedModel?.trim() && usesSubscription(modelRuntime, model.provider));
+      if (model) {
+        if (leaveModelToPi) {
+          ensurePiSettings(agentDir, { defaultProvider: model.provider });
+          log(`${model.provider} is a subscription login; leaving the model to pi (set PI_DEFAULT_MODEL to override)`);
+        } else {
+          ensurePiSettings(agentDir, { defaultProvider: model.provider, defaultModel: model.id });
+        }
+      }
+      // The model this spawn is pinned to; none means pi's own default applies.
+      const pinnedModel = leaveModelToPi ? undefined : model;
       if (this.modelName && model && this.modelName !== model.id) {
         // A group model the installed pi does not know (renamed between
         // versions, or a typo) must not be swallowed silently.
@@ -422,6 +448,25 @@ export class PiProvider implements AgentProvider {
         created = (
           await createAgentSession({ ...sessionOptions, sessionManager: SessionManager.create(cwd, sessionsDir) })
         ).session;
+      }
+      if (resumePath && pinnedModel) {
+        // A resumed session restores the model it was created with, so a changed
+        // default would otherwise sit in `settings.json` unused until someone
+        // started a fresh session. pi can switch a live session, and the switch
+        // is recorded in the transcript rather than only in memory.
+        const active = created.model;
+        if (active?.provider !== pinnedModel.provider || active?.id !== pinnedModel.id) {
+          const target = modelRuntime.getModel(pinnedModel.provider, pinnedModel.id);
+          if (target && typeof created.setModel === 'function') {
+            try {
+              await created.setModel(target);
+            } catch (err) {
+              log(
+                `Could not switch the resumed session to ${pinnedModel.provider}/${pinnedModel.id}: ${errorMessage(err)}`,
+              );
+            }
+          }
+        }
       }
       const file = created.sessionFile;
       if (!file) throw new Error('pi sessions are disabled (no session file path)');
