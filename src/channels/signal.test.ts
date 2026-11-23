@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // --- Mocks ---
 
@@ -74,6 +77,8 @@ function createMockSetup() {
   };
 }
 
+const SIGNAL_TEST_DATA_DIR = mkdtempSync(join(tmpdir(), 'signal-cli-test-data-'));
+
 function createAdapter() {
   return createSignalAdapter({
     cliPath: 'signal-cli',
@@ -81,7 +86,7 @@ function createAdapter() {
     tcpHost: '127.0.0.1',
     tcpPort: 7583,
     manageDaemon: false,
-    signalDataDir: '/tmp/signal-cli-test-data',
+    signalDataDir: SIGNAL_TEST_DATA_DIR,
   });
 }
 
@@ -368,7 +373,12 @@ describe('SignalAdapter', () => {
       await adapter.teardown();
     });
 
-    it('forwards image attachments as [Image: <path>] plus structured attachments array', async () => {
+    it('inlines attachment bytes so the host can stage them into the container inbox', async () => {
+      const dir = join(SIGNAL_TEST_DATA_DIR, 'attachments');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'att123abc.jpg'), Buffer.from('jpeg-bytes'));
+      writeFileSync(join(dir, 'doc456'), Buffer.from('%PDF-1.7'));
+
       const adapter = createAdapter();
       const cfg = createMockSetup();
       await adapter.setup(cfg);
@@ -378,21 +388,56 @@ describe('SignalAdapter', () => {
         sourceName: 'Alice',
         dataMessage: {
           timestamp: 1700000000000,
-          attachments: [{ id: 'att123abc', contentType: 'image/jpeg', size: 50000 }],
+          message: 'add this recipe',
+          attachments: [
+            { id: 'att123abc.jpg', contentType: 'image/jpeg', size: 10 },
+            { id: 'doc456', contentType: 'application/pdf', size: 8 },
+          ],
         },
       });
 
       await new Promise((r) => setTimeout(r, 50));
-      expect(cfg.onInbound).toHaveBeenCalledWith(
-        '+15555550123',
-        null,
-        expect.objectContaining({
-          content: expect.objectContaining({
-            text: expect.stringMatching(/^\[Image: .+att123abc\]$/),
-            attachments: [expect.objectContaining({ contentType: 'image/jpeg' })],
-          }),
-        }),
-      );
+      const msg = cfg.onInbound.mock.calls[0][2];
+      // No host path leaks into the text the agent sees.
+      expect(msg.content.text).toBe('add this recipe');
+      expect(msg.content.attachments).toEqual([
+        {
+          type: 'image',
+          name: 'att123abc.jpg',
+          mimeType: 'image/jpeg',
+          size: 10,
+          data: Buffer.from('jpeg-bytes').toString('base64'),
+        },
+        {
+          type: 'application',
+          name: 'doc456.pdf',
+          mimeType: 'application/pdf',
+          size: 8,
+          data: Buffer.from('%PDF-1.7').toString('base64'),
+        },
+      ]);
+
+      await adapter.teardown();
+    });
+
+    it('notes attachments signal-cli did not save instead of passing a dead path', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000000,
+          attachments: [{ id: 'missing.jpg', contentType: 'image/jpeg', size: 50000 }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      const msg = cfg.onInbound.mock.calls[0][2];
+      expect(msg.content.text).toBe('[image: missing.jpg - file not available]');
+      expect(msg.content.attachments).toBeUndefined();
 
       await adapter.teardown();
     });
