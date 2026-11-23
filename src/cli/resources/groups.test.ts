@@ -597,9 +597,22 @@ describe('groups config (host-only)', () => {
         GID,
       );
       const res = await addMount('same-2', { rw: true });
-      expect(res.ok && res.data).toEqual({
+      expect(res.ok && res.data).toMatchObject({
         unchanged: { hostPath: '/data/shared', containerPath: 'shared', readonly: false },
+        note: expect.stringContaining('allowReadWrite'),
       });
+      expect(JSON.stringify(res)).not.toContain('restart');
+      expect((await getContainerConfig(GID))!.updated_at).toBe('2000-01-01T00:00:00.000Z');
+    });
+
+    it('treats an absent readonly key and --ro as the same mode on re-add', async () => {
+      expect((await addMount('implicit-1', {})).ok).toBe(true);
+      await getDb().run(
+        `UPDATE container_configs SET updated_at = '2000-01-01T00:00:00.000Z' WHERE agent_group_id = ?`,
+        GID,
+      );
+      const res = await addMount('implicit-2', { ro: true });
+      expect(res.ok && res.data).toEqual({ unchanged: { hostPath: '/data/shared', containerPath: 'shared' } });
       expect((await getContainerConfig(GID))!.updated_at).toBe('2000-01-01T00:00:00.000Z');
     });
 

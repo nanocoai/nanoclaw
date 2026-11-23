@@ -688,15 +688,19 @@ registerResource({
         // still-read-only mount with nothing to explain why. Update the access mode
         // in place instead, and say which of the two happened.
         const updated = at !== -1;
-        // An unchanged re-add writes nothing, so it cannot overwrite a concurrent
-        // remove-mount with the list it read earlier, and asks for no restart.
-        if (updated && existing[at].readonly === mount.readonly) return { unchanged: mount };
+        const rwGate =
+          'Read-write requested. It is granted only if the matched mount-allowlist root has `allowReadWrite: true`; ' +
+          'otherwise the mount is forced read-only.';
+        // A re-add with the same effective mode (an absent key and `true` are both read-only)
+        // writes nothing, so it cannot overwrite a concurrent remove-mount, and needs no restart.
+        if (updated && (existing[at].readonly === false) === readWrite) {
+          return readWrite ? { unchanged: existing[at], note: rwGate } : { unchanged: existing[at] };
+        }
         if (updated) existing[at] = mount;
         else existing.push(mount);
         await updateContainerConfigJson(id, 'additional_mounts', existing);
         const note = readWrite
-          ? `Read-write requested. It is granted only if the matched mount-allowlist root has \`allowReadWrite: true\`; ` +
-            `otherwise the mount is forced read-only. Run \`ncl groups restart --id ${id}\` to apply.`
+          ? `${rwGate} Run \`ncl groups restart --id ${id}\` to apply.`
           : `Run \`ncl groups restart --id ${id}\` for the mount to take effect.`;
         return updated ? { updated: mount, note } : { added: mount, note };
       },
