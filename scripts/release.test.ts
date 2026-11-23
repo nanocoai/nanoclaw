@@ -1065,8 +1065,14 @@ describe('release workflow channel branch step', () => {
       path.join(bin, 'gh'),
       '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_LOG"\n' +
         'if [ -n "${GH_FAIL:-}" ]; then case "$*" in *"$GH_FAIL"*) echo "gh: refused (HTTP 422)" >&2; exit 1 ;; esac; fi\n' +
-        // The tag read-back: an annotated tag object, then the commit it names.
-        'case "$*" in *git/ref/tags/*) echo "tag tagobject" ;; *git/tags/tagobject*) echo "$TAG_COMMIT" ;; esac\n',
+        // The read-backs: the tag (annotated unless TAG_TYPE says not), the release, each branch tip.
+        'case "$*" in\n' +
+        '  *git/ref/tags/*) if [ "$TAG_TYPE" = commit ]; then echo "commit $TAG_COMMIT"; else echo "tag tagobject"; fi ;;\n' +
+        '  *git/tags/tagobject*) echo "commit $TAG_COMMIT" ;;\n' +
+        '  *releases/tags/*) echo "$RELEASED" ;;\n' +
+        '  *git/ref/heads/stable*) [ -n "$TIP_STABLE" ] || exit 1; echo "$TIP_STABLE" ;;\n' +
+        '  *git/ref/heads/beta*) [ -n "$TIP_BETA" ] || exit 1; echo "$TIP_BETA" ;;\n' +
+        'esac\n',
       { mode: 0o755 },
     );
     // Real git, except that looking up LOOKUP_FAIL's branch fails like a network error.
@@ -1090,6 +1096,9 @@ describe('release workflow channel branch step', () => {
       moves?: string;
       version?: string;
       tagCommit?: string;
+      tagType?: 'tag' | 'commit';
+      released?: string;
+      tips?: { stable?: string; beta?: string };
     } = {},
   ) {
     const summary = path.join(f.runnerTemp, 'summary.md');
@@ -1131,6 +1140,10 @@ describe('release workflow channel branch step', () => {
         ...env,
         GH_TOKEN: options.token ?? 'app-token',
         TAG_COMMIT: options.tagCommit ?? f.target,
+        TAG_TYPE: options.tagType ?? 'tag',
+        RELEASED: options.released ?? 'true',
+        TIP_STABLE: options.tips?.stable ?? '',
+        TIP_BETA: options.tips?.beta ?? '',
         MOVES: options.moves ?? outputs.moves ?? '',
         PLAN_FAILED: outputs.failed ?? '',
       },
@@ -1238,16 +1251,20 @@ describe('release workflow channel branch step', () => {
     // is shell syntax or a builtin. (`git push` appears in the admin's message text alone.)
     const programs = moveScript
       .split('\n')
-      .filter((line) => line && !line.startsWith('#') && !line.startsWith('echo '))
+      .filter((line) => line && !line.startsWith('#'))
+      // A command substitution can run anything, so a line with one always counts.
       .filter(
         (line) =>
-          !/^(set |FAILED=|BRANCH=|ALLOWED=|ARGS=|for |do$|done$|case |esac$|fi$|then$|else$|if \[|elif |continue$|exit |;;$|\*\)|stable:update|true\)|-X )/.test(
+          /\$\(|`/.test(line.replace(/\\`/g, '')) ||
+          !/^(echo |set |FAILED=|BRANCH=|ALLOWED=|ANNOTATED=|ARGS=|for |do$|done$|case |esac$|fi$|then$|else$|if \[|elif |continue$|exit |;;$|\*\)|stable:update|true\)|-X )/.test(
             line,
           ),
       );
     expect(programs).toEqual([
       'TAG=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}" --jq \'.object.type + " " + .object.sha\') || TAG=""',
-      'TAG="commit $(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG#* }" --jq \'.object.sha\')" || TAG=""',
+      'TAG=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG#* }" --jq \'.object.type + " " + .object.sha\') || TAG=""',
+      'RELEASED=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}" --jq \'.draft == false and .immutable == true\') || RELEASED=""',
+      'CURRENT=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" --jq \'.object.sha\' 2>/dev/null) || CURRENT=""',
       'if ! gh api "${ARGS[@]}" >/dev/null; then',
     ]);
   });
@@ -1312,8 +1329,31 @@ describe('release workflow channel branch step', () => {
     expect(result.calls).toEqual([]);
     expect(result.lookups).toEqual([
       'api repos/nanocoai/nanoclaw/git/ref/tags/v2026.11.0 --jq .object.type + " " + .object.sha',
-      'api repos/nanocoai/nanoclaw/git/tags/tagobject --jq .object.sha',
+      'api repos/nanocoai/nanoclaw/git/tags/tagobject --jq .object.type + " " + .object.sha',
+      'api repos/nanocoai/nanoclaw/releases/tags/v2026.11.0 --jq .draft == false and .immutable == true',
     ]);
     expect(result.stdout).toContain(`::error::Tag v2026.11.0 does not point at ${f.target}`);
+  });
+
+  it(
+    'moves nothing for a lightweight tag or a release that is not published and immutable',
+    { timeout: 30_000 },
+    () => {
+      for (const options of [{ tagType: 'commit' as const }, { released: 'false' }, { released: '' }]) {
+        const f = fixture({ existing: ['stable'] });
+        const result = run(f, options);
+        expect(result.status).toBe(1);
+        expect(result.calls).toEqual([]);
+        expect(result.summary).toContain('is not an annotated tag on');
+      }
+    },
+  );
+
+  it('skips a branch an earlier attempt already moved, so a retry can finish', { timeout: 30_000 }, () => {
+    const f = fixture();
+    const result = run(f, { moves: 'stable:create beta:create', tips: { stable: f.target } });
+    expect(result.status).toBe(0);
+    expect(result.calls).toEqual([post('beta', f.target)]);
+    expect(result.summary).toContain(`- Branch \`stable\`: already at \`${f.target}\``);
   });
 });

@@ -141,20 +141,20 @@ jobs:
             exit 1
           fi
 
-          # The channel-branches job holds the bypass App's key. It needs no reviewers, since it
-          # runs only after the approved publish job, but it must allow main alone, so no other
-          # branch's workflow can mint the token.
+          # The channel-branches job holds the bypass App's key. It has no reviewers, since it runs
+          # only after the approved publish job (one approval per release), but it must allow main
+          # alone, so no other branch's workflow can mint the token.
           if ! gh api "repos/${GITHUB_REPOSITORY}/environments/channel-branches" > "$RUNNER_TEMP/channel-environment.json"; then
             echo "::error::Create the channel-branches environment (main only) before publishing."
             exit 1
           fi
           gh api "repos/${GITHUB_REPOSITORY}/environments/channel-branches/deployment-branch-policies" \
             > "$RUNNER_TEMP/channel-branch-policies.json"
-          if ! jq -e '.can_admins_bypass == false and .deployment_branch_policy.protected_branches == false and .deployment_branch_policy.custom_branch_policies == true' \
+          if ! jq -e '.can_admins_bypass == false and .deployment_branch_policy.protected_branches == false and .deployment_branch_policy.custom_branch_policies == true and all((.protection_rules // [])[]; .type != "required_reviewers")' \
             "$RUNNER_TEMP/channel-environment.json" >/dev/null ||
             ! jq -e '.total_count == 1 and any(.branch_policies[]; .name == "main" and (.type // "branch") == "branch")' \
               "$RUNNER_TEMP/channel-branch-policies.json" >/dev/null; then
-            echo "::error::The channel-branches environment must allow exactly the main branch and prevent admin bypass."
+            echo "::error::The channel-branches environment must allow exactly the main branch, prevent admin bypass and have no required reviewers."
             exit 1
           fi
 
@@ -561,15 +561,20 @@ jobs:
         run: |
           set -euo pipefail
           FAILED="${PLAN_FAILED:+ $PLAN_FAILED}"
-          # Move only to the commit the published tag names, read back from GitHub.
+          # Move only to what GitHub says was released: an annotated tag on the target commit,
+          # with a published, immutable release. The plan alone is not proof of either.
           if [ -n "$MOVES" ] && [ -n "${GH_TOKEN:-}" ]; then
             TAG=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}" --jq '.object.type + " " + .object.sha') || TAG=""
-            if [ "${TAG%% *}" = tag ]; then
-              TAG="commit $(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG#* }" --jq '.object.sha')" || TAG=""
-            fi
-            if [ "$TAG" != "commit $TARGET_SHA" ]; then
-              echo "::error::Tag v${RELEASE_VERSION} does not point at ${TARGET_SHA} (got: ${TAG:-no tag}). No branch was moved."
-              echo "- Channel branches NOT moved: tag \`v${RELEASE_VERSION}\` does not point at \`${TARGET_SHA}\`." >> "$GITHUB_STEP_SUMMARY"
+            ANNOTATED=false
+            for _ in 1 2 3 4 5; do
+              if [ "${TAG%% *}" != tag ]; then break; fi
+              ANNOTATED=true
+              TAG=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG#* }" --jq '.object.type + " " + .object.sha') || TAG=""
+            done
+            RELEASED=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}" --jq '.draft == false and .immutable == true') || RELEASED=""
+            if [ "$ANNOTATED" != true ] || [ "$TAG" != "commit $TARGET_SHA" ] || [ "$RELEASED" != true ]; then
+              echo "::error::Tag v${RELEASE_VERSION} does not point at ${TARGET_SHA} as an annotated tag with a published, immutable release (tag: ${TAG:-none}, released: ${RELEASED:-no}). No branch was moved."
+              echo "- Channel branches NOT moved: \`v${RELEASE_VERSION}\` is not an annotated tag on \`${TARGET_SHA}\` with a published, immutable release." >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
           fi
@@ -592,6 +597,12 @@ jobs:
               echo "::error::Branch $BRANCH was not moved: no channel-branch App token. An admin must push it."
               echo "- Branch \`${BRANCH}\` NOT moved. An admin must run: \`git push origin ${TARGET_SHA}:refs/heads/${BRANCH}\`" >> "$GITHUB_STEP_SUMMARY"
               FAILED="$FAILED $BRANCH"
+              continue
+            fi
+            # A retry of this job replays the whole plan: a branch an earlier attempt moved is done.
+            CURRENT=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" --jq '.object.sha' 2>/dev/null) || CURRENT=""
+            if [ "$CURRENT" = "$TARGET_SHA" ]; then
+              echo "- Branch \`${BRANCH}\`: already at \`${TARGET_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
               continue
             fi
             if [ "${MOVE#*:}" = update ]; then
