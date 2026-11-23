@@ -1353,6 +1353,12 @@ describe('release workflow channel branch step', () => {
         expect(result.calls).toEqual([]);
         expect(result.summary).toContain('is not an annotated tag on');
       }
+      // A pre-release version must be a GitHub pre-release too.
+      const f = fixture({ existing: ['beta'] });
+      const result = run(f, { version: '2026.12.0-beta.1', moves: 'beta:update', released: 'false true false' });
+      expect(result.status).toBe(1);
+      expect(result.calls).toEqual([]);
+      expect(result.summary).toContain('want `false true true`');
     },
   );
 
