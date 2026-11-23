@@ -1113,8 +1113,10 @@ describe('release workflow channel branch step', () => {
         .filter(Boolean)
         .map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
     );
+    // Actions stops the job when a step fails, so the move step never runs then.
+    if (plan.status !== 0) throw new Error(`plan step failed: ${plan.stdout}${plan.stderr}`);
     const move = spawnSync('bash', ['-c', moveScript], {
-      cwd: path.dirname(f.checkout),
+      cwd: f.checkout,
       encoding: 'utf8',
       env: {
         ...env,
@@ -1218,9 +1220,18 @@ describe('release workflow channel branch step', () => {
     );
     expect(plan).not.toContain('secrets.');
     expect(plan).not.toContain('GH_TOKEN');
-    // Only `gh api` runs; `git push` appears in the admin's message text alone.
-    const commands = moveScript.split('\n').filter((line) => !line.startsWith('echo ') && !line.startsWith('#'));
-    expect(commands.join('\n')).not.toMatch(/\b(node|git|pnpm|npx|bash|sh|source)\s/);
+    // The only program it runs is `gh api`; every other line is shell syntax or a builtin.
+    // (`git push` appears in the admin's message text alone.)
+    const programs = moveScript
+      .split('\n')
+      .filter((line) => line && !line.startsWith('#') && !line.startsWith('echo '))
+      .filter(
+        (line) =>
+          !/^(set |FAILED=|BRANCH=|ALLOWED=|ARGS=|for |do$|done$|case |esac$|fi$|then$|else$|if \[|elif |continue$|exit |;;$|\*\)|stable:update|true\)|-X )/.test(
+            line,
+          ),
+      );
+    expect(programs).toEqual(['if ! gh api "${ARGS[@]}" >/dev/null; then']);
   });
 
   it('refuses a planned move it does not expect', { timeout: 30_000 }, () => {
