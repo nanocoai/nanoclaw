@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw",
-  "version": "2026.11.0-rc.2",
+  "version": "2026.11.0",
   "description": "Personal AI assistant. Lightweight, secure, customizable.",
   "type": "module",
   "packageManager": "pnpm@10.34.9",
@@ -44,7 +44,7 @@
     "chat": "4.41.1",
     "cron-parser": "5.5.0",
     "kleur": "^4.1.5",
-    "yaml": "^2.9.0"
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

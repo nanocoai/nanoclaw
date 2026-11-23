@@ -562,9 +562,10 @@ describe('CLI scope enforcement', () => {
   it('global: allows cross-group access', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
-    const resp = await dispatch({ id: '1', command: 'test-cmd', args: { id: 'other-group' } }, agentCtx());
+    const resp = await dispatch({ id: '1', command: 'groups-test', args: { id: 'other-group' } }, agentCtx());
 
     expect(resp.ok).toBe(true);
+    if (resp.ok) expect((resp.data as { echo: Record<string, unknown> }).echo.id).toBe('other-group');
   });
 
   it('global: allows non-group resources', async () => {
@@ -578,12 +579,12 @@ describe('CLI scope enforcement', () => {
   it('global: does not auto-fill --id', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
 
-    const resp = await dispatch({ id: '1', command: 'test-cmd', args: { foo: 'bar' } }, agentCtx());
+    const resp = await dispatch({ id: '1', command: 'groups-test', args: { foo: 'bar' } }, agentCtx());
 
     expect(resp.ok).toBe(true);
     if (resp.ok) {
       const data = resp.data as { echo: Record<string, unknown> };
-      expect(data.echo.id).toBeUndefined();
+      expect(data.echo).toEqual({ foo: 'bar' });
     }
   });
 
@@ -599,7 +600,11 @@ describe('CLI scope enforcement', () => {
   });
 
   it('host caller bypasses CLI scope enforcement', async () => {
-    // No config check should happen for host callers
+    // Agent scope never applies to the host socket, even when the config store fails.
+    mockGetContainerConfig.mockImplementation(() => {
+      throw new Error('container config unavailable');
+    });
+
     const resp = await dispatch({ id: '1', command: 'test-cmd', args: { id: 'any-group' } }, { caller: 'host' });
 
     expect(resp.ok).toBe(true);

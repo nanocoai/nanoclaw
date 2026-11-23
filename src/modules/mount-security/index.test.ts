@@ -112,6 +112,18 @@ describe('loadMountAllowlist', () => {
     expect(allowlist!.allowedRoots).toHaveLength(1);
   });
 
+  it("refuses the local OneCLI gateway's directory even under an allowed root", () => {
+    const onecliDir = path.join(tmpDir, '.onecli');
+    fs.mkdirSync(onecliDir);
+    writeAllowlist({ allowedRoots: [{ path: tmpDir, allowReadWrite: true }], blockedPatterns: [] });
+
+    const result = validateMount({ hostPath: onecliDir, containerPath: 'onecli' });
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('.onecli');
+    // The root beside it is still mountable.
+    expect(validateMount({ hostPath: repoDir }).allowed).toBe(true);
+  });
+
   it('returns null when the allowlist file is missing', () => {
     // No file written.
     expect(loadMountAllowlist()).toBeNull();

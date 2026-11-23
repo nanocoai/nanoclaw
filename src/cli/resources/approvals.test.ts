@@ -14,7 +14,6 @@ vi.mock('../../container-runner.js', () => ({
 
 import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
 import { createPendingApproval, markApprovalAwaitingReason } from '../../db/sessions.js';
-import { PENDING_APPROVAL_STATUSES } from '../../types.js';
 import { registerResourceHelpCommands } from '../commands/help.js';
 import { dispatch } from '../dispatch.js';
 import { getResource } from '../crud.js';
@@ -32,10 +31,9 @@ describe('approvals CLI status enum', () => {
     await closeDb();
   });
 
-  it('declares every status the PendingApproval type allows', () => {
+  it('accepts exactly the statuses the host writes', () => {
     const column = getResource('approvals')!.columns.find((c) => c.name === 'status')!;
-    expect(column.enum).toEqual([...PENDING_APPROVAL_STATUSES]);
-    expect(column.enum).toContain('awaiting_reason');
+    expect(column.enum).toEqual(['pending', 'approved', 'rejected', 'expired', 'awaiting_reason']);
   });
 
   it('lists a row parked in awaiting_reason by the host', async () => {
@@ -49,6 +47,15 @@ describe('approvals CLI status enum', () => {
       options_json: '[]',
     });
     expect(await markApprovalAwaitingReason('apr-1', new Date(Date.now() + 60_000).toISOString())).toBe(true);
+    await createPendingApproval({
+      approval_id: 'apr-2',
+      request_id: 'apr-2',
+      action: 'test.action',
+      payload: '{}',
+      created_at: new Date().toISOString(),
+      title: 'Still pending',
+      options_json: '[]',
+    });
 
     const resp = await dispatch(
       { id: 'req-1', command: 'approvals-list', args: { status: 'awaiting_reason' } },

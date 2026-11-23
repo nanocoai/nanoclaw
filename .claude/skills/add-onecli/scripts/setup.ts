@@ -398,17 +398,32 @@ function installOnecliCliDirect(): { stdout: string; ok: boolean } {
  * separate component that the agent runs via docs/onecli-upgrades.md during
  * /update-nanoclaw, so this step only surfaces the condition and points there.
  */
-export async function verifyGatewayV1(
+export async function verifyGatewayV1(url: string, deadline: number, fetchImpl: typeof fetch = fetch) {
+  return pollGatewayHealth(`${url}/v1/health`, deadline, fetchImpl);
+}
+
+async function pollGatewayHealth(
   url: string,
-  fetchImpl: typeof fetch = fetch,
+  deadline: number,
+  fetchImpl: typeof fetch,
 ): Promise<'ok' | 'incompatible' | 'unreachable'> {
-  try {
-    const res = await fetchImpl(`${url}/v1/health`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    return res.ok ? 'ok' : 'incompatible';
-  } catch {
-    return 'unreachable';
+  let result: 'incompatible' | 'unreachable' = 'unreachable';
+  for (;;) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) return result;
+    try {
+      const res = await fetchImpl(url, {
+        signal: AbortSignal.timeout(Math.min(5000, remainingMs)),
+      });
+      // Probes need only the status; release the body before the next attempt.
+      void res.body?.cancel().catch(() => {});
+      if (res.ok) return 'ok';
+      result = 'incompatible';
+    } catch {
+      // A failed retry must not discard an earlier HTTP response.
+    }
+    const delayMs = Math.min(1000, deadline - Date.now());
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 }
 
@@ -432,19 +447,19 @@ export function gatewayReadinessError(result: 'ok' | 'incompatible' | 'unreachab
     : 'OneCLI gateway /v1 API is unreachable';
 }
 
-export async function pollHealth(url: string, timeoutMs: number): Promise<boolean> {
+export async function pollHealth(url: string, deadline: number, fetchImpl: typeof fetch = fetch): Promise<boolean> {
   // `/api/health` matches the path probe.sh uses — keep them aligned.
+  return (await pollGatewayHealth(`${url}/api/health`, deadline, fetchImpl)) === 'ok';
+}
+
+export async function pollGatewayReadiness(url: string, timeoutMs: number, fetchImpl: typeof fetch = fetch) {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`${url}/api/health`);
-      if (res.ok) return true;
-    } catch {
-      // not ready yet
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  return false;
+  // Run together: an auth-gated /api/health must not consume /v1's whole budget.
+  const [healthy, v1Status] = await Promise.all([
+    pollHealth(url, deadline, fetchImpl),
+    verifyGatewayV1(url, deadline, fetchImpl),
+  ]);
+  return { healthy, v1Status };
 }
 
 export async function run(args: string[]): Promise<void> {
@@ -494,8 +509,7 @@ export async function run(args: string[]): Promise<void> {
       writeEnvVar('ONECLI_API_KEY', remoteToken);
       log.info('Wrote ONECLI_API_KEY to .env');
     }
-    const healthy = await pollHealth(remoteUrl, 5000);
-    const v1Status = await verifyGatewayV1(remoteUrl);
+    const { healthy, v1Status } = await pollGatewayReadiness(remoteUrl, 5000);
     const v1Hint = gatewayV1Hint(v1Status);
     const readinessError = gatewayReadinessError(v1Status);
     emitStatus('ONECLI', {
@@ -542,8 +556,7 @@ export async function run(args: string[]): Promise<void> {
     log.info('Reusing existing OneCLI', { url });
     const pg = securePostgres();
     if (pg.error) postgresFailed(pg.error);
-    const healthy = await pollHealth(url, pg.restarted ? 60000 : 5000);
-    const v1Status = await verifyGatewayV1(url);
+    const { healthy, v1Status } = await pollGatewayReadiness(url, pg.restarted ? 60000 : 5000);
     const v1Hint = gatewayV1Hint(v1Status);
     const readinessError = gatewayReadinessError(v1Status);
     emitStatus('ONECLI', {
@@ -610,8 +623,7 @@ export async function run(args: string[]): Promise<void> {
   writeEnvOnecliUrl(url);
   log.info('Wrote ONECLI_URL to .env', { url });
 
-  const healthy = await pollHealth(url, pg.restarted ? 60000 : 15000);
-  const v1Status = await verifyGatewayV1(url);
+  const { healthy, v1Status } = await pollGatewayReadiness(url, pg.restarted ? 60000 : 15000);
   const v1Hint = gatewayV1Hint(v1Status);
   const readinessError = gatewayReadinessError(v1Status);
 
@@ -639,5 +651,9 @@ if (
   fs.existsSync(process.argv[1]) &&
   import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href
 ) {
-  void run(process.argv.slice(2));
+  void run(process.argv.slice(2)).catch((err) => {
+    log.error('OneCLI setup failed', { err });
+    // The shared logger handles unhandled rejections without failing the process.
+    process.exitCode = 1;
+  });
 }
