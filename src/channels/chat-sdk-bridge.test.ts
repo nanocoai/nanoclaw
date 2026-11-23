@@ -845,6 +845,31 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(buttons[0].url).toBe('https://example.com');
   });
 
+  it.each([
+    ['Open docs', undefined],
+    ['Documentation is ready', 'Documentation is ready'],
+  ])('adds %s as visible text to a card with only link buttons', async (expectedText, fallbackText) => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({ adapter: stubAdapter({ postMessage }), supportsThreads: false });
+    const id = await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'card',
+        card: { actions: [{ label: 'Open docs', url: 'https://example.com/docs' }] },
+        fallbackText,
+      },
+    });
+    expect(id).toBe('msg-stub');
+    expect(calls[0].message).toMatchObject({
+      card: {
+        children: [
+          { type: 'text', content: expectedText },
+          { type: 'actions', children: [{ type: 'link-button', url: 'https://example.com/docs' }] },
+        ],
+      },
+    });
+  });
+
   it('survives a null action instead of throwing on a property read', async () => {
     const { calls, postMessage } = makePostCapture();
     const bridge = createChatSdkBridge({
