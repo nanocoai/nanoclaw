@@ -8,13 +8,14 @@
  * Ported from v1 — see v1 source for commit history.
  */
 import { execFileSync, execSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createConnection, type Socket } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, extname, join } from 'node:path';
 
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import { extForMime } from '../attachment-naming.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 
@@ -312,6 +313,55 @@ interface SignalDataMessage {
     filename?: string;
     size?: number;
   }>;
+}
+
+/** Largest attachment we inline into the inbound message (base64 in the DB). */
+export const SIGNAL_MAX_INLINE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+export interface SignalAttachmentRef {
+  type: string;
+  name: string;
+  mimeType: string;
+  size?: number;
+  data?: string;
+  missing?: boolean;
+}
+
+/**
+ * Read signal-cli's saved attachment files and return them with base64
+ * `data`, so the host's inbox staging writes them into the session dir.
+ * signal-cli names saved files by attachment id (usually with an extension).
+ */
+export function readSignalAttachments(
+  signalDataDir: string,
+  attachments: NonNullable<SignalDataMessage['attachments']>,
+  platformId: string,
+): SignalAttachmentRef[] {
+  const refs: SignalAttachmentRef[] = [];
+  for (const att of attachments) {
+    if (!att.id) continue;
+    const id = basename(att.id);
+    const mimeType = att.contentType || 'application/octet-stream';
+    const type = mimeType.split('/')[0] === 'image' ? 'image' : mimeType.split('/')[0] || 'file';
+    const ext = extForMime(mimeType);
+    const name = extname(id) || !ext ? id : `${id}.${ext}`;
+    const filePath = join(signalDataDir, 'attachments', id);
+    try {
+      const size = statSync(filePath).size;
+      if (size > SIGNAL_MAX_INLINE_ATTACHMENT_BYTES) {
+        log.warn('Signal: attachment too large to stage', { platformId, id, size });
+        refs.push({ type, name, mimeType, size, missing: true });
+        continue;
+      }
+      const data = readFileSync(filePath).toString('base64');
+      refs.push({ type, name, mimeType, size, data });
+      log.info('Signal: attachment staged', { platformId, id, mimeType, size });
+    } catch (err) {
+      log.warn('Signal: attachment file not readable', { platformId, id, path: filePath, err });
+      refs.push({ type, name, mimeType, missing: true });
+    }
+  }
+  return refs;
 }
 
 interface SignalEnvelope {
@@ -612,10 +662,12 @@ export function createSignalAdapter(config: {
     const text = rawText ? resolveMentions(rawText, dataMessage.mentions) : '';
 
     const audioAttachment = dataMessage.attachments?.find((a) => a.contentType?.startsWith('audio/') && a.id);
-    const imageAttachments = dataMessage.attachments?.filter((a) => a.contentType?.startsWith('image/') && a.id) ?? [];
     const hasVoice = !text && !!audioAttachment;
+    // Everything except the voice note we transcribe is staged for the agent
+    // (images, PDFs, other files).
+    const fileAttachments = dataMessage.attachments?.filter((a) => a.id && !(hasVoice && a === audioAttachment)) ?? [];
 
-    if (!text && !hasVoice && imageAttachments.length === 0) return;
+    if (!text && !hasVoice && fileAttachments.length === 0) return;
 
     const sender = (envelope.sourceNumber ?? envelope.sourceUuid ?? envelope.source ?? '').trim();
     if (!sender) return;
@@ -670,16 +722,17 @@ export function createSignalAdapter(config: {
       }
     }
 
-    // Image attachments — emit `[Image: <path>]` lines so the agent's Read
-    // tool can pick them up, and surface the structured `attachments` array
-    // for consumers that prefer that shape. Without this, vision-capable
-    // models never see images sent over Signal.
-    const attachmentRefs: Array<{ path: string; contentType: string }> = [];
-    for (const img of imageAttachments) {
-      const imagePath = join(config.signalDataDir, 'attachments', img.id!);
-      const imageLine = `[Image: ${imagePath}]`;
-      content = content ? `${content}\n${imageLine}` : imageLine;
-      attachmentRefs.push({ path: imagePath, contentType: img.contentType || 'image/jpeg' });
+    // File attachments — signal-cli saves them under the host's
+    // <signalDataDir>/attachments, which the agent container cannot see.
+    // Inline the bytes as base64 `data` (the shape the chat-sdk bridge uses)
+    // so the host stages them into the session inbox and the agent gets a
+    // `/workspace/inbox/...` path it can actually Read.
+    const attachmentRefs = readSignalAttachments(config.signalDataDir, fileAttachments, platformId);
+    for (const ref of attachmentRefs) {
+      if (ref.missing) {
+        const line = `[${ref.type}: ${ref.name} - file not available]`;
+        content = content ? `${content}\n${line}` : line;
+      }
     }
 
     const msg: InboundMessage = {
@@ -690,7 +743,9 @@ export function createSignalAdapter(config: {
         sender,
         senderId: `signal:${sender}`,
         senderName,
-        ...(attachmentRefs.length > 0 ? { attachments: attachmentRefs } : {}),
+        ...(attachmentRefs.some((r) => !r.missing)
+          ? { attachments: attachmentRefs.filter((r) => !r.missing).map(({ missing: _m, ...r }) => r) }
+          : {}),
         ...(dataMessage.quote ? quoteToContent(dataMessage.quote) : {}),
       },
       isMention: computeSignalIsMention(config.account, isGroup, dataMessage.mentions),
