@@ -34,7 +34,7 @@ describe('the AnyDoc CLI integration', () => {
   });
 
   it('pins the approved AnyDoc version without lifecycle-script opt-in', () => {
-    expect(anydocEntries[0]).toEqual({ name: '@firecrawl/anydoc', version: '0.1.6' });
+    expect(anydocEntries[0]).toEqual({ name: '@firecrawl/anydoc', version: '0.2.5' });
   });
 
   it('ships the matching container skill', () => {
@@ -52,7 +52,7 @@ describe('the AnyDoc CLI integration', () => {
   });
 
   it('enforces release eligibility before mutation', () => {
-    expect(installer).toContain('const version = "0.1.6"');
+    expect(installer).toContain('const version = "0.2.5"');
     expect(installer).toContain('72 * 60 * 60 * 1000');
   });
 

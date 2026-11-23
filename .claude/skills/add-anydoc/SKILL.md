@@ -19,7 +19,7 @@ Install one pinned CLI and one focused container skill. Keep document conversion
      process.stdin.on("data", (chunk) => (body += chunk));
      process.stdin.on("end", () => {
        const metadata = JSON.parse(body);
-       const version = "0.1.6";
+       const version = "0.2.5";
        const release = metadata.versions?.[version];
        const publishedAt = Date.parse(metadata.time?.[version] ?? "");
        const eligibleAt = publishedAt + 72 * 60 * 60 * 1000;
@@ -36,7 +36,8 @@ Install one pinned CLI and one focused container skill. Keep document conversion
 
 3. Inspect `container/cli-tools.json` for `@firecrawl/anydoc` before changing files:
    - No entry: continue.
-   - Exactly one entry at `0.1.6`: leave it unchanged.
+   - Exactly one entry at `0.2.5`: leave it unchanged.
+   - Exactly one entry at `0.1.6`, the previous pin: change its `version` to `0.2.5` and change nothing else in the entry.
    - A duplicate or any other version: stop and report the conflict.
 4. Check whether `container/skills/convert-documents-to-markdown/SKILL.md` and `src/anydoc-manifest.test.ts` already exist. Reapplying this skill overwrites only those dedicated files.
 5. If `data/v2.db` exists, inspect per-group image pins before changing files. Standard derived images can be rebuilt from the updated shared image. Stop and report any other pin because its owner must decide how to rebuild it:
@@ -82,7 +83,7 @@ cp "$skill_dir/anydoc-manifest.test.ts" src/anydoc-manifest.test.ts
 If the manifest has no AnyDoc entry, append this exact object to its JSON array. Do not add `onlyBuilt`; the package and its prebuilt Linux bindings have no install lifecycle script.
 
 ```json
-{ "name": "@firecrawl/anydoc", "version": "0.1.6" }
+{ "name": "@firecrawl/anydoc", "version": "0.2.5" }
 ```
 
 ## Validate and build
