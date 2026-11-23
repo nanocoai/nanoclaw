@@ -671,12 +671,11 @@ registerResource({
         // `--rw` is the explicit opt-in that stores `readonly: false` — the only
         // value the mount-security gate accepts as a read-write *request*, and
         // still granted only if the matched allowlist root allows read-write.
-        const ro = parseMountFlag(args, 'ro');
-        const rw = parseMountFlag(args, 'rw');
-        const readonlyArg = parseMountFlag(args, 'readonly');
-        const readWrite = rw === true || readonlyArg === false;
-        const readOnly = ro === true || readonlyArg === true;
-        if (readWrite && readOnly) throw new Error('--ro and --rw are mutually exclusive');
+        // Only `--rw` requests write. `--readonly false` used to store read-only (the
+        // string "false" was truthy), so it must not quietly start granting write.
+        const readWrite = parseMountFlag(args, 'rw') === true;
+        const readOnly = parseMountFlag(args, 'ro') === true || parseMountFlag(args, 'readonly') === true;
+        if (readWrite && readOnly) throw new Error('--ro (or --readonly) and --rw are mutually exclusive');
 
         const mount: AdditionalMountConfig = {
           hostPath,
@@ -691,9 +690,13 @@ registerResource({
         // still-read-only mount with nothing to explain why. Update the access mode
         // in place instead, and say which of the two happened.
         const updated = at !== -1;
-        if (updated) existing[at] = mount;
-        else existing.push(mount);
-        await updateContainerConfigJson(id, 'additional_mounts', existing);
+        // An unchanged re-add writes nothing, so it cannot overwrite a concurrent
+        // remove-mount of another entry with the list it read earlier.
+        if (!updated || existing[at].readonly !== mount.readonly) {
+          if (updated) existing[at] = mount;
+          else existing.push(mount);
+          await updateContainerConfigJson(id, 'additional_mounts', existing);
+        }
         const note = readWrite
           ? `Read-write requested. It is granted only if the matched mount-allowlist root has \`allowReadWrite: true\`; ` +
             `otherwise the mount is forced read-only. Run \`ncl groups restart --id ${id}\` to apply.`

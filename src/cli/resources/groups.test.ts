@@ -557,7 +557,7 @@ describe('groups config (host-only)', () => {
     it('rejects --ro together with --rw and writes nothing', async () => {
       const res = await addMount('both-1', { ro: true, rw: true });
       expect(res.ok).toBe(false);
-      expect(errorMessage(res)).toBe('--ro and --rw are mutually exclusive');
+      expect(errorMessage(res)).toBe('--ro (or --readonly) and --rw are mutually exclusive');
       expect(await mountsOf()).toEqual([]);
     });
 
@@ -581,6 +581,13 @@ describe('groups config (host-only)', () => {
       expect(res.ok).toBe(false);
       expect(errorMessage(res)).toMatch(/is a flag; pass it on its own/);
       expect(await mountsOf()).toEqual([]);
+    });
+
+    // `--readonly false` used to store read-only (the string "false" was truthy).
+    // Only --rw may request write, so it must still not grant it.
+    it('--readonly false does not request read-write', async () => {
+      expect((await addMount('legacy-1', { readonly: 'false' })).ok).toBe(true);
+      expect(await mountsOf()).toEqual([{ hostPath: '/data/shared', containerPath: 'shared' }]);
     });
 
     it('accepts the boolean spellings other CLI flags accept', async () => {
