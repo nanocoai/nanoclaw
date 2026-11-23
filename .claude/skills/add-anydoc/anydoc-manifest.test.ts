@@ -56,6 +56,14 @@ describe('the AnyDoc CLI integration', () => {
     expect(installer).toContain('72 * 60 * 60 * 1000');
   });
 
+  it('moves an install on the previous pin to the current one on reapply', () => {
+    expect(installer).toContain('Exactly one entry at `0.2.5`: leave it unchanged.');
+    expect(installer).toContain(
+      'Exactly one entry at `0.1.6`, the previous pin: change its `version` to `0.2.5` and change nothing else in the entry.',
+    );
+    expect(installer).toContain('A duplicate or any other version: stop and report the conflict.');
+  });
+
   it('refreshes a hardened base before rebuilding without AnyDoc', () => {
     expect(removal).toContain('./container/build.sh pull');
     expect(removal.indexOf('./container/build.sh pull')).toBeLessThan(removal.lastIndexOf('./container/build.sh'));
