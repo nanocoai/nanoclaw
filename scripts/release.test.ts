@@ -466,8 +466,8 @@ describe('channel branches', () => {
     expect(channelBranches('2026.11.0-rc.2', tags)).toEqual(['beta']);
     expect(releaseWorkflow).toContain('release-order.mjs" branches "$RELEASE_VERSION"');
     expect(releaseWorkflow).toContain('-f sha="$TARGET_SHA" -F force=false');
-    // The default token cannot pass the branches' ruleset: without the app token the step says what to push, then fails.
-    expect(releaseWorkflow).toContain('GH_TOKEN: ${{ secrets.CHANNEL_BRANCH_TOKEN }}');
+    // The default token cannot pass the branches' ruleset: without the App token the step says what to push, then fails.
+    expect(releaseWorkflow).toContain('GH_TOKEN: ${{ steps.app.outputs.token }}');
     expect(releaseWorkflow).toContain('An admin must run: \\`git push origin ${TARGET_SHA}:refs/heads/${BRANCH}\\`');
     expect(releaseWorkflow.indexOf('- name: Move the channel branches')).toBeGreaterThan(
       releaseWorkflow.indexOf('node scripts/release.mjs readback'),
@@ -1064,7 +1064,9 @@ describe('release workflow channel branch step', () => {
     writeFileSync(
       path.join(bin, 'gh'),
       '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_LOG"\n' +
-        'if [ -n "${GH_FAIL:-}" ]; then case "$*" in *"$GH_FAIL"*) echo "gh: refused (HTTP 422)" >&2; exit 1 ;; esac; fi\n',
+        'if [ -n "${GH_FAIL:-}" ]; then case "$*" in *"$GH_FAIL"*) echo "gh: refused (HTTP 422)" >&2; exit 1 ;; esac; fi\n' +
+        // The tag read-back: an annotated tag object, then the commit it names.
+        'case "$*" in *git/ref/tags/*) echo "tag tagobject" ;; *git/tags/tagobject*) echo "$TAG_COMMIT" ;; esac\n',
       { mode: 0o755 },
     );
     // Real git, except that looking up LOOKUP_FAIL's branch fails like a network error.
@@ -1081,7 +1083,14 @@ describe('release workflow channel branch step', () => {
   /** Runs the plan step, then the move step with the plan's outputs, as the job does. */
   function run(
     f: ReturnType<typeof fixture>,
-    options: { token?: string; ghFail?: string; lookupFail?: string; moves?: string; version?: string } = {},
+    options: {
+      token?: string;
+      ghFail?: string;
+      lookupFail?: string;
+      moves?: string;
+      version?: string;
+      tagCommit?: string;
+    } = {},
   ) {
     const summary = path.join(f.runnerTemp, 'summary.md');
     const ghLog = path.join(f.runnerTemp, 'gh.log');
@@ -1121,12 +1130,16 @@ describe('release workflow channel branch step', () => {
       env: {
         ...env,
         GH_TOKEN: options.token ?? 'app-token',
+        TAG_COMMIT: options.tagCommit ?? f.target,
         MOVES: options.moves ?? outputs.moves ?? '',
         PLAN_FAILED: outputs.failed ?? '',
       },
     });
-    const calls = readFileSync(ghLog, 'utf8').split('\n').filter(Boolean);
+    const log = readFileSync(ghLog, 'utf8').split('\n').filter(Boolean);
+    // Moves only; the tag read-back is checked on its own.
+    const calls = log.filter((line) => line.startsWith('api -X'));
     return {
+      lookups: log.filter((line) => !line.startsWith('api -X')),
       planStatus: plan.status,
       status: move.status,
       stdout: plan.stdout + move.stdout,
@@ -1166,7 +1179,7 @@ describe('release workflow channel branch step', () => {
     expect(result.calls).toEqual([]);
     for (const branch of ['stable', 'beta']) {
       expect(result.summary).toContain(`An admin must run: \`git push origin ${f.target}:refs/heads/${branch}\``);
-      expect(result.stdout).toContain(`::error::Branch ${branch} was not moved: CHANNEL_BRANCH_TOKEN is not set.`);
+      expect(result.stdout).toContain(`::error::Branch ${branch} was not moved: no channel-branch App token.`);
     }
     expect(result.stdout).toContain('::error::Channel branches not moved: stable beta.');
   });
@@ -1216,12 +1229,13 @@ describe('release workflow channel branch step', () => {
     expect(result.calls).toEqual([patch('stable', f.target), post('beta', f.target)]);
     const plan = releaseWorkflow.slice(
       releaseWorkflow.indexOf('- name: Plan the channel branch moves'),
-      releaseWorkflow.indexOf('- name: Move the channel branches'),
+      releaseWorkflow.indexOf('\n  channel-branches:'),
     );
+    expect(plan.length).toBeGreaterThan(0);
     expect(plan).not.toContain('secrets.');
     expect(plan).not.toContain('GH_TOKEN');
-    // The only program it runs is `gh api`; every other line is shell syntax or a builtin.
-    // (`git push` appears in the admin's message text alone.)
+    // The only program it runs is `gh api` (the tag read-back, then the moves); every other line
+    // is shell syntax or a builtin. (`git push` appears in the admin's message text alone.)
     const programs = moveScript
       .split('\n')
       .filter((line) => line && !line.startsWith('#') && !line.startsWith('echo '))
@@ -1231,7 +1245,11 @@ describe('release workflow channel branch step', () => {
             line,
           ),
       );
-    expect(programs).toEqual(['if ! gh api "${ARGS[@]}" >/dev/null; then']);
+    expect(programs).toEqual([
+      'TAG=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}" --jq \'.object.type + " " + .object.sha\') || TAG=""',
+      'TAG="commit $(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG#* }" --jq \'.object.sha\')" || TAG=""',
+      'if ! gh api "${ARGS[@]}" >/dev/null; then',
+    ]);
   });
 
   it('refuses a planned move it does not expect', { timeout: 30_000 }, () => {
@@ -1252,21 +1270,50 @@ describe('release workflow channel branch step', () => {
     expect(result.stdout).toContain('::error::Unexpected planned move: unexpected:beta:create');
   });
 
-  it("hands the plan step's outputs to the move step", () => {
-    type Step = { id?: string; name?: string; env?: Record<string, string> };
-    const steps = (parseYaml(releaseWorkflow) as { jobs: { publish: { steps: Step[] } } }).jobs.publish.steps;
-    const planAt = steps.findIndex((step) => step.name === 'Plan the channel branch moves');
-    const moveAt = steps.findIndex((step) => step.name === 'Move the channel branches');
-    expect(steps[planAt]?.id).toBe('channel-plan');
-    expect(moveAt).toBe(planAt + 1);
-    expect(steps[moveAt]?.env).toEqual({
-      GH_TOKEN: '${{ secrets.CHANNEL_BRANCH_TOKEN }}',
-      MOVES: '${{ steps.channel-plan.outputs.moves }}',
-      PLAN_FAILED: '${{ steps.channel-plan.outputs.failed }}',
+  it("hands the plan step's outputs to the channel-branches job", () => {
+    type Step = { id?: string; name?: string; env?: Record<string, string>; uses?: string; with?: object };
+    type Job = { needs?: string; environment?: string; permissions?: object; outputs?: object; steps: Step[] };
+    const jobs = (parseYaml(releaseWorkflow) as { jobs: Record<string, Job> }).jobs;
+    const plan = jobs.publish.steps.find((step) => step.name === 'Plan the channel branch moves');
+    expect(plan?.id).toBe('channel-plan');
+    expect(jobs.publish.steps.at(-1)).toBe(plan);
+    expect(jobs.publish.outputs).toEqual({
+      channel_moves: '${{ steps.channel-plan.outputs.moves }}',
+      channel_failed: '${{ steps.channel-plan.outputs.failed }}',
+    });
+    const job = jobs['channel-branches'];
+    expect(job.needs).toBe('publish');
+    expect(job.environment).toBe('channel-branches');
+    expect(job.permissions).toEqual({});
+    // No checkout and no repository code: the App mint, then the API calls.
+    expect(job.steps.map((step) => step.name)).toEqual([
+      'Mint the channel branch App token',
+      'Move the channel branches',
+    ]);
+    expect(job.steps[0]).toMatchObject({
+      id: 'app',
+      uses: expect.stringMatching(/^actions\/create-github-app-token@[0-9a-f]{40}$/),
+    });
+    expect(job.steps[1].env).toEqual({
+      GH_TOKEN: '${{ steps.app.outputs.token }}',
+      MOVES: '${{ needs.publish.outputs.channel_moves }}',
+      PLAN_FAILED: '${{ needs.publish.outputs.channel_failed }}',
       RELEASE_VERSION: '${{ inputs.version }}',
       TARGET_SHA: '${{ inputs.target_sha }}',
     });
     expect(planScript).toContain('echo "moves=${MOVES# }" >> "$GITHUB_OUTPUT"');
     expect(planScript).toContain('echo "failed=${FAILED# }" >> "$GITHUB_OUTPUT"');
+  });
+
+  it('moves nothing when the published tag names another commit', { timeout: 30_000 }, () => {
+    const f = fixture({ existing: ['stable'] });
+    const result = run(f, { tagCommit: 'f'.repeat(40) });
+    expect(result.status).toBe(1);
+    expect(result.calls).toEqual([]);
+    expect(result.lookups).toEqual([
+      'api repos/nanocoai/nanoclaw/git/ref/tags/v2026.11.0 --jq .object.type + " " + .object.sha',
+      'api repos/nanocoai/nanoclaw/git/tags/tagobject --jq .object.sha',
+    ]);
+    expect(result.stdout).toContain(`::error::Tag v2026.11.0 does not point at ${f.target}`);
   });
 });

@@ -141,6 +141,23 @@ jobs:
             exit 1
           fi
 
+          # The channel-branches job holds the bypass App's key. It needs no reviewers, since it
+          # runs only after the approved publish job, but it must allow main alone, so no other
+          # branch's workflow can mint the token.
+          if ! gh api "repos/${GITHUB_REPOSITORY}/environments/channel-branches" > "$RUNNER_TEMP/channel-environment.json"; then
+            echo "::error::Create the channel-branches environment (main only) before publishing."
+            exit 1
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/environments/channel-branches/deployment-branch-policies" \
+            > "$RUNNER_TEMP/channel-branch-policies.json"
+          if ! jq -e '.can_admins_bypass == false and .deployment_branch_policy.protected_branches == false and .deployment_branch_policy.custom_branch_policies == true' \
+            "$RUNNER_TEMP/channel-environment.json" >/dev/null ||
+            ! jq -e '.total_count == 1 and any(.branch_policies[]; .name == "main" and (.type // "branch") == "branch")' \
+              "$RUNNER_TEMP/channel-branch-policies.json" >/dev/null; then
+            echo "::error::The channel-branches environment must allow exactly the main branch and prevent admin bypass."
+            exit 1
+          fi
+
       - name: Verify main protects the release workflow
         if: ${{ !contains(inputs.version, '-') }}
         env:
@@ -233,6 +250,9 @@ jobs:
     permissions:
       actions: read
       contents: write
+    outputs:
+      channel_moves: ${{ steps.channel-plan.outputs.moves }}
+      channel_failed: ${{ steps.channel-plan.outputs.failed }}
     steps:
       # First step, before checkout: nothing from the target commit runs until it passes.
       - name: Check stable publish approval
@@ -463,9 +483,8 @@ jobs:
       # stable and beta are the branches a new install is cloned from
       # (`git clone --branch stable`). Each moves only to its channel's newest tag,
       # and only forward: the API refuses an update that is not a fast-forward.
-      # Last, after the release is out: a failed move still fails the job; rerun publish to retry it.
-      # Two steps: earlier steps ran target code, so the step that runs code from
-      # disk gets no token, and the step with the token only calls the API.
+      # Last, after the release is out. The moves themselves run in the channel-branches
+      # job: this runner already ran target code, so nothing on it gets the bypass token.
       - name: Plan the channel branch moves
         id: channel-plan
         env:
@@ -509,20 +528,51 @@ jobs:
           echo "moves=${MOVES# }" >> "$GITHUB_OUTPUT"
           echo "failed=${FAILED# }" >> "$GITHUB_OUTPUT"
 
+  # A fresh runner that runs no code from the repository: it gets the plan as
+  # outputs from publish, and is the only place the ruleset-bypass token exists.
+  # Its environment has no reviewers (publish already had its approval) and
+  # allows main only; the verify job checks both.
+  channel-branches:
+    if: inputs.mode == 'publish'
+    needs: publish
+    runs-on: ubuntu-26.04
+    environment: channel-branches
+    permissions: {}
+    steps:
+      # stable and beta's rulesets let only organisation admins and the channel
+      # App move them. Without the App the move step prints the push for an
+      # admin to run and fails the job; a failed mint fails it here.
+      - name: Mint the channel branch App token
+        id: app
+        if: vars.CHANNEL_BRANCH_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.CHANNEL_BRANCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CHANNEL_BRANCH_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       - name: Move the channel branches
         env:
-          # A ruleset lets only organisation admins and listed apps move these
-          # branches, and the default token is neither. Without this secret (an
-          # app token, set in both release environments) the step fails after
-          # printing the push for an admin to run instead.
-          GH_TOKEN: ${{ secrets.CHANNEL_BRANCH_TOKEN }}
-          MOVES: ${{ steps.channel-plan.outputs.moves }}
-          PLAN_FAILED: ${{ steps.channel-plan.outputs.failed }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          MOVES: ${{ needs.publish.outputs.channel_moves }}
+          PLAN_FAILED: ${{ needs.publish.outputs.channel_failed }}
           RELEASE_VERSION: ${{ inputs.version }}
           TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           set -euo pipefail
           FAILED="${PLAN_FAILED:+ $PLAN_FAILED}"
+          # Move only to the commit the published tag names, read back from GitHub.
+          if [ -n "$MOVES" ] && [ -n "${GH_TOKEN:-}" ]; then
+            TAG=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}" --jq '.object.type + " " + .object.sha') || TAG=""
+            if [ "${TAG%% *}" = tag ]; then
+              TAG="commit $(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG#* }" --jq '.object.sha')" || TAG=""
+            fi
+            if [ "$TAG" != "commit $TARGET_SHA" ]; then
+              echo "::error::Tag v${RELEASE_VERSION} does not point at ${TARGET_SHA} (got: ${TAG:-no tag}). No branch was moved."
+              echo "- Channel branches NOT moved: tag \`v${RELEASE_VERSION}\` does not point at \`${TARGET_SHA}\`." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          fi
           for MOVE in $MOVES; do
             BRANCH=${MOVE%%:*}
             # The plan came from a step that ran code from disk: take only what it may ask for.
@@ -539,7 +589,7 @@ jobs:
             fi
             # A failure, not a warning: a stale branch hands new installs old code, and only a red job gets seen.
             if [ -z "${GH_TOKEN:-}" ]; then
-              echo "::error::Branch $BRANCH was not moved: CHANNEL_BRANCH_TOKEN is not set. An admin must push it."
+              echo "::error::Branch $BRANCH was not moved: no channel-branch App token. An admin must push it."
               echo "- Branch \`${BRANCH}\` NOT moved. An admin must run: \`git push origin ${TARGET_SHA}:refs/heads/${BRANCH}\`" >> "$GITHUB_STEP_SUMMARY"
               FAILED="$FAILED $BRANCH"
               continue
