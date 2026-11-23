@@ -105,6 +105,7 @@ source "$PROJECT_ROOT/setup/lib/update-channel.sh"
 REQUESTED_CHANNEL="${NANOCLAW_UPDATE_CHANNEL:-}"
 _take_channel=false
 _empty_channel=false
+_bad_channel=
 for arg in "$@"; do
   if [ "$_take_channel" = true ]; then
     REQUESTED_CHANNEL="$arg"
@@ -120,15 +121,26 @@ for arg in "$@"; do
   else
     continue
   fi
-  # An empty value would read as "not set" here and only fail in setup, after
-  # bootstrap has installed Node and the packages. Setup rejects any one of them.
-  [ -n "${REQUESTED_CHANNEL//[[:space:]]/}" ] || _empty_channel=true
+  # Setup rejects any one bad value, but only after bootstrap has installed Node
+  # and the packages, so check each one here, not just the last.
+  if [ -z "${REQUESTED_CHANNEL//[[:space:]]/}" ]; then
+    _empty_channel=true
+  else
+    case "$(printf '%s' "$REQUESTED_CHANNEL" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr 'A-Z' 'a-z')" in
+      stable | beta | edge) ;;
+      *) _bad_channel=$REQUESTED_CHANNEL ;;
+    esac
+  fi
 done
 if [ "$_take_channel" = true ] || [ "$_empty_channel" = true ]; then
   echo "error: Missing value for --update-channel"
   exit 1
 fi
-unset _take_channel _empty_channel
+if [ -n "$_bad_channel" ]; then
+  echo "error: unknown update channel \"$_bad_channel\". Use one of: stable, beta, edge"
+  exit 1
+fi
+unset _take_channel _empty_channel _bad_channel
 
 read -r CHANNEL_ACTION CHANNEL_NAME <<<"$(update_channel_decide "$PROJECT_ROOT" "$REQUESTED_CHANNEL")"
 CHANNEL_NOTE=""

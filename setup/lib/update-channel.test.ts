@@ -207,6 +207,8 @@ describe('update channel decision', () => {
     fs.writeFileSync(path.join(install, 'data', 'setup-mutation.lock'), owner);
     fs.writeFileSync(path.join(install, 'data', 'setup-mutation.lock.0123.tmp'), owner);
     expect(decide(install)).toBe('record beta');
+    fs.writeFileSync(path.join(install, 'data', 'setup-mutation.lock.backup'), '');
+    expect(decide(install)).toBe('none');
   });
 
   it('leaves the channel to a setup run that still holds the lock', () => {
@@ -456,6 +458,7 @@ describe.skipIf(process.getuid?.() === 0)('nanoclaw.sh', { timeout: 30_000 }, ()
     [['--update-channel='], 'Missing value for --update-channel'],
     [['--update-channel', ' '], 'Missing value for --update-channel'],
     [['--update-channel=', '--update-channel', 'beta'], 'Missing value for --update-channel'],
+    [['--update-channel', 'nightly', '--update-channel=beta'], 'unknown update channel "nightly"'],
   ])('stops on %j before installing anything', (args, message) => {
     const { install, run } = entrypointClone('main');
     const result = run(args);
