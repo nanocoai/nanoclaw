@@ -464,13 +464,11 @@ jobs:
       # (`git clone --branch stable`). Each moves only to its channel's newest tag,
       # and only forward: the API refuses an update that is not a fast-forward.
       # Last, after the release is out: a failed move still fails the job; rerun publish to retry it.
-      - name: Move the channel branches
+      # Two steps: earlier steps ran target code, so the step that runs code from
+      # disk gets no token, and the step with the token only calls the API.
+      - name: Plan the channel branch moves
+        id: channel-plan
         env:
-          # A ruleset lets only organisation admins and listed apps move these
-          # branches, and the default token is neither. Without this secret (an
-          # app token, set in both release environments) the step fails after
-          # printing the push for an admin to run instead.
-          GH_TOKEN: ${{ secrets.CHANNEL_BRANCH_TOKEN }}
           RELEASE_VERSION: ${{ inputs.version }}
           TARGET_SHA: ${{ inputs.target_sha }}
         run: |
@@ -481,6 +479,7 @@ jobs:
           if [ -z "$BRANCHES" ]; then
             echo "- Channel branches: unchanged, v${RELEASE_VERSION} is not the newest tag of a channel" >> "$GITHUB_STEP_SUMMARY"
           fi
+          MOVES=""
           FAILED=""
           for BRANCH in $BRANCHES; do
             # Exit 2 is the only "no such branch": an auth or network failure must not fall through to creating it.
@@ -505,6 +504,35 @@ jobs:
               echo "- Branch \`beta\` NOT created: v${RELEASE_VERSION} predates setup/lib/update-channel.sh. The next release that has it creates the branch." >> "$GITHUB_STEP_SUMMARY"
               continue
             fi
+            if [ "$FOUND" -eq 0 ]; then MOVES="$MOVES ${BRANCH}:update"; else MOVES="$MOVES ${BRANCH}:create"; fi
+          done
+          echo "moves=${MOVES# }" >> "$GITHUB_OUTPUT"
+          echo "failed=${FAILED# }" >> "$GITHUB_OUTPUT"
+
+      - name: Move the channel branches
+        env:
+          # A ruleset lets only organisation admins and listed apps move these
+          # branches, and the default token is neither. Without this secret (an
+          # app token, set in both release environments) the step fails after
+          # printing the push for an admin to run instead.
+          GH_TOKEN: ${{ secrets.CHANNEL_BRANCH_TOKEN }}
+          MOVES: ${{ steps.channel-plan.outputs.moves }}
+          PLAN_FAILED: ${{ steps.channel-plan.outputs.failed }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          FAILED="${PLAN_FAILED:+ $PLAN_FAILED}"
+          for MOVE in $MOVES; do
+            BRANCH=${MOVE%%:*}
+            # The plan came from a step that ran code from disk: take only what it may ask for.
+            case "$MOVE" in
+              stable:update | stable:create | beta:update | beta:create) ;;
+              *)
+                echo "::error::Unexpected planned move: $MOVE"
+                FAILED="$FAILED $MOVE"
+                continue
+                ;;
+            esac
             # A failure, not a warning: a stale branch hands new installs old code, and only a red job gets seen.
             if [ -z "${GH_TOKEN:-}" ]; then
               echo "::error::Branch $BRANCH was not moved: CHANNEL_BRANCH_TOKEN is not set. An admin must push it."
@@ -512,13 +540,13 @@ jobs:
               FAILED="$FAILED $BRANCH"
               continue
             fi
-            if [ "$FOUND" -eq 0 ]; then
-              MOVE=(-X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" -f sha="$TARGET_SHA" -F force=false)
+            if [ "${MOVE#*:}" = update ]; then
+              ARGS=(-X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" -f sha="$TARGET_SHA" -F force=false)
             else
-              MOVE=(-X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/heads/${BRANCH}" -f sha="$TARGET_SHA")
+              ARGS=(-X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/heads/${BRANCH}" -f sha="$TARGET_SHA")
             fi
             # One branch failing must not skip the other.
-            if ! gh api "${MOVE[@]}" >/dev/null; then
+            if ! gh api "${ARGS[@]}" >/dev/null; then
               echo "::error::Branch $BRANCH was not moved to $TARGET_SHA, see the API error above."
               echo "- Branch \`${BRANCH}\` NOT moved: the API refused it, see the step log." >> "$GITHUB_STEP_SUMMARY"
               FAILED="$FAILED $BRANCH"

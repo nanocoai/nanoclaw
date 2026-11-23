@@ -1015,13 +1015,17 @@ describe('release workflow order check', () => {
 
 describe('release workflow channel branch step', () => {
   const lines = releaseWorkflow.split('\n');
-  const name = lines.findIndex((line) => line.includes('- name: Move the channel branches'));
-  const runAt = lines.findIndex((line, i) => i > name && line.trim() === 'run: |');
-  const end = lines.findIndex((line, i) => i > runAt && line.trim() !== '' && !line.startsWith('          '));
-  const script = lines
-    .slice(runAt + 1, end === -1 ? undefined : end)
-    .map((line) => line.trim())
-    .join('\n');
+  const stepScript = (step: string) => {
+    const name = lines.findIndex((line) => line.includes(`- name: ${step}`));
+    const runAt = lines.findIndex((line, i) => i > name && line.trim() === 'run: |');
+    const end = lines.findIndex((line, i) => i > runAt && line.trim() !== '' && !line.startsWith('          '));
+    return lines
+      .slice(runAt + 1, end === -1 ? undefined : end)
+      .map((line) => line.trim())
+      .join('\n');
+  };
+  const planScript = stepScript('Plan the channel branch moves');
+  const moveScript = stepScript('Move the channel branches');
   const dirs: string[] = [];
   afterEach(() => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -1074,30 +1078,58 @@ describe('release workflow channel branch step', () => {
     return { bin, checkout, runnerTemp, target };
   }
 
-  function run(f: ReturnType<typeof fixture>, options: { token?: string; ghFail?: string; lookupFail?: string } = {}) {
+  /** Runs the plan step, then the move step with the plan's outputs, as the job does. */
+  function run(
+    f: ReturnType<typeof fixture>,
+    options: { token?: string; ghFail?: string; lookupFail?: string; moves?: string } = {},
+  ) {
     const summary = path.join(f.runnerTemp, 'summary.md');
     const ghLog = path.join(f.runnerTemp, 'gh.log');
+    const output = path.join(f.runnerTemp, 'output');
     writeFileSync(summary, '');
     writeFileSync(ghLog, '');
-    const result = spawnSync('bash', ['-c', script], {
+    writeFileSync(output, '');
+    const env = {
+      ...process.env,
+      PATH: `${f.bin}:${process.env.PATH}`,
+      GH_FAIL: options.ghFail ?? '',
+      GH_LOG: ghLog,
+      LOOKUP_FAIL: options.lookupFail ?? '',
+      GITHUB_REPOSITORY: 'nanocoai/nanoclaw',
+      GITHUB_STEP_SUMMARY: summary,
+      TARGET_SHA: f.target,
+    };
+    // The plan step gets no token at all.
+    delete env.GH_TOKEN;
+    const plan = spawnSync('bash', ['-c', planScript], {
       cwd: f.checkout,
       encoding: 'utf8',
+      env: { ...env, GITHUB_OUTPUT: output, RELEASE_VERSION: '2026.11.0', RUNNER_TEMP: f.runnerTemp },
+    });
+    const outputs = Object.fromEntries(
+      readFileSync(output, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+    );
+    const move = spawnSync('bash', ['-c', moveScript], {
+      cwd: path.dirname(f.checkout),
+      encoding: 'utf8',
       env: {
-        ...process.env,
-        PATH: `${f.bin}:${process.env.PATH}`,
+        ...env,
         GH_TOKEN: options.token ?? 'app-token',
-        GH_FAIL: options.ghFail ?? '',
-        GH_LOG: ghLog,
-        LOOKUP_FAIL: options.lookupFail ?? '',
-        GITHUB_REPOSITORY: 'nanocoai/nanoclaw',
-        GITHUB_STEP_SUMMARY: summary,
-        RELEASE_VERSION: '2026.11.0',
-        RUNNER_TEMP: f.runnerTemp,
-        TARGET_SHA: f.target,
+        MOVES: options.moves ?? outputs.moves ?? '',
+        PLAN_FAILED: outputs.failed ?? '',
       },
     });
     const calls = readFileSync(ghLog, 'utf8').split('\n').filter(Boolean);
-    return { status: result.status, stdout: result.stdout, summary: readFileSync(summary, 'utf8'), calls };
+    return {
+      planStatus: plan.status,
+      status: move.status,
+      stdout: plan.stdout + move.stdout,
+      summary: readFileSync(summary, 'utf8'),
+      calls,
+    };
   }
 
   const patch = (branch: string, sha: string) =>
@@ -1172,5 +1204,30 @@ describe('release workflow channel branch step', () => {
     expect(manual.stdout).toContain('::error::Channel branches not moved: stable.');
     expect(manual.summary).toContain(`git push origin ${f.target}:refs/heads/stable`);
     expect(manual.summary).not.toContain('refs/heads/beta');
+  });
+
+  it('plans without the token and moves without running code from disk', { timeout: 30_000 }, () => {
+    const f = fixture({ existing: ['stable'] });
+    const result = run(f);
+    expect(result.planStatus).toBe(0);
+    expect(result.calls).toEqual([patch('stable', f.target), post('beta', f.target)]);
+    const plan = releaseWorkflow.slice(
+      releaseWorkflow.indexOf('- name: Plan the channel branch moves'),
+      releaseWorkflow.indexOf('- name: Move the channel branches'),
+    );
+    expect(plan).not.toContain('secrets.');
+    expect(plan).not.toContain('GH_TOKEN');
+    // Only `gh api` runs; `git push` appears in the admin's message text alone.
+    const commands = moveScript.split('\n').filter((line) => !line.startsWith('echo ') && !line.startsWith('#'));
+    expect(commands.join('\n')).not.toMatch(/\b(node|git|pnpm|npx|bash|sh|source)\s/);
+  });
+
+  it('refuses a planned move it does not expect', { timeout: 30_000 }, () => {
+    const f = fixture();
+    const result = run(f, { moves: 'main:update stable:create' });
+    expect(result.status).toBe(1);
+    expect(result.calls).toEqual([post('stable', f.target)]);
+    expect(result.stdout).toContain('::error::Unexpected planned move: main:update');
+    expect(result.stdout).toContain('::error::Channel branches not moved: main:update.');
   });
 });
