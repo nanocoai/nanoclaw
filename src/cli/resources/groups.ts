@@ -673,8 +673,9 @@ registerResource({
         // still granted only if the matched allowlist root allows read-write.
         // Only `--rw` requests write. `--readonly false` used to store read-only (the
         // string "false" was truthy), so it must not quietly start granting write.
-        const readWrite = parseMountFlag(args, 'rw') === true;
-        const readOnly = parseMountFlag(args, 'ro') === true || parseMountFlag(args, 'readonly') === true;
+        const [ro, rw, readonlyArg] = (['ro', 'rw', 'readonly'] as const).map((f) => parseMountFlag(args, f));
+        const readWrite = rw === true;
+        const readOnly = ro === true || readonlyArg === true;
         if (readWrite && readOnly) throw new Error('--ro (or --readonly) and --rw are mutually exclusive');
 
         const mount: AdditionalMountConfig = {

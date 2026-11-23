@@ -590,6 +590,23 @@ describe('groups config (host-only)', () => {
       expect(await mountsOf()).toEqual([{ hostPath: '/data/shared', containerPath: 'shared' }]);
     });
 
+    it('an unchanged re-add writes nothing', async () => {
+      expect((await addMount('same-1', { rw: true })).ok).toBe(true);
+      await getDb().run(
+        `UPDATE container_configs SET updated_at = '2000-01-01T00:00:00.000Z' WHERE agent_group_id = ?`,
+        GID,
+      );
+      const res = await addMount('same-2', { rw: true });
+      expect(res.ok && 'updated' in (res.data as object)).toBe(true);
+      expect((await getContainerConfig(GID))!.updated_at).toBe('2000-01-01T00:00:00.000Z');
+    });
+
+    it('validates every alias even when another one is valid', async () => {
+      const res = await addMount('alias-1', { ro: true, readonly: 'yes' });
+      expect(res.ok).toBe(false);
+      expect(await mountsOf()).toEqual([]);
+    });
+
     it('accepts the boolean spellings other CLI flags accept', async () => {
       expect((await addMount('spell-1', { rw: 'true' })).ok).toBe(true);
       expect((await mountsOf())[0].readonly).toBe(false);
