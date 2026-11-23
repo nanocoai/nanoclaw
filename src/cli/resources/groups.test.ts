@@ -560,6 +560,35 @@ describe('groups config (host-only)', () => {
       expect(errorMessage(res)).toBe('--ro and --rw are mutually exclusive');
       expect(await mountsOf()).toEqual([]);
     });
+
+    it('a re-add without a flag resets a read-write mount to the read-only default and reports updated', async () => {
+      const first = await addMount('down-1', { rw: true });
+      expect(first.ok && 'added' in (first.data as object)).toBe(true);
+
+      const res = await addMount('down-2', {});
+      expect(res.ok).toBe(true);
+      expect(res.ok && 'updated' in (res.data as object)).toBe(true);
+      expect(await mountsOf()).toEqual([{ hostPath: '/data/shared', containerPath: 'shared' }]);
+    });
+
+    // The argv parser turns `--ro yes` into the string "yes"; a loose truthy
+    // check let `--ro yes --rw` slip past the conflict check and store read-write.
+    it.each([
+      ['--ro yes --rw', { ro: 'yes', rw: true }],
+      ['--rw yes', { rw: 'yes' }],
+    ])('rejects a non-boolean value (%s) and writes nothing', async (_label, extra) => {
+      const res = await addMount('strict-1', extra);
+      expect(res.ok).toBe(false);
+      expect(errorMessage(res)).toMatch(/is a flag; pass it on its own/);
+      expect(await mountsOf()).toEqual([]);
+    });
+
+    it('accepts the boolean spellings other CLI flags accept', async () => {
+      expect((await addMount('spell-1', { rw: 'true' })).ok).toBe(true);
+      expect((await mountsOf())[0].readonly).toBe(false);
+      expect((await addMount('spell-2', { ro: '1' })).ok).toBe(true);
+      expect((await mountsOf())[0].readonly).toBe(true);
+    });
   });
 
   describe("--speed validates against the tiers the group's provider declares", () => {

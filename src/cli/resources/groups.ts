@@ -58,6 +58,19 @@ function parseTimezoneFlag(value: unknown): string | null | undefined {
 }
 
 /**
+ * The argv parser turns `--ro yes` into the string "yes". A loose truthy check let
+ * `--ro yes --rw` pass the conflict check and store read-write, so accept only the
+ * boolean spellings the other CLI flags accept and reject anything else.
+ */
+function parseMountFlag(args: Record<string, unknown>, name: 'ro' | 'rw' | 'readonly'): boolean | undefined {
+  const v = args[name];
+  if (v === undefined) return undefined;
+  if (v === true || v === 'true' || v === '1') return true;
+  if (v === false || v === 'false' || v === '0') return false;
+  throw new Error(`--${name} is a flag; pass it on its own, without a value (got "${String(v)}")`);
+}
+
+/**
  * `--speed` vocabulary is provider-declared (`inference.speedTiers` on the host
  * contract). Core only checks membership and stores the name; `""` (clear) is
  * handled by the caller and never reaches here.
@@ -658,14 +671,17 @@ registerResource({
         // `--rw` is the explicit opt-in that stores `readonly: false` — the only
         // value the mount-security gate accepts as a read-write *request*, and
         // still granted only if the matched allowlist root allows read-write.
-        const readWrite = args.rw === true || args.readonly === false;
-        const readOnly = args.ro === true || args.readonly === true;
+        const ro = parseMountFlag(args, 'ro');
+        const rw = parseMountFlag(args, 'rw');
+        const readonlyArg = parseMountFlag(args, 'readonly');
+        const readWrite = rw === true || readonlyArg === false;
+        const readOnly = ro === true || readonlyArg === true;
         if (readWrite && readOnly) throw new Error('--ro and --rw are mutually exclusive');
 
         const mount: AdditionalMountConfig = {
           hostPath,
           containerPath,
-          ...(readWrite ? { readonly: false } : args.ro || args.readonly ? { readonly: true } : {}),
+          ...(readWrite ? { readonly: false } : readOnly ? { readonly: true } : {}),
         };
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
         const at = existing.findIndex((m) => m.hostPath === hostPath && m.containerPath === containerPath);
