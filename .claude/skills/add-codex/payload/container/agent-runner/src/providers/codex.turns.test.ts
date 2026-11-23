@@ -546,12 +546,17 @@ describe('CodexProvider active turns', () => {
     delta('child-thread', 'child-turn', 'child ');
     delta('thread-1', 'turn-1', 'answer');
     fake.notify('item/completed', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: { type: 'agentMessage', text: 'parent answer', phase: 'final_answer' },
+    });
+    fake.notify('item/completed', {
       threadId: 'child-thread',
       turnId: 'child-turn',
       item: { type: 'agentMessage', text: 'child answer' },
     });
     query.end();
-    // Empty items, so the result can only come from the parent's own deltas.
+    // The terminal items are empty and the child completed its message last.
     fake.notify('turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } });
     await collect;
 
@@ -635,6 +640,51 @@ describe('CodexProvider active turns', () => {
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'first message' }]);
   });
 
+  describe('normal completion', () => {
+    const commentary = { type: 'agentMessage', phase: 'commentary', text: 'Checking the sample.' };
+    const answer = { type: 'agentMessage', phase: 'final_answer', text: 'The sample is fine.' };
+    const revised = { type: 'agentMessage', text: 'I found a correction.' };
+    const partial = { type: 'agentMessage', phase: 'partial_answer', text: 'The sample' };
+    const blank = { type: 'agentMessage', phase: 'final_answer', text: '  ' };
+
+    for (const { name, streamed, items, expected } of [
+      { name: 'unfinished text alone', streamed: [], items: [], expected: null },
+      { name: 'streamed commentary alone', streamed: [commentary], items: [], expected: null },
+      { name: 'commentary in terminal items alone', streamed: [], items: [commentary], expected: null },
+      { name: 'a streamed answer then commentary', streamed: [answer, commentary], items: [], expected: answer.text },
+      { name: 'streamed commentary then an answer', streamed: [commentary, answer], items: [], expected: answer.text },
+      {
+        name: 'the last eligible answer in terminal items',
+        streamed: [answer],
+        items: [commentary, answer, revised, commentary],
+        expected: revised.text,
+      },
+      {
+        name: 'a streamed answer with only progress, partial, and blank terminal items',
+        streamed: [answer],
+        items: [commentary, partial, blank],
+        expected: answer.text,
+      },
+    ]) {
+      it(name, async () => {
+        const fake = createFakeCodexRuntime();
+        const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+        const events: ProviderEvent[] = [];
+        query.end();
+        const collect = collectEvents(query.events, events);
+        await waitFor(() => fake.startCalls.length === 1);
+
+        const ids = { threadId: 'thread-1', turnId: 'turn-1' };
+        fake.notify('item/agentMessage/delta', { ...ids, itemId: 'm1', delta: 'Starting' });
+        for (const item of streamed) fake.notify('item/completed', { ...ids, item });
+        fake.notify('turn/completed', { threadId: ids.threadId, turn: { id: ids.turnId, status: 'completed', items } });
+        await collect;
+
+        expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: expected }]);
+      });
+    }
+  });
+
   // Codex counts only a final answer or an unphased message as the turn's answer.
   for (const { phase, text, result } of [
     { phase: 'final_answer', text: 'The sample is fine.', result: 'The sample is fine.' },
@@ -707,6 +757,36 @@ describe('CodexProvider active turns', () => {
     ]);
   });
 
+  it.each([null, 'The sample is fine.'])(
+    'keeps result %s when only commentary arrives after a retry',
+    async (answer) => {
+      const fake = createFakeCodexRuntime();
+      const query = createCodexProvider({}, fake.runtime).query({ prompt: 'prompt', cwd: '/workspace/agent' });
+      const events: ProviderEvent[] = [];
+      query.end();
+      const collect = collectEvents(query.events, events);
+      await waitFor(() => fake.startCalls.length === 1);
+
+      const ids = { threadId: 'thread-1', turnId: 'turn-1' };
+      if (answer !== null) {
+        fake.notify('item/completed', { ...ids, item: { type: 'agentMessage', text: answer, phase: 'final_answer' } });
+      }
+      fake.notify('error', { ...ids, error: { message: 'stream disconnected' }, willRetry: true });
+      await waitFor(() => events.some((event) => event.type === 'progress'));
+      fake.notify('item/completed', {
+        ...ids,
+        item: { type: 'agentMessage', text: 'Checking again.', phase: 'commentary' },
+      });
+      fake.notify('turn/completed', {
+        threadId: ids.threadId,
+        turn: { id: ids.turnId, status: 'completed', items: [] },
+      });
+      await collect;
+
+      expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: answer }]);
+    },
+  );
+
   it("leaves the parent's text alone when a sub-agent's stream error is retried", async () => {
     const fake = createFakeCodexRuntime();
     const provider = createCodexProvider({}, fake.runtime);
@@ -715,11 +795,10 @@ describe('CodexProvider active turns', () => {
 
     const collect = collectEvents(query.events, events);
     await waitFor(() => fake.startCalls.length === 1);
-    fake.notify('item/agentMessage/delta', {
+    fake.notify('item/completed', {
       threadId: 'thread-1',
       turnId: 'turn-1',
-      itemId: 'm1',
-      delta: 'parent answer',
+      item: { type: 'agentMessage', text: 'parent answer', phase: 'final_answer' },
     });
     fake.notify('error', {
       threadId: 'child-thread',

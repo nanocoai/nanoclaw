@@ -280,10 +280,24 @@ async function* runOneTurn(
   onImageSaved: (savedPath: string, threadId: string, turnId: string) => void,
 ): AsyncGenerator<ProviderEvent> {
   const state: { error: Error | null } = { error: null };
-  let resultText = '';
-  let completedText = '';
+  let answerText: string | null = null;
   let turnDone = false;
   let turnId: string | null = null;
+
+  // Codex's turn summary keeps the last completed final or unphased message.
+  // Deltas may be unfinished, and a later progress update can follow the answer.
+  const rememberAnswer = (item: unknown): void => {
+    if (!item || typeof item !== 'object') return;
+    const { type, phase, text } = item as { type?: unknown; phase?: unknown; text?: unknown };
+    if (
+      type === 'agentMessage' &&
+      (phase == null || phase === 'final_answer') &&
+      typeof text === 'string' &&
+      text.trim()
+    ) {
+      answerText = text;
+    }
+  };
 
   // A finished turn can no longer absorb steered input: codex's turn/steer
   // against a completed turn resolves as a no-op, so a follow-up routed there
@@ -343,22 +357,9 @@ async function* runOneTurn(
         }
         break;
       }
-      case 'item/agentMessage/delta': {
-        const delta = params.delta as string | undefined;
-        if (delta) resultText += delta;
+      case 'item/completed':
+        rememberAnswer(params.item);
         break;
-      }
-      case 'item/completed': {
-        const item = params.item as { type?: string; text?: string; phase?: string | null } | undefined;
-        if (item?.type === 'agentMessage' && item.text) {
-          resultText = item.text;
-          // Codex's own rule for a turn's answer (app-server thread_state.rs):
-          // a final answer or an unphased message with text. Commentary such as
-          // "Checking the sample." must not survive a retry as the reply.
-          if ((item.phase == null || item.phase === 'final_answer') && item.text.trim()) completedText = item.text;
-        }
-        break;
-      }
       case 'thread/status/changed': {
         const status = params.status as string | undefined;
         if (status) buffer.push({ type: 'progress', message: `status: ${status}` });
@@ -368,10 +369,8 @@ async function* runOneTurn(
         const err = params.error as { message?: string; additionalDetails?: string | null } | undefined;
         const msg = [err?.message, err?.additionalDetails].filter(Boolean).join(': ') || 'Codex turn failed';
         // willRetry: Codex retries a transient stream error itself and the
-        // turn goes on, so it must not end the turn. Text the broken stream
-        // left unfinished is dropped: only completed messages may be the result.
+        // turn goes on, so it must not end the turn.
         if (params.willRetry === true) {
-          resultText = completedText;
           buffer.push({ type: 'progress', message: `Codex retrying: ${msg}` });
           break;
         }
@@ -387,16 +386,15 @@ async function* runOneTurn(
               items?: unknown[];
             }
           | undefined;
-        const agentMessage = turn?.items
-          ?.filter((item): item is { type: string; text?: string } => typeof item === 'object' && item !== null)
-          .find((item) => item.type === 'agentMessage' && item.text);
-        if (agentMessage?.text) resultText = agentMessage.text;
         if (turn?.error) {
           const msg =
             [turn.error.message, turn.error.additionalDetails].filter(Boolean).join(': ') || 'Codex turn failed';
           state.error = new Error(msg);
         } else if (turn?.status !== 'completed') {
           state.error = new Error(turn?.status === 'interrupted' ? 'Codex turn interrupted' : 'Codex turn failed');
+        } else {
+          // The terminal notification can omit items already seen on the stream.
+          for (const item of turn.items ?? []) rememberAnswer(item);
         }
         finishTurn();
         break;
@@ -467,7 +465,7 @@ async function* runOneTurn(
       throw state.error;
     }
 
-    yield { type: 'result', text: resultText || null };
+    yield { type: 'result', text: answerText };
   } finally {
     clearTimeout(timer);
     clearActiveTurn();
