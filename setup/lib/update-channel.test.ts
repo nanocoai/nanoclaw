@@ -202,9 +202,19 @@ describe('update channel decision', () => {
     const install = clone(officialSeed(), 'beta');
     fs.mkdirSync(path.join(install, 'data'));
     fs.writeFileSync(path.join(install, 'data', 'install-id'), 'abc');
-    fs.writeFileSync(path.join(install, 'data', 'setup-mutation.lock'), '{}');
-    fs.writeFileSync(path.join(install, 'data', 'setup-mutation.lock.0123.tmp'), '{}');
+    // A pid no process has: the run that held the lock is gone.
+    const owner = JSON.stringify({ pid: 2 ** 22 + 1, nonce: 'n', started: 's' });
+    fs.writeFileSync(path.join(install, 'data', 'setup-mutation.lock'), owner);
+    fs.writeFileSync(path.join(install, 'data', 'setup-mutation.lock.0123.tmp'), owner);
     expect(decide(install)).toBe('record beta');
+  });
+
+  it('leaves the channel to a setup run that still holds the lock', () => {
+    const install = clone(officialSeed(), 'beta');
+    fs.mkdirSync(path.join(install, 'data'));
+    const owner = JSON.stringify({ pid: process.pid, nonce: 'n', started: 's' });
+    fs.writeFileSync(path.join(install, 'data', 'setup-mutation.lock'), owner);
+    expect(decide(install)).toBe('none');
   });
 
   it('does nothing outside a Git checkout', () => {
@@ -445,6 +455,7 @@ describe.skipIf(process.getuid?.() === 0)('nanoclaw.sh', { timeout: 30_000 }, ()
     [['--update-channel'], 'Missing value for --update-channel'],
     [['--update-channel='], 'Missing value for --update-channel'],
     [['--update-channel', ' '], 'Missing value for --update-channel'],
+    [['--update-channel=', '--update-channel', 'beta'], 'Missing value for --update-channel'],
   ])('stops on %j before installing anything', (args, message) => {
     const { install, run } = entrypointClone('main');
     const result = run(args);

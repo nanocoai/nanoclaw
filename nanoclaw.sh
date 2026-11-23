@@ -104,7 +104,7 @@ source "$PROJECT_ROOT/setup/lib/update-channel.sh"
 
 REQUESTED_CHANNEL="${NANOCLAW_UPDATE_CHANNEL:-}"
 _take_channel=false
-_channel_flag=false
+_empty_channel=false
 for arg in "$@"; do
   if [ "$_take_channel" = true ]; then
     REQUESTED_CHANNEL="$arg"
@@ -114,19 +114,21 @@ for arg in "$@"; do
     break
   elif [ "$arg" = "--update-channel" ]; then
     _take_channel=true
-    _channel_flag=true
+    continue
   elif [ "${arg#--update-channel=}" != "$arg" ]; then
     REQUESTED_CHANNEL="${arg#--update-channel=}"
-    _channel_flag=true
+  else
+    continue
   fi
+  # An empty value would read as "not set" here and only fail in setup, after
+  # bootstrap has installed Node and the packages. Setup rejects any one of them.
+  [ -n "${REQUESTED_CHANNEL//[[:space:]]/}" ] || _empty_channel=true
 done
-# An empty flag value would otherwise read as "not set" here and only fail in
-# setup, after bootstrap has installed Node and the packages.
-if [ "$_take_channel" = true ] || { [ "$_channel_flag" = true ] && [ -z "${REQUESTED_CHANNEL//[[:space:]]/}" ]; }; then
+if [ "$_take_channel" = true ] || [ "$_empty_channel" = true ]; then
   echo "error: Missing value for --update-channel"
   exit 1
 fi
-unset _take_channel _channel_flag
+unset _take_channel _empty_channel
 
 read -r CHANNEL_ACTION CHANNEL_NAME <<<"$(update_channel_decide "$PROJECT_ROOT" "$REQUESTED_CHANNEL")"
 CHANNEL_NOTE=""

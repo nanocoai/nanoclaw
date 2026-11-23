@@ -70,6 +70,10 @@ update_channel_decide() {
   # the channel it has. The install id and setup's lock files are only traces
   # of an earlier run that was stopped before it saved anything.
   if [ -n "$(ls -A "$root/data" 2>/dev/null | grep -v -e '^install-id$' -e '^setup-mutation\.lock')" ]; then echo none; return 0; fi
+  # A live lock owner is another setup run that will save its own channel.
+  local lock="$root/data/setup-mutation.lock" lock_pid=
+  [ -f "$lock" ] && lock_pid=$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$lock" 2>/dev/null || true)
+  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then echo none; return 0; fi
 
   [ "$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$root" && pwd -P)" ] || { echo none; return 0; }
   branch=$(git -C "$root" symbolic-ref --quiet --short HEAD 2>/dev/null) || { echo none; return 0; }
