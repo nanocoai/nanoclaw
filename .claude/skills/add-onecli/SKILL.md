@@ -1,0 +1,168 @@
+---
+name: add-onecli
+description: Install or refresh OneCLI as NanoClaw's gateway provider. Use when setup selects OneCLI, an existing OneCLI-backed install is migrated to the gateway seam, or its runtime, approval bridge, setup, and agent guidance must be restored from the in-tree package.
+---
+
+# Add OneCLI gateway
+
+This skill owns the full OneCLI integration. NanoClaw core supplies the generic gateway seam and existing skill engine.
+
+## Install the provider payload
+
+Copy the package's native adapter, tests, and agent guidance into their normal NanoClaw paths. NanoClaw core owns the approval workflow.
+
+```nc:copy
+payload/src/gateway-providers/onecli-files.ts -> src/gateway-providers/onecli-files.ts
+payload/src/gateway-providers/onecli-files.test.ts -> src/gateway-providers/onecli-files.test.ts
+payload/src/gateway-providers/onecli-chatgpt-stub.ts -> src/gateway-providers/onecli-chatgpt-stub.ts
+payload/src/gateway-providers/onecli-chatgpt-stub.test.ts -> src/gateway-providers/onecli-chatgpt-stub.test.ts
+payload/src/gateway-providers/onecli.ts -> src/gateway-providers/onecli.ts
+payload/src/gateway-providers/onecli-provider-credentials.ts -> src/gateway-providers/onecli-provider-credentials.ts
+payload/src/gateway-providers/onecli-provider-credentials.test.ts -> src/gateway-providers/onecli-provider-credentials.test.ts
+payload/src/gateway-providers/onecli.test.ts -> src/gateway-providers/onecli.test.ts
+payload/src/gateway-providers/onecli-install.test.ts -> src/gateway-providers/onecli-install.test.ts
+payload/container/skills/onecli-gateway/SKILL.md -> container/skills/onecli-gateway/SKILL.md
+payload/container/skills/onecli-gateway/instructions.md -> container/skills/onecli-gateway/instructions.md
+payload/docs/onecli-upgrades.md -> docs/onecli-upgrades.md
+```
+
+## Register once
+
+The provider file makes the only product registration call. It translates OneCLI sessions and native approval events into the generic contract.
+
+```nc:append to:src/gateway-providers/installed.ts
+import './onecli.js';
+```
+
+## Install the pinned SDK
+
+```nc:dep manager:pnpm
+@onecli-sh/sdk@2.2.1
+```
+
+## Configure the gateway
+
+The setup script safely reuses a healthy existing installation, installs the pinned local gateway when absent, or uses `NANOCLAW_ONECLI_API_HOST` and `NANOCLAW_ONECLI_API_TOKEN` for a remote gateway.
+
+This integration supports exactly the gateway version pinned in `.claude/skills/add-onecli/versions.json` (`onecli-gateway`, today 1.45.0; not the `versions.json` at the project root). It uses the agent grants API, which OneCLI added in 1.44; older gateways do not have it, and OneCLI 2.x is not supported. Setup reuses an existing gateway without checking its version: follow [Upgrading the OneCLI gateway](payload/docs/onecli-upgrades.md) to check it and to move it to the pin. The CLI (`onecli-cli`, which needs 2.9 or later for `onecli agents grants`) and SDK (`onecli-sdk`) have their own pins.
+
+```nc:run effect:external
+pnpm exec tsx .claude/skills/add-onecli/scripts/setup.ts
+```
+
+Setup gives OneCLI's database its own random password in `~/.onecli/.env`. A local gateway still on the compose default gets one in place: its data stays, and OneCLI restarts once. To do only that on an existing install, run `pnpm exec tsx .claude/skills/add-onecli/scripts/postgres-password.ts`.
+
+## Provider credentials
+
+Provider skills such as `/add-opencode` store model credentials here through the
+gateway seam. An agent group's OneCLI agent holds only the secrets attached to it.
+NanoClaw records the id of each model credential its provider setup saves (setup's
+Claude key, `/add-codex`, `/add-opencode`, `/add-cursor`) in `data/onecli/provider-credentials.json`,
+by provider. On every spawn it attaches the recorded credentials for the provider
+the group runs, if the agent does not hold them yet; this also covers a new group,
+a group that switched provider, and a login saved after the group existed. For
+an install that saved credentials before ids were recorded, the first spawn per
+provider also adopts, once, the secrets NanoClaw's setup saves, by name
+(`Anthropic`, `Codex`, `OpenCode …`, `Cursor`). After that only recorded ids count: a
+re-run of the provider's login records a credential it finds or saves.
+
+Every other secret and every app connection is opt-in: the skill that adds it
+attaches it to the groups you choose, and new groups do not get it. To grant one
+by hand: `onecli agents grants attach-secret --id <agent-id> --secret-id <secret-id>`
+(`onecli agents list --max 0` maps the group id, shown as `identifier`, to
+`<agent-id>`). Attaching adds one secret and leaves the agent's other grants alone;
+`detach-secret` takes it away. Verify with `onecli agents grants list --id <agent-id>`;
+the gateway can take up to a minute to apply a change. Do not put a key in `.env`,
+command arguments, or the container environment.
+
+- Only a selected OneCLI adapter uses `ONECLI_URL` and `ONECLI_API_KEY`.
+- Moving an API key to another exact host keeps its stored value, so a blank
+  answer at the key prompt completes the move after confirmation.
+- Existing OneCLI credential names and formats remain compatible.
+- Unattended ChatGPT token refresh is not yet verified on the pinned gateway;
+  see [ChatGPT OAuth refresh](references/chatgpt-oauth-refresh.md) for the
+  manual reauthentication path.
+
+## Approvals and access on 1.45
+
+The pinned gateway has no hand-written rules. Access is set per agent:
+
+- **App connections** (catalog apps such as Gmail or Vercel): each tool is
+  Allow, Ask or Never. Set it in the console (the agent's page, **Manage
+  permissions** on the connection) or with
+  `onecli agents grants attach-connection --id <agent-id> --connection-id <connection-id> --allow <tool>,<tool> --ask <tool>`;
+  `onecli apps permission-definition --provider <provider>` lists the tool
+  IDs. An Ask tool is held and NanoClaw sends the approval card. Once you pick
+  tools, every tool you did not list, and every tool added to the catalog
+  later, is Never. Full access (attach with no `--allow` or `--ask`) keeps new
+  tools allowed; setting every tool back to Allow in the console after
+  customizing does not. The gateway knows a tool only by its host, method and
+  path pattern, and it checks Allow tools first, then Ask, then Never. A
+  request that fits any Allow tool's pattern goes through even when it is also
+  a tool you set to Ask or Never, and one that fits an Ask tool is held even
+  when its own tool is Never. Patterns overlap often, because one ending in
+  `*` also matches deeper paths: with GitHub's `get_repo` (`GET /repos/*/*`)
+  on Allow, `list_issues` (`GET /repos/*/*/issues`) on Ask is never held, and
+  the GraphQL query and mutation tools are both `POST /graphql`.
+  `permission-definition` shows only tool IDs; each tool's patterns are in
+  OneCLI's [app catalog](https://github.com/onecli/onecli/tree/v1.45.0/packages/api/src/apps/app-permissions).
+  Check them before you rely on an Ask or a Never.
+- **Plain vault keys** (HubSpot, Dial, Exa, any host with no catalog app): on
+  or off per agent, nothing more. Use `attach-secret` (above) or the switch on
+  the agent's page. The key's host and path patterns decide which requests get
+  the key, not whether a request is allowed. There is no Ask, no method match
+  and no block rule, so a call made with a plain key cannot be held for
+  approval.
+- **Connect links do not attach.** A key saved through the link an agent shows
+  after `credential_not_found` belongs to no agent; the retry fails with
+  `access_restricted` until you attach it. A new app account saved through an
+  `app_not_connected` link opens an agent-access dialog with every agent off:
+  turn on the agent that asked.
+- **Hand-written project rules** (host, method and path with allow, ask or
+  block) are gone: the old rule endpoints and the CLI's `rules` and `policy
+  rules` commands answer 410 Gone. OneCLI 2.x self-hosted has such rules again
+  as org policy, but NanoClaw does not support 2.x yet.
+
+## Validate
+
+```nc:run effect:build
+pnpm run build
+```
+
+```nc:run effect:test
+pnpm exec vitest run src/gateway-providers/onecli-files.test.ts src/gateway-providers/onecli-chatgpt-stub.test.ts src/gateway-providers/onecli-install.test.ts src/gateway-providers/onecli-provider-credentials.test.ts src/gateway-providers/onecli.test.ts src/gateway-providers/gateway-provider-registry.test.ts src/gateway-approval-coordinator.test.ts
+```
+
+The setup consumer writes `NANOCLAW_GATEWAY_PROVIDER=onecli` only after every directive above succeeds. Claude authentication is then completed through `scripts/auth.ts`; credentials never enter an agent container.
+
+During an atomic NanoClaw upgrade, `scripts/detect.ts` identifies an older implicit OneCLI installation so the generic updater can preserve that choice before the service restarts.
+
+## Check the database password
+
+Setup moves a local OneCLI database off the compose default password, but it leaves the database alone, and still succeeds, when restarting OneCLI would change anything else. This check reads whether a running local database still accepts the default password. It changes nothing and never fails the install.
+
+```nc:run effect:fetch capture:db_warn=.warn,db_hint=.hint
+pnpm exec tsx .claude/skills/add-onecli/scripts/postgres-check.ts || echo '{"warn":"no","hint":"none"}'
+```
+
+When it does, any agent container can log in to OneCLI's database. The note for the user comes after the proxy check below, so that neither note holds the install for a confirmation.
+
+## Check the proxy address
+
+A gateway on another host must hand agents its own address in `GATEWAY_BASE_URL`. OneCLI 1.45 defaults it to `host.docker.internal:10255`, the agent's own machine, so with a remote gateway every model call hangs with no reply. When setup was pointed at a remote gateway (`NANOCLAW_ONECLI_API_HOST`), this check reads the proxy address the gateway hands agents. It never fails the install.
+
+```nc:run effect:fetch capture:proxy_warn=.warn,proxy_hint=.hint
+pnpm exec tsx .claude/skills/add-onecli/scripts/proxy-check.ts || echo '{"warn":"no","hint":"none"}'
+```
+
+When that address is `host.docker.internal`, a loopback address or a wildcard address, show the user the exact `GATEWAY_BASE_URL=<host>:<port>` line to set on the gateway host, and point them at "Remote gateway" in [Upgrading the OneCLI gateway](payload/docs/onecli-upgrades.md#remote-gateway):
+
+```nc:operator when:proxy_warn=yes
+{{proxy_hint}}
+```
+
+When the database check found the default password, or could not read a running database, show the user what to run:
+
+```nc:operator when:db_warn=yes
+{{db_hint}}
+```

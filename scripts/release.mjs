@@ -1,13 +1,100 @@
 #!/usr/bin/env node
 
-import { readFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const PRERELEASE_PATTERN = /^((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-(?:beta|rc)\.[1-9]\d*$/;
+
+export function isPrerelease(version) {
+  if (PRERELEASE_PATTERN.test(version)) return true;
+  if (VERSION_PATTERN.test(version)) return false;
+  throw new Error(`version must be x.y.z, x.y.z-beta.N or x.y.z-rc.N without a v prefix: ${version}`);
+}
+
+// Same tags and order as scripts/update/channel.ts: beta.N < rc.N < the release.
+// release.test.ts checks that the two agree.
+const RELEASE_TAG = /^v(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+)|-beta\.([1-9]\d*))?$/;
+
+function parseTag(tag) {
+  const match = RELEASE_TAG.exec(tag);
+  if (!match) return null;
+  const [major, minor, patch] = [match[1], match[2], match[3]].map(Number);
+  if (match[4] !== undefined) return { major, minor, patch, stage: 1, number: Number(match[4]) };
+  if (match[5] !== undefined) return { major, minor, patch, stage: 0, number: Number(match[5]) };
+  return { major, minor, patch, stage: 2, number: 0 };
+}
+
+export function compareTags(a, b) {
+  const x = parseTag(a);
+  const y = parseTag(b);
+  if (!x || !y) throw new Error(`Not a release tag: ${!x ? a : b}`);
+  return (
+    x.major - y.major || x.minor - y.minor || x.patch - y.patch || x.stage - y.stage || Math.sign(x.number - y.number)
+  );
+}
+
+/** Tag names from `git ls-remote --tags` output. An empty list fails: the order check must never pass blind. */
+export function tagsFromLsRemote(output) {
+  const tags = new Set();
+  for (const line of output.split('\n')) {
+    const tag = /\trefs\/tags\/(.+?)(?:\^\{\})?$/.exec(line.trimEnd())?.[1];
+    if (tag) tags.add(tag);
+  }
+  if (tags.size === 0) throw new Error('the tag list is empty; refusing to skip the release order check');
+  return [...tags];
+}
+
+// The beta channel offers only the newest tag, so a version that does not sort above
+// every existing tag of the same x.y.z would publish and never be offered. A tag that
+// already exists was ordered when it was pushed; a publish rerun only finishes its release.
+export function verifyReleaseOrder(version, tags) {
+  isPrerelease(version);
+  const tag = `v${version}`;
+  if (tags.includes(tag)) return;
+  const wanted = parseTag(tag);
+  const blockers = tags
+    .filter((other) => {
+      const t = parseTag(other);
+      return (
+        t !== null &&
+        t.major === wanted.major &&
+        t.minor === wanted.minor &&
+        t.patch === wanted.patch &&
+        compareTags(other, tag) >= 0
+      );
+    })
+    .sort(compareTags);
+  if (blockers.length > 0) {
+    const newest = blockers.at(-1);
+    throw new Error(
+      `${tag} does not sort above ${newest}, which already exists, so the beta channel would never offer it. ` +
+        `Release a version that sorts after ${newest}.`,
+    );
+  }
+}
+
+function bulletedSection(remainder, label) {
+  const nextHeading = remainder.search(/^## \[/m);
+  const section = (nextHeading === -1 ? remainder : remainder.slice(0, nextHeading)).trim();
+  if (!section || !/^[-*] /m.test(section)) {
+    throw new Error(`CHANGELOG.md [${label}] must contain at least one release-note bullet`);
+  }
+  return section;
+}
+
+// Pre-releases publish the Unreleased notes as they stand; the stable release PR moves them.
+export function unreleasedSection(markdown) {
+  const matches = [...markdown.matchAll(/^## \[Unreleased\]$/gm)];
+  if (matches.length !== 1) {
+    throw new Error(`CHANGELOG.md must contain exactly one [Unreleased] heading; found ${matches.length}`);
+  }
+  return bulletedSection(markdown.slice(matches[0].index + matches[0][0].length), 'Unreleased');
+}
 
 export function changelogSection(markdown, version) {
-  if (!VERSION_PATTERN.test(version)) {
-    throw new Error(`version must be an exact x.y.z value without a v prefix: ${version}`);
+  if (isPrerelease(version)) {
+    return unreleasedSection(markdown);
   }
 
   const escaped = version.replaceAll('.', '\\.');
@@ -18,21 +105,20 @@ export function changelogSection(markdown, version) {
     throw new Error(`CHANGELOG.md must contain exactly one dated [${version}] heading; found ${matches.length}`);
   }
 
-  const start = matches[0].index + matches[0][0].length;
-  const remainder = markdown.slice(start);
-  const nextHeading = remainder.search(/^## \[/m);
-  const section = (nextHeading === -1 ? remainder : remainder.slice(0, nextHeading)).trim();
-
-  if (!section || !/^[-*] /m.test(section)) {
-    throw new Error(`CHANGELOG.md [${version}] must contain at least one release-note bullet`);
-  }
-
-  return section;
+  return bulletedSection(markdown.slice(matches[0].index + matches[0][0].length), version);
 }
 
 export function verifyRelease({ changelog, packageVersion, version }) {
   if (packageVersion !== version) {
     throw new Error(`package.json version ${packageVersion} does not match requested release ${version}`);
+  }
+
+  if (isPrerelease(version)) {
+    const base = version.match(PRERELEASE_PATTERN)[1];
+    if (changelog.includes(`## [${base}]`)) {
+      throw new Error(`${version} is a pre-release of ${base}, which CHANGELOG.md already records as released`);
+    }
+    return unreleasedSection(changelog);
   }
 
   const unreleasedIndex = changelog.indexOf('## [Unreleased]');
@@ -110,8 +196,8 @@ export function publicationPlan({ expectedBody, release, tagState, targetSha, ve
     if (release.draft !== false) {
       throw new Error(`GitHub Release ${tag} is still a draft`);
     }
-    if (release.prerelease !== false) {
-      throw new Error(`GitHub Release ${tag} is marked as a prerelease`);
+    if (release.prerelease !== isPrerelease(version)) {
+      throw new Error(`GitHub Release ${tag} is ${release.prerelease ? '' : 'not '}marked as a prerelease`);
     }
     if (release.immutable !== true) {
       throw new Error(`GitHub Release ${tag} is not immutable`);
@@ -154,8 +240,19 @@ export function main(argv) {
   const [command, version, ...args] = argv;
   if (!command || !version) {
     throw new Error(
-      'usage: node scripts/release.mjs <verify|extract|assemble|plan|readback> <x.y.z> [command arguments]',
+      'usage: node scripts/release.mjs <verify|extract|assemble|plan|readback|order> <x.y.z[-beta.N|-rc.N]> [command arguments]',
     );
+  }
+
+  // Reads no repository files: release.yml runs this from its own commit against any target.
+  if (command === 'order') {
+    const [tagListPath] = args;
+    if (!tagListPath) {
+      throw new Error('order requires the path to a git ls-remote tag list');
+    }
+    verifyReleaseOrder(version, tagsFromLsRemote(readFileSync(tagListPath, 'utf8')));
+    process.stdout.write(`v${version} sorts above every existing tag of its version\n`);
+    return;
   }
 
   const inputs = repositoryInputs();
@@ -204,7 +301,10 @@ export function main(argv) {
   throw new Error(`unknown command: ${command}`);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Real paths on both sides: a symlinked argv (macOS /var, --preserve-symlinks-main) would
+// otherwise skip main() and exit 0 having done nothing. No file argv (stdin, -e) means imported.
+const entry = process.argv[1];
+if (entry && existsSync(entry) && realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))) {
   try {
     main(process.argv.slice(2));
   } catch (error) {

@@ -17,8 +17,6 @@
 #
 # Config via env — passed through unchanged:
 #   NANOCLAW_SKIP  comma-separated setup:auto step names to skip
-#   SECRET_NAME    OneCLI secret name (default: Anthropic)
-#   HOST_PATTERN   OneCLI host pattern (default: api.anthropic.com)
 
 set -euo pipefail
 
@@ -48,6 +46,7 @@ for arg in "$@"; do
     echo "Usage: bash nanoclaw.sh [options]"
     echo ""
     echo "  --template-path <ref>  Create or update an agent from templates/<ref>"
+    echo "  --gateway-provider <kind>  Select the credential gateway"
     echo "  --uninstall            Uninstall this NanoClaw copy"
     echo "  --help, -h             Show this help without installing dependencies"
     exit 0
@@ -72,6 +71,9 @@ for arg in "$@"; do
     export NANOCLAW_PROJECT_ROOT="$PROJECT_ROOT"
     # shellcheck source=setup/lib/install-slug.sh
     source "$PROJECT_ROOT/setup/lib/install-slug.sh"
+    # An invalid NANOCLAW_INSTALL_ID fails the helper. Stop here: `echo` would
+    # hide that failure and print cleanup commands with an empty slug.
+    UNINSTALL_SLUG="$(_nanoclaw_install_slug)" || exit 1
     UNINSTALL_RUNTIME="${CONTAINER_RUNTIME:-docker}"
     echo "Can't run the uninstaller: dependencies are missing (node_modules/)."
     echo "Either re-run 'bash nanoclaw.sh' once to restore them, or clean up manually:"
@@ -83,10 +85,10 @@ for arg in "$@"; do
       echo "  systemctl --user disable --now $(systemd_unit).service"
       echo "  rm -f ~/.config/systemd/user/$(systemd_unit).service && systemctl --user daemon-reload"
     fi
-    echo "  $UNINSTALL_RUNTIME ps -aq --filter label=nanoclaw-install=$(_nanoclaw_install_slug) | xargs -r $UNINSTALL_RUNTIME rm -f"
+    echo "  $UNINSTALL_RUNTIME ps -aq --filter label=nanoclaw-install=$UNINSTALL_SLUG | xargs -r $UNINSTALL_RUNTIME rm -f"
     echo "  $UNINSTALL_RUNTIME rmi $(container_image_base):latest"
     echo "  rm -f ~/.local/bin/ncl    # only if it points at this folder"
-    echo "  rm -rf \"$(dirname "$PROJECT_ROOT")/.nanoclaw-updates/$(_nanoclaw_install_slug)\""
+    echo "  rm -rf \"$(dirname "$PROJECT_ROOT")/.nanoclaw-updates/$UNINSTALL_SLUG\""
     echo ""
     echo "Then back up $PROJECT_ROOT/.env if you need the keys, and delete the folder."
     exit 1
@@ -162,6 +164,11 @@ write_abort_entry() {
   local ts
   ts=$(ts_utc)
   echo "## ${ts} · aborted at ${step} (${error})" >> "$PROGRESS_LOG"
+}
+
+# An answer the setup path depends on, as its own entry (setup/logs.ts userInput).
+write_user_input() {
+  printf '=== [%s] user-input → %s ===\n  value: %s\n\n' "$(ts_utc)" "$1" "$2" >> "$PROGRESS_LOG"
 }
 
 # ─── bash-side "clack-alike" status line ────────────────────────────────
@@ -363,6 +370,20 @@ if [ "$(uname -s)" = "Darwin" ] && ! command -v brew >/dev/null 2>&1; then
   esac
 fi
 
+# ─── pre-flight: sudo password on Linux ────────────────────────────────
+# The Node installer calls sudo behind the bootstrap spinner, where its
+# password prompt can't be seen. Ask here instead; setup:auto asks for Docker
+# before its own step. Root, passwordless sudo and non-terminal runs skip it.
+# A never-synced Arch is asked first whether jq may cost a full system upgrade.
+# shellcheck source=setup/lib/sudo-preflight.sh
+source "$PROJECT_ROOT/setup/lib/sudo-preflight.sh"
+pacman_upgrade_preflight
+if ! sudo_preflight; then
+  ph_event setup_sudo_aborted
+  write_abort_entry sudo-preflight sudo-refused
+  exit 1
+fi
+
 # ─── first step: install the basics (Node + pnpm + native modules) ─────
 
 BOOTSTRAP_RAW="${STEPS_DIR}/01-bootstrap.log"
@@ -402,6 +423,10 @@ BOOTSTRAP_DUR=$(( $(date +%s) - BOOTSTRAP_START ))
 if [ "$BOOTSTRAP_RC" -eq 0 ]; then
   spinner_success "Basics ready" "$BOOTSTRAP_DUR"
   write_bootstrap_entry success "$BOOTSTRAP_DUR" "$BOOTSTRAP_RAW"
+  # Only skills need jq, so setup carries on; say it now, not at the first one.
+  if [ "$(grep_field JQ_OK "$BOOTSTRAP_RAW")" = "false" ]; then
+    printf '  %s\n' "$(dim "Couldn't install jq. Many skills need it, including Slack, Discord, Telegram, Teams and Dial, so install jq first.")"
+  fi
 else
   spinner_failure "Couldn't install the basics" "$BOOTSTRAP_DUR"
   write_bootstrap_entry failed "$BOOTSTRAP_DUR" "$BOOTSTRAP_RAW"
@@ -423,14 +448,35 @@ fi
 # wipe it.
 export NANOCLAW_BOOTSTRAPPED=1
 
-# setup.sh may have just installed pnpm via npm into a prefix that's not on
-# our PATH (custom `npm config set prefix`, or the default prefix missing
-# from the shell's login PATH). Its PATH mutation doesn't propagate back
-# to us — so replay the same lookup here before the exec.
+# setup.sh may have just installed Node/npm/pnpm under ~/.local/bin via
+# uvx-nodeenv. Its PATH mutation doesn't propagate back to this parent shell,
+# so make that standard user bin directory discoverable before probing npm.
+# Keep an existing PATH entry in place rather than adding duplicates. Appended,
+# so node_use_patched below decides which node leads.
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$PATH:$HOME/.local/bin" ;;
+esac
+
+# setup:auto registers the service with this shell's node, which can be an
+# older one ahead of the keg-only node@22 setup.sh used. Checked before the
+# npm probe, so npm runs on the node that meets the minimum.
+# shellcheck source=setup/lib/node-version.sh
+source "$PROJECT_ROOT/setup/lib/node-version.sh"
+if ! node_use_patched; then
+  printf '\n  %s %s\n\n' "$(red '✗')" \
+    "No Node on PATH meets the minimum (${NODE_MINIMUMS// / / }). Switch to one of these, then re-run."
+  write_abort_entry bootstrap node-below-minimum
+  exit 1
+fi
+
+# pnpm may instead have landed in npm's configured global prefix. Replay that
+# lookup here as a second recovery path before the final exec. Appended, so a
+# node in that prefix can't shadow the one checked above.
 if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-  NPM_PREFIX="$(npm config get prefix 2>/dev/null)"
+  NPM_PREFIX="$(npm config get prefix 2>/dev/null || true)"
   if [ -n "$NPM_PREFIX" ] && [ -x "$NPM_PREFIX/bin/pnpm" ]; then
-    export PATH="$NPM_PREFIX/bin:$PATH"
+    export PATH="$PATH:$NPM_PREFIX/bin"
   fi
 fi
 

@@ -27,6 +27,7 @@ import { askOperatorRole, type OperatorRole } from '../lib/role-prompt.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { hostExec, runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
 import { clearTemplatePick } from '../templates.js';
+import { launchSlackJob, readSlackJob, queueSlackJob } from '../../src/community-portal/slack-job.js';
 import { getChannelPreStep, getCompanionSkills } from './companions.js';
 
 const DEFAULT_AGENT_NAME = 'Nano';
@@ -73,9 +74,11 @@ async function applyCompanionSkills(
   const companions = getCompanionSkills(channel);
   let applied = false;
   let degraded = false;
+  const failures: string[] = [];
   for (const skill of companions) {
     if (!companionSkillPresent(skill, projectRoot)) {
       degraded = true;
+      failures.push(`${skill} is missing`);
       p.log.warn(
         `Companion skill ${skill} is missing from this checkout (.claude/skills/${skill}/SKILL.md). ` +
           `The ${channel} channel works, but the capability that skill adds is missing until you ` +
@@ -100,6 +103,7 @@ async function applyCompanionSkills(
       continue;
     }
     degraded = true;
+    failures.push([skill, firstReasonLine(res)].filter(Boolean).join(': '));
     // Degraded, not fatal: the main channel install still works. Name the
     // skill and the exact re-apply command so the warning is actionable.
     p.log.warn(
@@ -109,6 +113,10 @@ async function applyCompanionSkills(
     );
   }
 
+  if (degraded && overrides.requireCompanions)
+    throw new Error(
+      `The ${channel} companion installation needs attention (${failures.join('; ')}). Resume its setup step.`,
+    );
   if (!applied) return;
   if (degraded) {
     // A half-applied companion may have copied files and appended barrel
@@ -121,6 +129,7 @@ async function applyCompanionSkills(
     );
     return;
   }
+  if (overrides.skipEffects?.includes('restart')) return;
   try {
     await (overrides.exec ?? hostExec(projectRoot))('bash setup/lib/restart.sh');
   } catch {
@@ -128,7 +137,17 @@ async function applyCompanionSkills(
       'Applied the companion skills but could not restart the service. Their changes stay ' +
         'inactive until you restart it: bash setup/lib/restart.sh',
     );
+    if (overrides.requireCompanions)
+      throw new Error('The Slack service restart needs attention. Resume the Slack setup step.');
   }
+}
+
+/** The first line of a bounce reason, for a caller with no terminal to read the warnings. */
+function firstReasonLine(res: Awaited<ReturnType<typeof runSkill>>): string | undefined {
+  return res.agentTasks[0]?.reason
+    .split('\n')
+    .map((l) => l.trim())
+    .find(Boolean);
 }
 
 interface WireArgs {
@@ -190,6 +209,10 @@ async function initFirstAgent(args: WireArgs): Promise<boolean> {
 }
 
 export interface ChannelSkillOverrides extends Partial<RunSkillOptions> {
+  /** A later perk offer already received consent for this browser handoff. */
+  browserConsent?: boolean;
+  /** Background jobs must not report ready after a partial companion install. */
+  requireCompanions?: boolean;
   agentName?: string;
   role?: OperatorRole;
   /** The shared wire; defaults to init-first-agent. Injectable for tests. */
@@ -220,7 +243,7 @@ export interface ChannelSkillOverrides extends Partial<RunSkillOptions> {
   /** The first-prompt back gate; defaults to back-nav.ts `backGate`. Injectable for tests. */
   backGate?: (label: string) => Promise<'continue' | typeof BACK_TO_CHANNEL_SELECTION>;
   /** The abort path; defaults to runner.ts `fail` (which exits). Injectable for tests. */
-  fail?: (stepName: string, msg: string, hint?: string, rawLogPath?: string) => Promise<never>;
+  fail?: (stepName: string, msg: string, hint?: string, rawLogPath?: string, detail?: string) => Promise<never>;
 }
 
 export async function runChannelSkill(
@@ -238,7 +261,7 @@ export async function runChannelSkill(
   }
 
   const projectRoot = overrides.projectRoot ?? process.cwd();
-  const failWith = overrides.fail ?? fail;
+  const failWith: NonNullable<ChannelSkillOverrides['fail']> = overrides.fail ?? fail;
   // The agent name + role are wire inputs — in wireIfResolved mode, defer the
   // prompts past the skill run (only a fresh create resolves the wire inputs;
   // a drop-through re-run asks nothing).
@@ -298,11 +321,13 @@ export async function runChannelSkill(
     // instead of a generic "couldn't finish" message. Only a real bounce yields a
     // diagnosis; a purely-deferred run (a missing input) falls back to the generic.
     const diag = firstFailureHint(res);
+    const detail = firstReasonLine(res);
     await failWith(
       `${channel}-install`,
       diag?.headline ?? `Couldn't finish setting up ${channel}.`,
       diag?.hint ?? 'See logs/setup-steps/ for details, then retry setup.',
       rawLog,
+      detail,
     );
   }
 
@@ -392,11 +417,42 @@ export async function runChannelSkillWithPreStep(
     if (gate === BACK_TO_CHANNEL_SELECTION) return BACK_TO_CHANNEL_SELECTION;
   }
   const agentName = overrides.agentName ?? (await resolveAgentName());
-  const preBound = await preStep(agentName);
+  const root = overrides.projectRoot ?? process.cwd();
+  if (channel === 'slack') {
+    const pending = await readSlackJob(root);
+    if (pending && ['awaiting_approval', 'installing'].includes(pending.status)) {
+      if (pending.context.agentName !== agentName)
+        throw new Error(
+          `Finish the saved Slack installation for ${pending.context.agentName} before adding another agent in this checkout.`,
+        );
+      await launchSlackJob(root);
+      p.log.info('Your saved Slack installation is continuing in the background. Follow its progress in the portal.');
+      return;
+    }
+  }
+  const role = channel === 'slack' ? (overrides.role ?? (await askOperatorRole(channel))) : overrides.role;
+  const preBound = await (overrides.browserConsent ? preStep(agentName, { browserConsent: true }) : preStep(agentName));
+  if (preBound?.__portal_skip === 'slack') return BACK_TO_CHANNEL_SELECTION;
+  if (preBound?.__portal_pending === 'slack') {
+    if (!preBound.owner_handle) throw new Error('Reconnect Slack in the portal to identify the workspace owner.');
+    await queueSlackJob(
+      {
+        agentName,
+        displayName,
+        role: role!,
+        ownerHandle: preBound.owner_handle,
+        templateAgentId: process.env.NANOCLAW_TEMPLATE_AGENT_ID,
+      },
+      root,
+    );
+    p.log.info('Slack is finishing in the background. You can keep setting up NanoClaw or browse other perks.');
+    return;
+  }
   return runChannelSkill(channel, displayName, {
     ...overrides,
     offerBack: false,
     agentName,
+    role,
     inputs: { ...preBound, ...overrides.inputs },
   });
 }

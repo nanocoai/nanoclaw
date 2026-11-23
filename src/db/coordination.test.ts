@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
-import { initSqliteTestDb, closeDb, runMigrations } from './index.js';
+import { initSqliteTestDb, closeDb, runMigrations, createAgentGroup, createSession } from './index.js';
 import {
   registerHostInstance,
   renewHostInstanceLease,
@@ -21,9 +21,24 @@ function iso(offsetMs = 0): string {
   return new Date(Date.now() + offsetMs).toISOString();
 }
 
+// The writers only create rows for sessions that exist; 's-deleted' never does.
 beforeEach(async () => {
   const db = await initSqliteTestDb();
   await runMigrations(db);
+  await createAgentGroup({ id: 'ag-1', name: 'ag-1', folder: 'ag-1', agent_provider: null, created_at: iso() });
+  for (const id of ['s-1', 's-2', 's-9']) {
+    await createSession({
+      id,
+      agent_group_id: 'ag-1',
+      messaging_group_id: null,
+      thread_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: iso(),
+    });
+  }
 });
 
 afterEach(async () => {
@@ -88,6 +103,13 @@ describe('session_claims', () => {
     await setStopIntent('s-9', null, iso());
     expect((await getSessionClaim('s-9'))?.stop_intent).toBeNull();
   });
+
+  it('stop intent never recreates the claim row of a deleted session', async () => {
+    // A recreated incarnation-0 row would make the live runtime's finish() look stale.
+    await setStopIntent('s-deleted', 'respawn_after_stop', iso());
+    await setStopIntent('s-deleted', null, iso());
+    expect(await getSessionClaim('s-deleted')).toBeUndefined();
+  });
 });
 
 describe('delivery_attempts', () => {
@@ -101,6 +123,11 @@ describe('delivery_attempts', () => {
     expect((await getDeliveryAttempt('m-1'))?.last_error).toBe('x');
     await clearDeliveryAttempt('m-1');
     expect(await getDeliveryAttempt('m-1')).toBeUndefined();
+  });
+
+  it('an attempt for a deleted session leaves no row', async () => {
+    await recordDeliveryAttempt({ messageId: 'm-gone', sessionId: 's-deleted', now: iso(), nextAttemptAt: null });
+    expect(await getDeliveryAttempt('m-gone')).toBeUndefined();
   });
 });
 
@@ -119,5 +146,10 @@ describe('wake_signals', () => {
     expect(rest).toHaveLength(1);
     expect(rest[0].session_id).toBe('s-2');
     expect(await takeWakeSignals({ consumerId: 'i-3', now: iso() })).toHaveLength(0);
+  });
+
+  it('a signal for a deleted session leaves no row', async () => {
+    await writeWakeSignal('s-deleted', 'inbound-message', iso());
+    expect(await takeWakeSignals({ consumerId: 'i-1', now: iso() })).toHaveLength(0);
   });
 });

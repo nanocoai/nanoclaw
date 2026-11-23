@@ -11,6 +11,7 @@ vi.mock('./config.js', async () => {
 const TEST_DIR = '/tmp/nanoclaw-test-upgrade-state';
 
 import {
+  currentUpgradeState,
   enforceUpgradeTripwire,
   getCodeIdentity,
   getCodeVersion,
@@ -97,6 +98,16 @@ describe('upgrade-state', () => {
 
   it('markerPath is upgrade-state.json under the data dir', () => {
     expect(markerPath()).toBe(path.join(TEST_DIR, 'upgrade-state.json'));
+    expect(markerPath('/srv/nanoclaw')).toBe(path.join('/srv/nanoclaw', 'data', 'upgrade-state.json'));
+  });
+
+  it('currentUpgradeState returns the marker only while it matches the checkout', () => {
+    expect(currentUpgradeState()).toBeNull();
+    writeUpgradeState({ version: '0.0.0-nope', via: 'test' });
+    expect(currentUpgradeState()).toBeNull();
+    const written = writeUpgradeState({ via: 'update-nanoclaw', channel: 'stable', ref: 'refs/tags/v1' });
+    expect(currentUpgradeState()).toEqual(written);
+    expect(written).toMatchObject({ channel: 'stable', ref: 'refs/tags/v1' });
   });
 
   it('enforceUpgradeTripwire exits when not current and passes when current', () => {
@@ -130,18 +141,21 @@ describe('git-less runtimes', () => {
     return GITLESS;
   }
 
-  function writeMarker(marker: Record<string, string>): void {
-    fs.mkdirSync(TEST_DIR, { recursive: true });
-    fs.writeFileSync(markerPath(), JSON.stringify({ updatedAt: new Date().toISOString(), via: 'update', ...marker }));
+  function writeMarker(marker: Record<string, string>, projectRoot?: string): void {
+    fs.mkdirSync(path.dirname(markerPath(projectRoot)), { recursive: true });
+    fs.writeFileSync(
+      markerPath(projectRoot),
+      JSON.stringify({ updatedAt: new Date().toISOString(), via: 'update', ...marker }),
+    );
   }
 
   it('accepts a version-matching marker when Git cannot identify the checkout', () => {
-    writeMarker({ version: '9.9.9', commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
+    writeMarker({ version: '9.9.9', commit: 'a'.repeat(40), tree: 'b'.repeat(40) }, GITLESS);
     expect(isUpgradeCurrent(gitlessCheckout('9.9.9'))).toBe(true);
   });
 
   it('still trips on a version mismatch when Git is unavailable', () => {
-    writeMarker({ version: '1.0.0', commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
+    writeMarker({ version: '1.0.0', commit: 'a'.repeat(40), tree: 'b'.repeat(40) }, GITLESS);
     expect(isUpgradeCurrent(gitlessCheckout('9.9.9'))).toBe(false);
   });
 

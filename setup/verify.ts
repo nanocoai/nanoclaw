@@ -1,6 +1,5 @@
 /**
  * Step: verify — End-to-end health check of the full installation.
- * Replaces 09-verify.sh
  *
  * Uses the configured central-DB driver and platform-aware service checks.
  */
@@ -14,12 +13,12 @@ import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { inspectCentralDb } from './central-db-inspection.js';
 import { inspectAgentImage, readImageSource } from './lib/registry-state.js';
-import { getPlatform, getServiceManager, hasSystemd, isRoot } from './platform.js';
+import { getServiceManager, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
+import { readSlackJob, slackJobFailure, slackJobStatus, type SlackJob } from '../src/community-portal/slack-job.js';
 
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
-  const platform = getPlatform();
   const homeDir = os.homedir();
 
   log.info('Starting verification');
@@ -84,8 +83,14 @@ export async function run(_args: string[]): Promise<void> {
         // systemctl not available
       }
     }
-  } else {
-    // Check for nohup PID file
+  }
+
+  // Nohup wrapper (setup/service.ts setupNohupFallback). Reached two ways:
+  // no service manager at all, or systemd is PID 1 but the user instance is
+  // unreachable (`systemctl --user` → "Failed to connect to bus") — the case
+  // service.ts already falls back from. Consult the pid file whenever the
+  // manager branch found nothing, so both detectors agree.
+  if (service === 'not_found') {
     const pidFile = path.join(projectRoot, 'nanoclaw.pid');
     if (fs.existsSync(pidFile)) {
       try {
@@ -122,7 +127,9 @@ export async function run(_args: string[]): Promise<void> {
   const envFile = path.join(projectRoot, '.env');
   if (fs.existsSync(envFile)) {
     const envContent = fs.readFileSync(envFile, 'utf-8');
-    if (/^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ONECLI_URL)=/m.test(envContent)) {
+    if (
+      /^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|NANOCLAW_GATEWAY_PROVIDER)=/m.test(envContent)
+    ) {
       credentials = 'configured';
     }
   }
@@ -180,7 +187,7 @@ export async function run(_args: string[]): Promise<void> {
   //    plus how many agent groups pin an image of their own (reported in step 7).
   //    The two counts get their own try/catch: they read different tables, and a
   //    partially migrated DB must not hide one behind the other's failure.
-  const { registeredGroups, derivedGroups } = await inspectCentralDb(projectRoot);
+  const { registeredGroups, derivedGroups, lastWiredAt } = await inspectCentralDb(projectRoot);
 
   // 6. Check mount allowlist
   let mountAllowlist = 'missing';
@@ -215,6 +222,19 @@ export async function run(_args: string[]): Promise<void> {
     configuredChannels.length > 0 &&
     configuredChannels.every((c) => DEFER_WIRE_CHANNELS.has(c));
 
+  // The detached Slack worker applies the channel after foreground setup
+  // releases its checkout lock. No credentials/groups yet is expected here.
+  const slackJob = await readSlackJob(projectRoot);
+  // A failed or expired job is stale once set-up Slack has a chat wired after it began.
+  const slackJobState = slackJobStatus(slackJob);
+  const slackJobReplaced =
+    (slackJobState === 'failed' || slackJobState === 'expired') &&
+    configuredChannels.includes('slack') &&
+    Date.parse(lastWiredAt.slack ?? '') > Date.parse(slackJob?.createdAt ?? '');
+  const slackInstall = slackJobReplaced ? undefined : slackJobState;
+  const slackWiringPending = registeredGroups === 0 && canDeferSlackWiring(slackInstall, configuredChannels);
+  const slackReason = slackJobReplaced ? undefined : slackJobFailure(slackJob);
+
   // Determine overall status. The cli-agent step earlier in setup already
   // proved the agent round-trip works; verify is a static health check.
   const status = determineVerifyStatus({
@@ -222,12 +242,16 @@ export async function run(_args: string[]): Promise<void> {
     credentials,
     registeredGroups,
     wiringPending,
+    slackInstall,
+    configuredChannels,
   });
 
   log.info('Verification complete', {
     status,
     channelAuth,
     wiringPending,
+    slackInstall,
+    slackJobReplaced,
     imageSource,
     imageSourceActual: image.source,
     derivedGroups,
@@ -253,7 +277,9 @@ export async function run(_args: string[]): Promise<void> {
     // versions.json. Empty for a locally built image — it has never had one.
     IMAGE_DIGEST: image.registryDigest ?? '',
     DERIVED_GROUPS: derivedGroups,
-    ...(wiringPending ? { WIRING: 'pending_first_dm' } : {}),
+    ...(slackInstall ? { SLACK_INSTALL: slackInstall } : {}),
+    ...(slackReason ? { SLACK_INSTALL_REASON: slackReason } : {}),
+    ...(slackWiringPending ? { WIRING: 'pending_slack_install' } : wiringPending ? { WIRING: 'pending_first_dm' } : {}),
     STATUS: status,
     LOG: 'logs/setup.log',
   });
@@ -270,16 +296,29 @@ export async function run(_args: string[]): Promise<void> {
  */
 export const DEFER_WIRE_CHANNELS = new Set(['teams']);
 
+function canDeferSlackWiring(slackInstall: SlackJob['status'] | undefined, configuredChannels: string[]): boolean {
+  return (
+    (slackInstall === 'awaiting_approval' || slackInstall === 'installing') &&
+    configuredChannels.every((c) => c === 'slack' || DEFER_WIRE_CHANNELS.has(c))
+  );
+}
+
 export function determineVerifyStatus(input: {
   service: 'not_found' | 'stopped' | 'running' | 'running_other_checkout';
   credentials: string;
   registeredGroups: number;
   /** Zero groups but every configured channel defers wiring to the first DM. */
   wiringPending?: boolean;
+  slackInstall?: SlackJob['status'];
+  configuredChannels?: string[];
 }): 'success' | 'failed' {
   return input.service === 'running' &&
     input.credentials !== 'missing' &&
-    (input.registeredGroups > 0 || input.wiringPending === true)
+    input.slackInstall !== 'failed' &&
+    input.slackInstall !== 'expired' &&
+    (input.registeredGroups > 0 ||
+      input.wiringPending === true ||
+      canDeferSlackWiring(input.slackInstall, input.configuredChannels ?? []))
     ? 'success'
     : 'failed';
 }

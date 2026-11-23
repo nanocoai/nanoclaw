@@ -26,7 +26,7 @@ register({
     if (cliScope === 'group') {
       resources = resources.filter((r) => GROUP_SCOPE_RESOURCES.has(r.plural));
     }
-    const commands = listCommands().filter((c) => !c.resource);
+    const commands = listCommands().filter((c) => !c.resource && c.access !== 'hidden');
 
     const lines: string[] = [];
 

@@ -31,6 +31,6 @@ add_mcp_server({ name: "remote", url: "https://example.com/mcp" })
 Use HTTPS; plain HTTP is allowed only for `localhost` and
 `host.docker.internal` (an MCP server running on the host machine). URLs with
 credentials, fragments, or credential-looking query parameters are rejected;
-authentication belongs in OneCLI.
+authentication belongs in the configured credential gateway.
 
-Do not ask the user to give you credentials or tell them how to create credentials (OAuth, API keys, etc.) — NEVER fabricate credential setup instructions. Credentials are handled by the OneCLI gateway. Use `"onecli-managed"` as the placeholder value for any credential env vars or config fields. After the MCP server is installed and the container restarts, load `/onecli-gateway` for the full credential-handling flow (connect URLs, stubs, error recovery).
+Do not ask the user to give you credentials or tell them how to create credentials (OAuth, API keys, etc.) — NEVER fabricate credential setup instructions. Credentials are handled by the configured gateway. Use `"gateway-managed"` as the placeholder value for credential env vars or config fields. Follow the installed gateway skill for its connection and recovery flow.

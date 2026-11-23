@@ -322,6 +322,25 @@ describe('guard wiring', () => {
   });
 });
 
+describe('approval card text', () => {
+  it('quotes agent-supplied room and agent names on one line', async () => {
+    await updateContainerConfigScalars(SRC_GROUP, { cli_scope: 'group' });
+
+    await runAction('create_room', { name: 'Team `x`', agents: ['Pixel', 'De`vin'] });
+    await runAction('add_to_room', { room: 'Team `x`', agent: 'De`vin' });
+
+    const [createOpts, addOpts] = mockRequestApproval.mock.calls.map(
+      (c) => c[0] as { title: string; question: string },
+    );
+    const [create, add] = [createOpts.question, addOpts.question];
+    expect(createOpts.title).toBe('Create room: "Team \\u0060x\\u0060"');
+    expect(addOpts.title).toBe('Add "De\\u0060vin" to room: "Team \\u0060x\\u0060"');
+    expect(create).toContain('room "Team \\u0060x\\u0060" with you and "Pixel", "De\\u0060vin".');
+    expect(add).toContain('agent "De\\u0060vin" to the shared Slack room "Team \\u0060x\\u0060"');
+    expect(`${create}${add}`).not.toContain('`');
+  });
+});
+
 describe('create_room', () => {
   it('resolves names and hands ensureAgentRoom the full participant list (caller included)', async () => {
     mockCreateRoomCanvas.mockResolvedValue('F0CANVAS');

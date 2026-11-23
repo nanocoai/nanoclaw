@@ -4,7 +4,15 @@
  * don't have to mock the filesystem or the container runner.
  */
 import Database from 'better-sqlite3';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// Pin the sweep-timer overrides to unset: these cases assert the built-in
+// 30 min / 60 s defaults, not whatever a developer's .env or shell sets.
+vi.mock('./config.js', async () => ({
+  ...(await vi.importActual<typeof import('./config.js')>('./config.js')),
+  ABSOLUTE_CEILING_MS_RAW: '',
+  CLAIM_STUCK_MS_RAW: '',
+}));
 
 import {
   ABSOLUTE_CEILING_MS,
@@ -26,6 +34,11 @@ function claim(id: string, offsetMs: number) {
 }
 
 describe('decideStuckAction', () => {
+  it('runs against the built-in defaults', () => {
+    expect(ABSOLUTE_CEILING_MS).toBe(30 * 60 * 1000);
+    expect(CLAIM_STUCK_MS).toBe(60 * 1000);
+  });
+
   it('returns ok when heartbeat is within the absolute ceiling', () => {
     expect(
       decideStuckAction({

@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
+  portalEnabled: vi.fn(() => false),
+  runSlackPortal: vi.fn(),
   account: undefined as { api?: string; token: string } | undefined,
   installToken: undefined as string | undefined,
   selectLabels: [] as string[],
@@ -33,6 +35,8 @@ const state = vi.hoisted(() => ({
     installUrl: '',
   })),
 }));
+
+vi.mock('../portal.js', () => ({ portalEnabled: state.portalEnabled, runSlackPortal: state.runSlackPortal }));
 
 vi.mock('@clack/prompts', () => ({
   note: vi.fn((message: string, title: string) => state.notes.push({ message, title })),
@@ -152,6 +156,7 @@ function track(root: string): string {
 }
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -171,6 +176,27 @@ describe('provisioning-core bootstrap', () => {
     expect(importModule).toHaveBeenCalledExactlyOnceWith(pathToFileURL(path.join(root, PROVISIONING_MODULE)).href);
   });
 
+  it('module absent in a Git checkout: commits the fetched file so the install stays updatable', async () => {
+    vi.stubEnv('NANOCLAW_SETUP_COMMIT', '');
+    vi.stubEnv('GIT_CONFIG_GLOBAL', '/dev/null');
+    vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1');
+    const root = track(fs.mkdtempSync(path.join(os.tmpdir(), 'slack-auto-git-')));
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init');
+    const exec = vi.fn((command: string): string => {
+      if (command === 'git remote') return 'origin\n';
+      if (command.startsWith('git ls-remote')) return 'abc123\trefs/heads/channels\n';
+      if (command.includes('git show')) fs.writeFileSync(path.join(root, PROVISIONING_MODULE), 'export {};\n');
+      return '';
+    });
+
+    await loadProvisioningCore({ root, exec, importModule: vi.fn(async () => fakeCore()) });
+
+    expect(git('status', '--porcelain')).toBe('');
+    expect(git('show', '--name-only', '--format=', 'HEAD')).toBe(PROVISIONING_MODULE);
+  });
+
   it('module absent: fetches the channels branch and materializes the one file, engine-style', async () => {
     const root = track(fs.mkdtempSync(path.join(os.tmpdir(), 'slack-auto-')));
     const exec = vi.fn((command: string): string => {
@@ -186,8 +212,8 @@ describe('provisioning-core bootstrap', () => {
     expect(exec.mock.calls.map(([c]) => c)).toEqual([
       'git remote',
       'git ls-remote --heads origin channels',
-      'git fetch origin channels',
-      `git show origin/channels:${PROVISIONING_MODULE} > ${PROVISIONING_MODULE}`,
+      "git fetch 'origin' '+refs/heads/channels:refs/remotes/origin/channels'",
+      expect.stringContaining(`git show 'refs/remotes/origin/channels:${PROVISIONING_MODULE}'`),
     ]);
     // the parent directory exists before the git show redirect runs
     expect(fs.existsSync(path.join(root, 'src/provisioning'))).toBe(true);
@@ -797,5 +823,26 @@ describe('a workspace that has to approve the install', () => {
     expect(state.confirmThenOpen).not.toHaveBeenCalled();
     expect(result).toMatchObject({ connection: 'provisioned', app_token: 'xapp-test' });
     expect(result).not.toHaveProperty('bot_token');
+  });
+});
+
+describe('community portal entry point', () => {
+  it('uses browser setup for an unenrolled installation without legacy login or provisioning', async () => {
+    state.portalEnabled.mockReturnValue(true);
+    state.runSlackPortal.mockResolvedValue({ __portal_skip: 'slack' });
+    const root = track(rootWithModule());
+    const core = fakeCore();
+    state.installToken = undefined;
+    state.runInheritScript.mockClear();
+    state.brokerProvision.mockClear();
+    try {
+      const result = await maybeAutoProvisionSlack('Nano', { root, importModule: async () => core });
+      expect(result).toEqual({ __portal_skip: 'slack' });
+      expect(state.runSlackPortal).toHaveBeenCalledWith(core, 'Nano', undefined);
+      expect(state.runInheritScript).not.toHaveBeenCalled();
+      expect(state.brokerProvision).not.toHaveBeenCalled();
+    } finally {
+      state.portalEnabled.mockReturnValue(false);
+    }
   });
 });

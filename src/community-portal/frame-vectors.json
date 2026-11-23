@@ -1,0 +1,70 @@
+{
+  "note": "Frame protocol v1 as the cell speaks it. `valid` entries decode to `frame`; `invalid` entries decode to null.",
+  "valid": [
+    {
+      "raw": "{\"v\":1,\"ch\":0,\"seq\":1,\"t\":\"hello\",\"leg\":\"host\",\"caps\":[\"perks\"]}",
+      "frame": { "v": 1, "ch": 0, "seq": 1, "t": "hello", "leg": "host", "caps": ["perks"] }
+    },
+    {
+      "raw": "{\"v\":1,\"ch\":0,\"seq\":1,\"t\":\"hello\",\"leg\":\"cell\",\"revision\":7}",
+      "frame": { "v": 1, "ch": 0, "seq": 1, "t": "hello", "leg": "cell", "revision": 7 }
+    },
+    { "raw": "{\"v\":1,\"ch\":0,\"seq\":2,\"t\":\"ping\"}", "frame": { "v": 1, "ch": 0, "seq": 2, "t": "ping" } },
+    { "raw": "{\"v\":1,\"ch\":0,\"seq\":2,\"t\":\"pong\"}", "frame": { "v": 1, "ch": 0, "seq": 2, "t": "pong" } },
+    {
+      "raw": "{\"v\":1,\"ch\":0,\"seq\":3,\"t\":\"status\",\"state\":\"presence\",\"presence\":[{\"deviceId\":\"dev_0123456789abcdef01234567\",\"connected\":true}]}",
+      "frame": {
+        "v": 1,
+        "ch": 0,
+        "seq": 3,
+        "t": "status",
+        "state": "presence",
+        "presence": [{ "deviceId": "dev_0123456789abcdef01234567", "connected": true }]
+      }
+    },
+    {
+      "raw": "{\"v\":1,\"ch\":0,\"seq\":4,\"t\":\"perks.changed\",\"revision\":8}",
+      "frame": { "v": 1, "ch": 0, "seq": 4, "t": "perks.changed", "revision": 8 }
+    },
+    {
+      "raw": "{\"v\":1,\"ch\":0,\"seq\":5,\"t\":\"error\",\"code\":\"read_only\"}",
+      "frame": { "v": 1, "ch": 0, "seq": 5, "t": "error", "code": "read_only" }
+    },
+    {
+      "raw": "{\"v\":1,\"ch\":1,\"seq\":1,\"t\":\"open\",\"kind\":\"perks\"}",
+      "frame": { "v": 1, "ch": 1, "seq": 1, "t": "open", "kind": "perks" }
+    },
+    {
+      "raw": "{\"v\":1,\"ch\":1,\"seq\":2,\"t\":\"data\",\"snapshot\":{\"revision\":7,\"grants\":[]},\"presence\":[]}",
+      "frame": { "v": 1, "ch": 1, "seq": 2, "t": "data", "snapshot": { "revision": 7, "grants": [] }, "presence": [] }
+    },
+    {
+      "raw": "{\"v\":1,\"ch\":1,\"seq\":3,\"t\":\"error\",\"code\":\"unsupported\"}",
+      "frame": { "v": 1, "ch": 1, "seq": 3, "t": "error", "code": "unsupported" }
+    },
+    { "raw": "{\"v\":1,\"ch\":1,\"seq\":4,\"t\":\"end\"}", "frame": { "v": 1, "ch": 1, "seq": 4, "t": "end" } },
+    { "raw": "{\"v\":1,\"ch\":1,\"seq\":5,\"t\":\"close\"}", "frame": { "v": 1, "ch": 1, "seq": 5, "t": "close" } }
+  ],
+  "invalid": [
+    "{not json",
+    "\"hi\"",
+    "[1,2]",
+    "null",
+    "{\"v\":2,\"ch\":0,\"seq\":1,\"t\":\"ping\"}",
+    "{\"ch\":0,\"seq\":1,\"t\":\"ping\"}",
+    "{\"v\":1,\"ch\":-1,\"seq\":1,\"t\":\"ping\"}",
+    "{\"v\":1,\"ch\":1.5,\"seq\":1,\"t\":\"data\"}",
+    "{\"v\":1,\"ch\":\"0\",\"seq\":1,\"t\":\"ping\"}",
+    "{\"v\":1,\"ch\":0,\"seq\":0,\"t\":\"ping\"}",
+    "{\"v\":1,\"ch\":0,\"t\":\"ping\"}",
+    "{\"v\":1,\"ch\":0,\"seq\":1}",
+    "{\"v\":1,\"ch\":0,\"seq\":1,\"t\":\"\"}",
+    "{\"v\":1,\"ch\":0,\"seq\":1,\"t\":\"open\"}",
+    "{\"v\":1,\"ch\":0,\"seq\":1,\"t\":\"data\"}",
+    "{\"v\":1,\"ch\":2,\"seq\":1,\"t\":\"hello\"}",
+    "{\"v\":1,\"ch\":2,\"seq\":1,\"t\":\"ping\"}",
+    "{\"v\":1,\"ch\":2,\"seq\":1,\"t\":\"perks.changed\"}",
+    "{\"type\":\"pong\"}",
+    "{\"type\":\"perks.changed\"}"
+  ]
+}

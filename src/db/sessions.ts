@@ -76,6 +76,33 @@ export async function getSessionsByAgentGroup(agentGroupId: string): Promise<Ses
   return getDb().all<Session>('SELECT * FROM sessions WHERE agent_group_id = ?', agentGroupId);
 }
 
+/**
+ * A conversation's most recently active sessions: active rows of one agent
+ * group × messaging group whose `last_active` is at or after `activeSinceIso`
+ * (ISO-8601 UTC), newest first, at most `limit`. Bounded on purpose: callers
+ * on the message path must never need the whole session list of a busy
+ * channel. Sessions that never received a message (`last_active` NULL) are
+ * excluded.
+ */
+export async function getRecentConversationSessions(
+  agentGroupId: string,
+  messagingGroupId: string,
+  activeSinceIso: string,
+  limit: number,
+): Promise<Session[]> {
+  return getDb().all<Session>(
+    `SELECT * FROM sessions
+       WHERE agent_group_id = ? AND messaging_group_id = ? AND status = 'active'
+         AND last_active IS NOT NULL AND last_active >= ?
+       ORDER BY last_active DESC
+       LIMIT ?`,
+    agentGroupId,
+    messagingGroupId,
+    activeSinceIso,
+    limit,
+  );
+}
+
 export async function findSystemSession(agentGroupId: string, threadId: string): Promise<Session | undefined> {
   return getDb().get<Session>(
     `SELECT * FROM sessions
@@ -141,6 +168,25 @@ export async function updateSession(
   await getDb().run(`UPDATE sessions SET ${fields.join(', ')} WHERE id = @id`, values);
 }
 
+/** Give a session with no chat a chat; false when it already has one. */
+export async function bindUnboundSession(id: string, messagingGroupId: string): Promise<boolean> {
+  const result = await getDb().run(
+    'UPDATE sessions SET messaging_group_id = ? WHERE id = ? AND messaging_group_id IS NULL',
+    messagingGroupId,
+    id,
+  );
+  return result.changes > 0;
+}
+
+/** Undo bindUnboundSession, only while the session still has that chat. */
+export async function unbindSession(id: string, messagingGroupId: string): Promise<void> {
+  await getDb().run(
+    'UPDATE sessions SET messaging_group_id = NULL WHERE id = ? AND messaging_group_id = ?',
+    id,
+    messagingGroupId,
+  );
+}
+
 export async function deleteSession(id: string): Promise<void> {
   await getDb().run('DELETE FROM sessions WHERE id = ?', id);
 }
@@ -155,8 +201,8 @@ export async function deleteSession(id: string): Promise<void> {
  */
 export async function createPendingQuestion(pq: PendingQuestion): Promise<boolean> {
   const result = await getDb().run(
-    `INSERT INTO pending_questions (question_id, session_id, message_out_id, platform_id, channel_type, thread_id, title, options_json, created_at)
-       VALUES (@question_id, @session_id, @message_out_id, @platform_id, @channel_type, @thread_id, @title, @options_json, @created_at)
+    `INSERT INTO pending_questions (question_id, session_id, message_out_id, platform_id, channel_type, thread_id, title, question, options_json, created_at)
+       VALUES (@question_id, @session_id, @message_out_id, @platform_id, @channel_type, @thread_id, @title, @question, @options_json, @created_at)
        ON CONFLICT (question_id) DO NOTHING`,
     {
       question_id: pq.question_id,
@@ -166,6 +212,7 @@ export async function createPendingQuestion(pq: PendingQuestion): Promise<boolea
       channel_type: pq.channel_type,
       thread_id: pq.thread_id,
       title: pq.title,
+      question: pq.question ?? '',
       options_json: JSON.stringify(pq.options),
       created_at: pq.created_at,
     },
@@ -280,26 +327,40 @@ export async function getPendingApprovalsByAction(action: string): Promise<Pendi
 }
 
 /**
- * Resolve ask_question render metadata for any card. Approval-backed rows
- * include the original question body so the bridge can retain it when the
- * card resolves; generic pending_questions intentionally keep their existing
- * title + options shape.
+ * Resolve ask_question render metadata for any card. Every row type includes
+ * the original question body (empty on rows older than its migration) so the
+ * bridge can retain it when the card resolves.
  */
 export async function getAskQuestionRender(id: string): Promise<
   | {
       title: string;
       question?: string;
+      fromAgent?: boolean;
       options: import('../channels/ask-question.js').NormalizedOption[];
+      deferResolution?: boolean;
+      platformId?: string;
     }
   | undefined
 > {
   const q = await getPendingQuestion(id);
-  if (q) return { title: q.title, options: q.options };
-  const a = await getDb().get<{ title: string; question: string; options_json: string }>(
-    'SELECT title, question, options_json FROM pending_approvals WHERE approval_id = ?',
-    id,
-  );
-  if (a?.title) return { title: a.title, question: a.question, options: JSON.parse(a.options_json) };
+  // Only agent-asked questions land in pending_questions (delivery.ts).
+  if (q)
+    return { title: q.title, ...(q.question ? { question: q.question, fromAgent: true } : {}), options: q.options };
+  const a = await getDb().get<{
+    title: string;
+    question: string;
+    options_json: string;
+    action: string;
+    platform_id: string | null;
+  }>('SELECT title, question, options_json, action, platform_id FROM pending_approvals WHERE approval_id = ?', id);
+  if (a?.title)
+    return {
+      title: a.title,
+      question: a.question,
+      options: JSON.parse(a.options_json),
+      ...(a.action === 'gateway_request' ? { deferResolution: true } : {}),
+      ...(a.platform_id ? { platformId: a.platform_id } : {}),
+    };
 
   // Channel-registration + unknown-sender approvals persist the same render
   // metadata as pending_approvals — just SELECT and return.
@@ -320,4 +381,13 @@ export async function getAskQuestionRender(id: string): Promise<
   }
 
   return undefined;
+}
+
+/** Bind the delivered platform card after its approval row is durable. */
+export async function bindPendingApprovalMessage(approvalId: string, messageId: string): Promise<void> {
+  await getDb().run(
+    'UPDATE pending_approvals SET platform_message_id = ? WHERE approval_id = ?',
+    messageId,
+    approvalId,
+  );
 }

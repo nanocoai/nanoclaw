@@ -109,37 +109,43 @@ export function extendTool(name: string, extension: ToolExtension): void {
     passthroughKeysByTool.set(name, new Set(passthroughKeys));
 
     const base = def.handler;
-    def.handler = (args) => {
+    def.handler = (args, context) => {
       const entries: Record<string, unknown> = {};
       for (const key of passthroughKeysByTool.get(name) ?? []) {
         if (Object.prototype.hasOwnProperty.call(args, key) && args[key] !== undefined) {
           entries[key] = args[key];
         }
       }
-      if (Object.keys(entries).length === 0) return base(args);
-      return withOutboundPassthrough(entries, () => base(args));
+      if (Object.keys(entries).length === 0) return base(args, context);
+      return withOutboundPassthrough(entries, () => base(args, context));
     };
   }
 }
 
-export async function startMcpServer(
+export function createMcpServer(
   run: <T>(action: () => T | Promise<T>) => Promise<T> = async (action) => action(),
-): Promise<void> {
+): Server {
   const server = new Server({ name: 'nanoclaw', version: '2.0.0' }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: allTools.map((t) => t.tool),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, context) => {
     const { name, arguments: args } = request.params;
     const tool = toolMap.get(name);
     if (!tool) {
       return { content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
     }
-    return run(() => tool.handler(args ?? {}));
+    return run(() => tool.handler(args ?? {}, { signal: context.signal }));
   });
+  return server;
+}
 
+export async function startMcpServer(
+  run: <T>(action: () => T | Promise<T>) => Promise<T> = async (action) => action(),
+): Promise<void> {
+  const server = createMcpServer(run);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   log(`MCP server started with ${allTools.length} tools: ${allTools.map((t) => t.tool.name).join(', ')}`);

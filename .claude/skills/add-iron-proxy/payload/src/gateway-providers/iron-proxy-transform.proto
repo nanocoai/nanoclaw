@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package transform.v1;
+
+service TransformService {
+  rpc TransformRequest(TransformRequestRequest) returns (TransformRequestResponse);
+  rpc TransformResponse(TransformResponseRequest) returns (TransformResponseResponse);
+}
+
+enum TransformAction {
+  TRANSFORM_ACTION_UNSPECIFIED = 0;
+  TRANSFORM_ACTION_CONTINUE = 1;
+  TRANSFORM_ACTION_REJECT = 2;
+}
+
+// Iron sends more context fields. The approval bridge intentionally ignores
+// them; trusted workload identity arrives only as operator-owned gRPC metadata.
+message TransformContext {}
+
+message HeaderValues {
+  repeated string values = 1;
+}
+
+message HttpRequest {
+  string method = 1;
+  string url = 2;
+  map<string, HeaderValues> headers = 3;
+  bytes body = 4;
+  string host = 5;
+  string remote_addr = 6;
+}
+
+message HttpResponse {
+  int32 status_code = 1;
+  map<string, HeaderValues> headers = 2;
+  bytes body = 3;
+}
+
+message TransformRequestRequest {
+  TransformContext context = 1;
+  HttpRequest request = 2;
+}
+
+message TransformRequestResponse {
+  TransformAction action = 1;
+  HttpResponse response = 2;
+  HttpRequest modified_request = 3;
+  map<string, string> annotations = 4;
+}
+
+message TransformResponseRequest {
+  TransformContext context = 1;
+  HttpRequest request = 2;
+  HttpResponse response = 3;
+}
+
+message TransformResponseResponse {
+  TransformAction action = 1;
+  HttpResponse modified_response = 2;
+  map<string, string> annotations = 3;
+}

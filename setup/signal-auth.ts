@@ -27,7 +27,7 @@
  *
  * STATUS values match the runner's vocabulary (success/skipped/failed) so
  * spawnStep recognises them and sets `ok` correctly; Signal-specific UI
- * lives in setup/channels/signal.ts.
+ * lives in the add-signal skill's SKILL.md.
  *
  * If one or more accounts are already linked (discovered via
  * `signal-cli -o json listAccounts`), the step emits SIGNAL_AUTH

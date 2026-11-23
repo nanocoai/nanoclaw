@@ -11,7 +11,7 @@
  *
  * See docs/setup-flow.md for the three-level output contract.
  */
-import { spawn, spawnSync } from 'child_process';
+import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import fs from 'fs';
 
 import * as p from '@clack/prompts';
@@ -40,6 +40,10 @@ export type QuietChildResult = {
   transcript: string;
   terminal: Block | null;
   blocks: Block[];
+  /** Set when the child was killed by a signal. */
+  signal?: NodeJS.Signals;
+  /** Set when the child could not be started at all. */
+  error?: Error;
 };
 
 export type SpinnerLabels = {
@@ -122,25 +126,10 @@ export function spawnStep(
 
     const child = spawn('pnpm', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const stream = new StatusStream(onBlock);
-    const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
+    const raw = openRawLog(rawLogPath);
     raw.write(`# ${stepName} — ${new Date().toISOString()}\n\n`);
 
-    // Per-line forwarder for the optional onLine callback. We keep our own
-    // buffer (separate from StatusStream's) so the parser still gets raw
-    // chunks and isn't forced through a line-by-line path it doesn't need.
-    let lineBuf = '';
-    const pushLines = (chunk: string): void => {
-      if (!onLine) return;
-      lineBuf += chunk;
-      let idx: number;
-      while ((idx = lineBuf.indexOf('\n')) !== -1) {
-        const line = lineBuf.slice(0, idx).replace(/\r/g, '');
-        lineBuf = lineBuf.slice(idx + 1);
-        if (line.startsWith('=== NANOCLAW SETUP:')) continue;
-        if (line.startsWith('=== END ===')) continue;
-        if (line.trim()) onLine(line);
-      }
-    };
+    const pushLines = lineFeed(onLine);
 
     child.stdout.on('data', (chunk: Buffer) => {
       const s = chunk.toString('utf-8');
@@ -155,8 +144,8 @@ export function spawnStep(
       pushLines(s);
     });
 
-    child.on('close', (code) => {
-      raw.end();
+    child.on('close', async (code) => {
+      await endRawLog(raw);
       const terminal = [...stream.blocks].reverse().find((b) => b.fields.STATUS) ?? null;
       const status = terminal?.fields.STATUS;
       const ok = code === 0 && (status === 'success' || status === 'skipped');
@@ -171,36 +160,146 @@ export function spawnStep(
   });
 }
 
+/**
+ * A raw log opens on the threadpool and can open after a fast child is done.
+ * A run resolves only once its log is flushed, so callers can read it at once,
+ * and a log that cannot be written fails quietly instead of crashing setup.
+ */
+function openRawLog(rawLogPath: string): fs.WriteStream {
+  const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
+  raw.on('error', () => undefined);
+  return raw;
+}
+
+/** Resolves once the raw log is flushed, or has failed. */
+function endRawLog(raw: fs.WriteStream): Promise<void> {
+  return new Promise((done) => raw.end(() => done()));
+}
+
+/**
+ * Per-line forwarder for an optional onLine callback: CR stripped, blank and
+ * status-block control lines dropped. It keeps its own buffer, apart from
+ * StatusStream's, so the parser still gets raw chunks.
+ */
+function lineFeed(onLine?: (line: string) => void): (chunk: string) => void {
+  let lineBuf = '';
+  return (chunk) => {
+    if (!onLine) return;
+    lineBuf += chunk;
+    let idx: number;
+    while ((idx = lineBuf.indexOf('\n')) !== -1) {
+      const line = lineBuf.slice(0, idx).replace(/\r/g, '');
+      lineBuf = lineBuf.slice(idx + 1);
+      if (line.startsWith('=== NANOCLAW SETUP:')) continue;
+      if (line.startsWith('=== END ===')) continue;
+      if (line.trim()) onLine(line);
+    }
+  };
+}
+
+/** How long a stopped child's process group gets to exit before SIGKILL. */
+export const STOP_GRACE_MS = 5_000;
+
+/**
+ * Stop handling for a child in its own process group. `stop` sends its reason
+ * (a signal name) to the whole group, then SIGKILL after STOP_GRACE_MS. Setup
+ * exiting first SIGKILLs the group at once: nothing can wait during 'exit'.
+ * `settled()`, run once the child has closed, waits for a stopped group to go.
+ */
+function watchGroup(child: ChildProcess, stop: AbortSignal): { settled: () => Promise<void> } {
+  let grace: NodeJS.Timeout | undefined;
+  /** Signal 0 checks the group still exists. */
+  const signalGroup = (signal: NodeJS.Signals | 0): boolean => {
+    if (!child.pid) return false;
+    try {
+      process.kill(-child.pid, signal);
+      return true;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  };
+  const onStop = (): void => {
+    signalGroup(typeof stop.reason === 'string' ? (stop.reason as NodeJS.Signals) : 'SIGTERM');
+    grace = setTimeout(() => signalGroup('SIGKILL'), STOP_GRACE_MS);
+  };
+  const onExit = (): void => void signalGroup('SIGKILL');
+  if (stop.aborted) onStop();
+  else stop.addEventListener('abort', onStop, { once: true });
+  process.once('exit', onExit);
+
+  return {
+    settled: async () => {
+      // Closed pipes don't prove the group is gone: a descendant may have its
+      // own stdio. Bounded, in case a member never gets reaped.
+      for (let i = 0; i < (STOP_GRACE_MS + 1_000) / 50 && stop.aborted && signalGroup(0); i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      stop.removeEventListener('abort', onStop);
+      process.off('exit', onExit);
+      clearTimeout(grace);
+    },
+  };
+}
+
+/**
+ * `opts.stop` puts the child in its own process group (and session) so that
+ * aborting it stops every process the command started; the promise then
+ * resolves only once that group is gone. Such a child no longer gets the
+ * terminal's Ctrl-C or hangup: the caller forwards them.
+ */
 export function spawnQuiet(
   cmd: string,
   args: string[],
   rawLogPath: string,
   envOverride?: NodeJS.ProcessEnv,
+  opts?: { cwd?: string; onLine?: (line: string) => void; stop?: AbortSignal },
 ): Promise<QuietChildResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
+      cwd: opts?.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: envOverride ? { ...process.env, ...envOverride } : process.env,
+      detached: opts?.stop !== undefined,
     });
+    const group = opts?.stop ? watchGroup(child, opts.stop) : undefined;
     let transcript = '';
-    const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
+    let spawnError: Error | undefined;
+    const raw = openRawLog(rawLogPath);
     raw.write(`# ${[cmd, ...args].join(' ')} — ${new Date().toISOString()}\n\n`);
     const blocks: Block[] = [];
     const stream = new StatusStream((b) => blocks.push(b));
+    const pushLines = lineFeed(opts?.onLine);
     child.stdout.on('data', (c: Buffer) => {
       const s = c.toString('utf-8');
       transcript += s;
       stream.write(s);
       raw.write(c);
+      pushLines(s);
     });
     child.stderr.on('data', (c: Buffer) => {
-      transcript += c.toString('utf-8');
+      const s = c.toString('utf-8');
+      transcript += s;
       raw.write(c);
+      pushLines(s);
     });
-    child.on('close', (code) => {
-      raw.end();
+    // A command that cannot start emits 'error' and then 'close'. Without a
+    // listener the 'error' would crash setup instead of failing the step.
+    child.on('error', (err) => {
+      spawnError = err;
+    });
+    child.on('close', async (code, signal) => {
+      await group?.settled();
+      await endRawLog(raw);
       const terminal = [...blocks].reverse().find((b) => b.fields.STATUS) ?? null;
-      resolve({ ok: code === 0, exitCode: code ?? 1, transcript, terminal, blocks });
+      resolve({
+        ok: code === 0 && !spawnError,
+        exitCode: code ?? 1,
+        transcript,
+        terminal,
+        blocks,
+        ...(signal ? { signal } : {}),
+        ...(spawnError ? { error: spawnError } : {}),
+      });
     });
   });
 }
@@ -373,16 +472,16 @@ export async function fail(stepName: string, msg: string, hint?: string, rawLogP
   if (hint) p.log.message(k.dim(hint));
   p.log.message(k.dim('Logs: logs/setup.log · Raw: logs/setup-steps/'));
 
-  const ranFix = await offerClaudeOnFailure({ stepName, msg, hint, rawLogPath });
+  const assisted = await offerClaudeOnFailure({ stepName, msg, hint, rawLogPath });
 
-  // If the user just ran a Claude-suggested fix, offer to resume the flow
-  // at the step that failed instead of aborting. We re-exec via spawnSync
+  // Returning from assistance does not prove that the failure was repaired.
+  // Offer to verify by resuming the failed step. We re-exec via spawnSync
   // and pass NANOCLAW_SKIP with every step that already completed so the
   // child skips them and picks up where we left off.
-  if (ranFix) {
+  if (assisted) {
     const retry = ensureAnswer(
       await p.confirm({
-        message: `Fix applied. Retry the ${stepName} step?`,
+        message: `Retry the ${stepName} step to check whether the problem is resolved?`,
         initialValue: true,
       }),
     );

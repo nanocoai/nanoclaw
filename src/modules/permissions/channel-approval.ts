@@ -28,7 +28,8 @@
  * On connect new agent (handler in index.ts):
  *   - Prompt for a free-text agent name via DM
  *   - On reply: create the agent group + filesystem, then wire
- *     and replay as above
+ *     and replay as above. A name whose folder can't be a group folder
+ *     creates nothing; the approver is told and asked for another name.
  *
  * On reject:
  *   - Set `messaging_groups.denied_at = now()` so the router stops
@@ -45,12 +46,13 @@
  *   - Delivery adapter missing.
  */
 import { normalizeOptions, type NormalizedOption, type RawOption } from '../../channels/ask-question.js';
+import { escapeInvisibles, quoteForCard } from '../../card-text.js';
 import { resolveWiringDefaults } from '../../channels/channel-defaults.js';
-import { createAgentGroup, getAgentGroup, getAgentGroupByFolder, getAllAgentGroups } from '../../db/agent-groups.js';
+import { createAgentGroup, getAgentGroup, getAllAgentGroups } from '../../db/agent-groups.js';
 import { getChannelAdapter } from '../../channels/channel-registry.js';
 import { getMessagingGroup, updateMessagingGroup } from '../../db/messaging-groups.js';
 import { getDeliveryAdapter } from '../../delivery.js';
-import { groupFolderExistsOnDisk } from '../../group-folder.js';
+import { newGroupFolder } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { log } from '../../log.js';
 import type { InboundEvent, ResolvedConversation } from '../../channels/adapter.js';
@@ -124,7 +126,7 @@ async function buildApprovalOptions(agentGroups: AgentGroup[], approverUserId?: 
   if (visibleAgentGroups.length === 1) {
     options.push({
       label: `Connect to ${visibleAgentGroups[0].name}`,
-      selectedLabel: `✅ Connected to ${visibleAgentGroups[0].name}`,
+      selectedLabel: `✅ Connected to ${quoteForCard(visibleAgentGroups[0].name)}`,
       value: `${CONNECT_PREFIX}${visibleAgentGroups[0].id}`,
       style: 'primary',
     });
@@ -158,10 +160,10 @@ function buildQuestionText(
   ruleNote: string | null,
   resolvedConversation: ResolvedConversation | null,
 ): string {
-  const who = senderName ?? 'Someone';
+  const who = senderName ? quoteForCard(senderName) : 'Someone';
   const note = ruleNote ? ` If connected, the agent ${ruleNote}.` : '';
   if (conversationType === 'channel') {
-    const where = channelName ? `${channelName} on ${channelType}` : `a ${channelType} channel`;
+    const where = channelName ? `${quoteForCard(channelName)} on ${channelType}` : `a ${channelType} channel`;
     return `${who} mentioned your bot in ${where}.${note} ${AGENT_ACCESS_SCOPE_WARNING} How would you like to handle this channel?`;
   }
   if (conversationType === 'group_dm') {
@@ -171,7 +173,7 @@ function buildQuestionText(
     const otherParticipants = participantNames.filter((name, index) =>
       useParticipantIds ? participantIds![index] !== senderId : name.toLowerCase() !== senderName?.toLowerCase(),
     );
-    const participants = formatParticipantList(otherParticipants);
+    const participants = formatParticipantList(otherParticipants.map(quoteForCard));
     const withParticipants = participants ? ` with ${participants}` : '';
     return `${who} mentioned your bot in a group chat${withParticipants} on ${channelType}.${note} ${AGENT_ACCESS_SCOPE_WARNING} How would you like to handle this group chat?`;
   }
@@ -189,7 +191,8 @@ function formatParticipantList(names: string[]): string {
  * resolution the wire step uses. Null when the declaration is unresolvable
  * (mis-declared pattern mode) — the card still works without the preview.
  */
-function describeResolvedRule(
+/** Exported for tests. */
+export function describeResolvedRule(
   channelKey: string,
   isGroup: boolean,
   agentGroupName: string,
@@ -202,10 +205,25 @@ function describeResolvedRule(
     }
     return engage.engage_pattern === '.'
       ? 'will respond to all messages'
-      : `will respond to messages matching ${engage.engage_pattern}`;
+      : `will respond to messages matching \`${escapeInvisibles(engage.engage_pattern ?? '')}\``;
   } catch {
     return null;
   }
+}
+
+// Receipt for the currently delivered card. Unknown IDs are never evidence that
+// a click belongs to a replacement request after an ambiguous failed delivery.
+const deliveredCards = new Map<string, { createdAt: string; messageId: string | undefined }>();
+export function recordChannelApprovalCard(groupId: string, createdAt: string, messageId: string | undefined): void {
+  deliveredCards.set(groupId, { createdAt, messageId });
+}
+export function isCurrentChannelApprovalCard(
+  groupId: string,
+  createdAt: string,
+  messageId: string | undefined,
+): boolean {
+  const card = deliveredCards.get(groupId);
+  return !!messageId && card?.createdAt === createdAt && card.messageId === messageId;
 }
 
 // ── Main flow ──
@@ -344,12 +362,13 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
   );
   const options = normalizeOptions(await buildApprovalOptions(agentGroups, delivery.userId));
 
+  const createdAt = new Date().toISOString();
   await createPendingChannelApproval({
     messaging_group_id: messagingGroupId,
     agent_group_id: referenceGroup.id,
     original_message: JSON.stringify(event),
     approver_user_id: delivery.userId,
-    created_at: new Date().toISOString(),
+    created_at: createdAt,
     title,
     question,
     options_json: JSON.stringify(options),
@@ -362,7 +381,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
   }
 
   try {
-    await adapter.deliver(
+    const messageId = await adapter.deliver(
       delivery.messagingGroup.channel_type,
       delivery.messagingGroup.platform_id,
       null,
@@ -377,6 +396,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
       undefined,
       delivery.messagingGroup.instance,
     );
+    recordChannelApprovalCard(messagingGroupId, createdAt, messageId);
     log.info('Channel registration card delivered', {
       messagingGroupId,
       agentGroupCount: agentGroups.length,
@@ -399,7 +419,7 @@ export async function buildAgentSelectionOptions(
   const visibleAgentGroups = await visibleAgentGroupsForApprover(agentGroups, approverUserId);
   const options: RawOption[] = visibleAgentGroups.map((ag) => ({
     label: ag.name,
-    selectedLabel: `✅ Connected to ${ag.name}`,
+    selectedLabel: `✅ Connected to ${quoteForCard(ag.name)}`,
     value: `${CONNECT_PREFIX}${ag.id}`,
   }));
   options.push({
@@ -412,19 +432,17 @@ export async function buildAgentSelectionOptions(
 
 /**
  * Create a new agent group and initialize its filesystem. Handles
- * folder-name collisions with numeric suffixes.
+ * folder-name collisions with numeric suffixes. Returns why, writing nothing,
+ * when the folder can't be a group folder.
  */
-export async function createNewAgentGroup(name: string): Promise<AgentGroup> {
-  let folder = toFolder(name);
-  const baseFolder = folder;
-  let suffix = 2;
-  // Disk-aware dedupe (A4): a folder present on disk with no claiming DB row
-  // is deleted-group residue — adopting it would silently re-scope the old
-  // group's data under the new agent's identity. Skip to the next suffix
-  // instead (templates/create-agent.ts precedent).
-  while ((await getAgentGroupByFolder(folder)) || groupFolderExistsOnDisk(folder)) {
-    folder = `${baseFolder}-${suffix}`;
-    suffix++;
+export async function createNewAgentGroup(name: string): Promise<AgentGroup | string> {
+  let folder: string;
+  try {
+    folder = await newGroupFolder(toFolder(name));
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    log.warn('Channel registration: new agent refused, invalid folder', { name, why });
+    return why;
   }
 
   const agId = `ag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

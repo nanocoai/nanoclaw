@@ -32,7 +32,10 @@ import { registerTelegramPreStep } from './telegram-pre-step.js';
  * assistant name. Resolves to the skill inputs to pre-bind, or undefined for
  * the manual walkthrough.
  */
-export type ChannelPreStep = (agentName: string) => Promise<Record<string, string> | undefined>;
+export type ChannelPreStep = (
+  agentName: string,
+  options?: { browserConsent?: boolean },
+) => Promise<Record<string, string> | undefined>;
 
 const preSteps = new Map<string, ChannelPreStep>();
 const companionSkills = new Map<string, readonly string[]>();

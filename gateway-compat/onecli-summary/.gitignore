@@ -1,0 +1,5 @@
+/target/
+/src/apps.rs
+/src/cloud_summary.rs
+/src/summary.rs
+/src/summary/

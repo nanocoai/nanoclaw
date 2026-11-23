@@ -18,6 +18,7 @@ import {
   unknownInputKeys,
   type RunSkillOptions,
 } from './skill-driver.js';
+import * as setupLog from '../logs.js';
 import { fullyApplied, type ApplyEvent, type ApplyResult } from '../../scripts/skill-apply.js';
 
 // Shared test state for the clack + claude-handoff mocks (hoisted so the vi.mock
@@ -84,6 +85,22 @@ function scratch(): { root: string; skill: string } {
 }
 
 describe('thin skill driver', () => {
+  it('forwards refresh mode so materialized payload updates replace installed files', async () => {
+    const { root, skill } = scratch();
+    mkdirSync(join(skill, 'payload'));
+    writeFileSync(join(skill, 'payload', 'provider.ts'), 'new provider\n');
+    writeFileSync(join(root, 'provider.ts'), 'old provider\n');
+    writeFileSync(
+      join(skill, 'SKILL.md'),
+      '# refresh demo\n\n```nc:copy\npayload/provider.ts -> provider.ts\n```\n',
+    );
+
+    const res = await runSkill(skill, { projectRoot: root, mode: 'refresh', exec: () => '' });
+
+    expect(fullyApplied(res)).toBe(true);
+    expect(readFileSync(join(root, 'provider.ts'), 'utf8')).toBe('new provider\n');
+  });
+
   it('resolves prompts via resolveInput, emits operator events, and execs wiring', async () => {
     const { root, skill } = scratch();
     const asked: Array<{ name: string; secret: boolean }> = [];
@@ -169,6 +186,38 @@ describe('thin skill driver', () => {
     expect(log).toContain('warn-line'); // stderr captured, not echoed to the wizard
     expect(log).toContain('$ echo dying-gasp >&2; exit 3');
     expect(log).toContain('dying-gasp'); // the failing command's output survives too
+  });
+
+  it.each([0, 7])('redacts resolved secrets through the default executor (exit %s)', async (exit) => {
+    const { root, skill } = scratch();
+    const secret = 'test-credential-never-log-this';
+    writeFileSync(
+      join(skill, 'SKILL.md'),
+      `
+\`\`\`nc:prompt token secret
+Token
+\`\`\`
+\`\`\`nc:run capture:echoed
+printf '%s' '{{token}}'; printf '%s' '{{token}}' >&2; exit ${exit}
+\`\`\`
+`,
+    );
+    const events: ApplyEvent[] = [];
+    const rawLog = join(root, 'raw.log');
+    const logPath = vi.spyOn(setupLog, 'stepRawLog').mockReturnValue(rawLog);
+    const result = await runSkill(skill, {
+      projectRoot: root,
+      inputs: { token: secret },
+      onEvent: (e) => {
+        events.push(e);
+      },
+    });
+    logPath.mockRestore();
+    expect(fullyApplied(result)).toBe(exit === 0);
+    expect(JSON.stringify({ result, events })).not.toContain(secret);
+    const log = readFileSync(rawLog, 'utf8');
+    expect(log).not.toContain(secret);
+    expect(log).toContain('[REDACTED]');
   });
 
   it('hostExecStream runs a step and captures the terminal status block fields (for effect:step)', async () => {

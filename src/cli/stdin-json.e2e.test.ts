@@ -10,7 +10,7 @@ import { register } from './registry.js';
 import { startCliServer, stopCliServer } from './socket-server.js';
 
 type PrintArgs = {
-  'argv-value': string;
+  argv_value: string;
   stdin_value: string;
   nested: { enabled: boolean };
 };
@@ -21,7 +21,7 @@ register<PrintArgs, PrintArgs>({
   access: 'open',
   parseArgs: (raw) => {
     if (
-      typeof raw['argv-value'] !== 'string' ||
+      typeof raw.argv_value !== 'string' ||
       typeof raw.stdin_value !== 'string' ||
       !raw.nested ||
       typeof raw.nested !== 'object' ||
@@ -54,7 +54,7 @@ it('pipes stdin JSON through the real CLI and socket server into a registered co
       id: expect.any(String),
       ok: true,
       data: {
-        'argv-value': 'from-argv',
+        argv_value: 'from-argv',
         stdin_value: 'from-stdin',
         nested: { enabled: true },
       },
@@ -90,7 +90,7 @@ it('runs when the CLI entry point is invoked through a symlink', async () => {
     expect(JSON.parse(result.stdout)).toMatchObject({
       ok: true,
       data: {
-        'argv-value': 'from-argv',
+        argv_value: 'from-argv',
         stdin_value: 'from-stdin',
         nested: { enabled: true },
       },

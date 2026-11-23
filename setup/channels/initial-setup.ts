@@ -27,7 +27,7 @@ export function initialChannelOptions(): { value: ChannelChoice; label: string; 
     {
       value: 'mattermost',
       label: 'Yes, connect Mattermost',
-      hint: 'use your server or create an evaluation server',
+      hint: 'connect your server or get setup guidance',
     },
     { value: 'teams', label: 'Yes, connect Microsoft Teams' },
     { value: 'telegram', label: 'Yes, connect Telegram' },

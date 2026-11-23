@@ -11,7 +11,8 @@ import type { ProviderOptions } from './types.js';
 // never reach the API, leaving an install that believes it enabled the fast
 // tier paying the ordinary rate — or expecting the higher one and not getting
 // it. The absent case matters just as much: an install that never sets the
-// variable must send exactly the options it always did.
+// variable must send only the execution policy's fixed settings (the claude.ai
+// skill/plugin sync opt-out), which every group gets whatever its speed.
 
 let lastOptions: Record<string, unknown> | undefined;
 
@@ -55,20 +56,22 @@ async function drive(options: ProviderOptions): Promise<void> {
   }
 }
 
-describe('fast mode reaches the SDK through settings', () => {
-  it('sends settings.fastMode when enabled', async () => {
+const POLICY_SETTINGS = { syncClaudeAiSkills: false, syncClaudeAiPlugins: false };
+
+describe('flag-level settings: claude.ai sync opt-out always, fastMode when enabled', () => {
+  it('sends settings.fastMode alongside the policy settings when enabled', async () => {
     await drive({ speed: 'fast' });
-    expect(lastOptions?.settings).toEqual({ fastMode: true });
+    expect(lastOptions?.settings).toEqual({ ...POLICY_SETTINGS, fastMode: true });
   });
 
-  it('sends no settings key at all when not enabled', async () => {
+  it('sends only the policy settings when not enabled', async () => {
     await drive({});
-    expect(lastOptions && 'settings' in lastOptions).toBe(false);
+    expect(lastOptions?.settings).toEqual(POLICY_SETTINGS);
   });
 
-  it('sends no settings key for standard speed', async () => {
+  it('sends only the policy settings for standard speed', async () => {
     await drive({ speed: 'standard' });
-    expect(lastOptions && 'settings' in lastOptions).toBe(false);
+    expect(lastOptions?.settings).toEqual(POLICY_SETTINGS);
   });
 
   it('leaves the settingSources chain untouched either way', async () => {

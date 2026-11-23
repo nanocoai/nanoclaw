@@ -5,6 +5,7 @@
  * The host's existing DB lookup remains the final fallback for core question
  * and approval rows.
  */
+import type { Adapter, ActionEvent } from 'chat';
 import { getAskQuestionRender } from '../db/sessions.js';
 import { log } from '../log.js';
 import type { NormalizedOption } from './ask-question.js';
@@ -12,7 +13,19 @@ import type { NormalizedOption } from './ask-question.js';
 export interface QuestionRender {
   title: string;
   question?: string;
+  /** The question is the agent's own markup, sent unescaped, so the resolved card keeps it unescaped too. */
+  fromAgent?: boolean;
   options: NormalizedOption[];
+  /**
+   * Optional channel presentation. Decision authorization always remains in core.
+   * It must show the whole request: the bridge does not length-check it.
+   */
+  renderMessage?: (questionId: string) => Parameters<Adapter['postMessage']>[1];
+  renderTerminal?: (resolution: string) => Parameters<Adapter['postMessage']>[1];
+  /** The coordinator updates the card only after it authorizes and records the decision. */
+  deferResolution?: boolean;
+  /** The chat the card was sent to, where its row records one. */
+  platformId?: string;
 }
 
 export type QuestionRenderResolver = (
@@ -37,4 +50,14 @@ export async function resolveQuestionRender(questionId: string): Promise<Questio
     /* eslint-enable no-catch-all/no-catch-all */
   }
   return getAskQuestionRender(questionId);
+}
+
+export type QuestionActionHandler = (event: ActionEvent, adapter: Adapter, instance: string) => Promise<boolean>;
+const actionHandlers: QuestionActionHandler[] = [];
+export function registerQuestionActionHandler(handler: QuestionActionHandler): void {
+  actionHandlers.push(handler);
+}
+export async function dispatchQuestionAction(event: ActionEvent, adapter: Adapter, instance: string): Promise<boolean> {
+  for (const handler of actionHandlers) if (await handler(event, adapter, instance)) return true;
+  return false;
 }

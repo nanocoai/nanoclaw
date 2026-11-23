@@ -1,5 +1,5 @@
 /**
- * Egress lockdown — force ALL agent traffic through the OneCLI gateway.
+ * Egress lockdown — force all agent traffic through the selected gateway.
  * Agents run on a Docker `--internal` network (no internet route) with the
  * gateway attached as host.docker.internal, so the injected proxy is the only
  * reachable hop. Non-root, no NET_ADMIN — the agent can't undo it.
@@ -9,22 +9,22 @@
  */
 import { execFileSync } from 'child_process';
 
-import { EGRESS_LOCKDOWN, EGRESS_NETWORK, ONECLI_GATEWAY_CONTAINER } from './config.js';
+import { EGRESS_LOCKDOWN, EGRESS_NETWORK } from './config.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
+import type { NetworkAccessIntent } from './drivers/types.js';
 import { log } from './log.js';
 
 // Perimeter knobs (locked-down network, gateway container, on/off flag) are read
 // via config.ts so they honor .env under the shipped service, not just process.env.
 export { EGRESS_NETWORK };
 
+// The sweep re-heals the last selected gateway after its container is restarted.
+let selectedAccess: NetworkAccessIntent | undefined;
+
 /** Raised when lockdown is requested but can't be established. */
 export class EgressLockdownError extends Error {
   constructor(reason: string) {
-    super(
-      `Egress lockdown is on (NANOCLAW_EGRESS_LOCKDOWN=true) but ${reason}. ` +
-        `Refusing to spawn with open egress. Start the OneCLI gateway container ` +
-        `"${ONECLI_GATEWAY_CONTAINER}", or set NANOCLAW_EGRESS_LOCKDOWN=false to opt out.`,
-    );
+    super(`Egress lockdown is on (NANOCLAW_EGRESS_LOCKDOWN=true) but ${reason}. Refusing to spawn with open egress.`);
     this.name = 'EgressLockdownError';
   }
 }
@@ -38,56 +38,94 @@ function dockerOk(args: string[]): boolean {
   }
 }
 
-/** Is the OneCLI gateway currently attached to the egress network? */
-function gatewayAttached(): boolean {
+/**
+ * Whether the egress network is `--internal`; undefined when it does not exist.
+ * Any other inspect failure (daemon down, timeout) throws: creating the network
+ * would fail too, under a misleading message.
+ */
+function egressNetworkInternal(): boolean | undefined {
+  try {
+    const out = execFileSync(
+      CONTAINER_RUNTIME_BIN,
+      ['network', 'inspect', EGRESS_NETWORK, '--format', '{{.Internal}}'],
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: 'utf-8',
+        timeout: 15000,
+      },
+    );
+    return out.trim() === 'true';
+  } catch (err) {
+    const { stderr, message } = err as { stderr?: unknown; message?: unknown };
+    if (/no such network|not found/i.test(`${String(stderr ?? '')} ${String(message ?? '')}`)) return undefined;
+    throw new EgressLockdownError(`the "${EGRESS_NETWORK}" network could not be inspected`);
+  }
+}
+
+/** Is the selected gateway currently attached to the egress network? */
+function gatewayAttached(identity: string): boolean {
   try {
     const out = execFileSync(
       CONTAINER_RUNTIME_BIN,
       ['network', 'inspect', EGRESS_NETWORK, '--format', '{{range .Containers}}{{.Name}} {{end}}'],
       { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8', timeout: 15000 },
     );
-    return out.split(/\s+/).includes(ONECLI_GATEWAY_CONTAINER);
+    return out.split(/\s+/).includes(identity);
   } catch {
     return false;
   }
 }
 
 /**
- * Ensure the egress network exists with the OneCLI gateway attached (aliased
- * host.docker.internal). Idempotent + self-healing. Returns false when lockdown
+ * Ensure the egress network exists with the selected gateway attached.
+ * Idempotent + self-healing. Returns false when lockdown
  * is disabled (caller uses the host gateway), true when it's active. Throws
  * EgressLockdownError when enabled but unestablishable — fail fast rather than
  * spawn an agent with open egress.
  */
-export function ensureEgressNetwork(): boolean {
+export function ensureEgressNetwork(access = selectedAccess): boolean {
   if (!EGRESS_LOCKDOWN) return false;
+  if (!access) return false;
+  selectedAccess = access;
+  if (access.target.kind !== 'runtime') {
+    throw new EgressLockdownError(`the selected gateway target '${access.target.kind}' cannot join a locked network`);
+  }
 
-  if (
-    !dockerOk(['network', 'inspect', EGRESS_NETWORK]) &&
-    !dockerOk(['network', 'create', '--internal', EGRESS_NETWORK])
-  ) {
+  // The name alone proves nothing: a network made by hand, or a setting naming
+  // an ordinary one, would put agents on an uplink.
+  const internal = egressNetworkInternal();
+  if (internal === false) {
+    throw new EgressLockdownError(`the "${EGRESS_NETWORK}" network is not internal`);
+  }
+  if (internal === undefined && !dockerOk(['network', 'create', '--internal', EGRESS_NETWORK])) {
     throw new EgressLockdownError(`the "${EGRESS_NETWORK}" internal network could not be created`);
   }
 
-  if (gatewayAttached()) return true;
+  if (gatewayAttached(access.target.identity)) return true;
 
   if (
-    dockerOk(['network', 'connect', '--alias', 'host.docker.internal', EGRESS_NETWORK, ONECLI_GATEWAY_CONTAINER]) &&
-    gatewayAttached()
+    dockerOk(['network', 'connect', '--alias', access.endpoint, EGRESS_NETWORK, access.target.identity]) &&
+    gatewayAttached(access.target.identity)
   ) {
-    log.info('Egress lockdown: OneCLI gateway attached', {
+    log.info('Egress lockdown: gateway attached', {
       network: EGRESS_NETWORK,
-      gateway: ONECLI_GATEWAY_CONTAINER,
+      gateway: access.target.identity,
+      endpoint: access.endpoint,
     });
     return true;
   }
 
   throw new EgressLockdownError(
-    `the OneCLI gateway "${ONECLI_GATEWAY_CONTAINER}" could not be attached to "${EGRESS_NETWORK}"`,
+    `gateway target "${access.target.identity}" could not be attached to "${EGRESS_NETWORK}"`,
   );
 }
 
 /** CLI args placing a container on the locked-down egress network. */
 export function egressNetworkArgs(): string[] {
   return ['--network', EGRESS_NETWORK];
+}
+
+/** Whether a container attached to these networks is on the egress network alone. */
+export function onEgressNetworkOnly(networks: readonly string[]): boolean {
+  return networks.length > 0 && networks.every((name) => name === EGRESS_NETWORK);
 }

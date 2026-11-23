@@ -31,7 +31,8 @@ case "$(uname -s)" in
     ;;
   Linux)
     echo "STEP: docker-get-script"
-    curl -fsSL https://get.docker.com | sh
+    # /bin/sh by absolute path: a foreign `sh` first on PATH must not run the installer.
+    curl -fsSL https://get.docker.com | /bin/sh
     echo "STEP: usermod-docker-group"
     sudo usermod -aG docker "$USER"
     echo "NOTE: you may need to log out and back in for docker group membership to take effect"

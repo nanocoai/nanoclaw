@@ -1,7 +1,6 @@
-import { spawnSync } from 'node:child_process';
-
 import { describe, expect, it } from 'bun:test';
 
+import { runBun } from '../test-utils/run-bun.js';
 import { MAX_STDIN_JSON_BYTES, readStdinJsonArgs, type StdinJsonStream } from './stdin-json.js';
 
 async function* stream(...chunks: Array<string | Uint8Array>): StdinJsonStream {
@@ -47,14 +46,10 @@ describe('container CLI bounded stdin JSON', () => {
     );
   });
 
-  it('recognizes --stdin-json before opening the session databases', () => {
-    const result = spawnSync(process.execPath, ['src/cli/ncl.ts', 'groups', 'list', '--stdin-json'], {
-      cwd: process.cwd(),
-      encoding: 'utf8',
-      input: '{"broken":',
-    });
+  it('recognizes --stdin-json before opening the session databases', async () => {
+    const result = await runBun(['src/cli/ncl.ts', 'groups', 'list', '--stdin-json'], '{"broken":');
 
-    expect(result.status).toBe(2);
+    expect(result.exitCode).toBe(2);
     expect(result.stdout).toBe('');
     expect(result.stderr).toBe('ncl: --stdin-json input is not valid JSON\n');
   });

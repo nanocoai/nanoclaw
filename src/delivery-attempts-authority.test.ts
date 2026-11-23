@@ -80,8 +80,7 @@ async function seedPriorAttempts(messageId: string, sessionId: string, count: nu
 function deliveredRow(agentGroupId: string, sessionId: string, msgId: string): { status: string } | undefined {
   const db = new Database(inboundDbPath(agentGroupId, sessionId), { readonly: true });
   const row = db.prepare('SELECT status FROM delivered WHERE message_out_id = ?').get(msgId) as
-    | { status: string }
-    | undefined;
+    { status: string } | undefined;
   db.close();
   return row;
 }

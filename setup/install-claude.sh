@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Install the Claude Code CLI on the host via the official native installer.
-# Invoked from setup/register-claude-token.sh when the user picks the
-# subscription auth path and `claude` is missing. The other two auth paths
-# (paste OAuth token, paste API key) don't need the CLI, so this runs on
-# demand rather than up front.
+# Invoked from setup/lib/claude-assist.ts when a failed setup step offers
+# Claude-assisted debugging and `claude` is missing, so this runs on demand
+# rather than up front.
 #
 # The native installer is Node-independent (downloads a prebuilt binary to
 # ~/.local/bin) and is the path Anthropic documents. This matches the
@@ -29,7 +28,7 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 echo "STEP: claude-native-install"
-curl -fsSL https://claude.ai/install.sh | bash
+curl -fsSL https://claude.ai/install.sh | /bin/bash
 
 # Native installer writes to ~/.local/bin and appends a PATH line to the
 # user's rc file; that doesn't help this session, so put it on PATH now.

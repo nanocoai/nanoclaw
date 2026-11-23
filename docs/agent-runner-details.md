@@ -8,7 +8,7 @@ The agent-runner has two layers:
 
 1. **Agent-runner core** — owns the poll loop, message formatting, DB reads/writes, MCP tool implementations, routing, status management, media handling. This is NanoClaw-specific and shared across all providers.
 
-2. **Agent provider** — owns the SDK interaction. Takes formatted prompts, pushes them to the SDK, yields events back. Trunk ships the `claude` provider; additional providers (OpenCode, Codex, etc.) are installed by `/add-<provider>` skills from the `providers` branch.
+2. **Agent provider** — owns the SDK interaction. Takes formatted prompts, pushes them to the SDK, yields events back. Trunk ships the `claude` provider; additional providers (OpenCode, Codex, etc.) are installed by `/add-<provider>` skills from the skill's own `payload/`.
 
 The boundary: the agent-runner decides **what** to send and **what to do** with results. The provider decides **how** to talk to the SDK.
 
@@ -128,10 +128,21 @@ What a provider declares:
   `RuntimeInferenceInput` for `inference`, `RuntimeMemoryHookInput` for `memory`, the
   `McpServerConfig` map for `mcpServers` — and a provider's resolve names them rather
   than restating the shape, so a field core adds reaches every provider through the type.
+- `configuration.tone` (optional) — `{ default, toSettings(tone) }`. Core maps the
+  declared default into provider-native settings and passes them to the factory as
+  `configuration.tone`. Claude declares `default` (Claude Code's own style; a named style such as `Concise`
+  defeats prompt caching, so the concise instruction lives in `container/CLAUDE.md`) → `outputStyle` and seeds it only
+  when absent in the group's native user `settings.json` during session-hook setup.
+  Existing values are preserved; project/local settings retain native precedence.
+  Claude sends no tone override through SDK query settings. Codex declares `friendly`
+  → thread `personality`. Providers that omit tone keep their existing behavior.
 - `lifecycle` — `memorySessionHookRegistration` (runs when core registers the memory hook)
   and `beforeQuery` (runs before each query).
 - `history` — `afterExchange` (the factory wraps `onExchangeComplete` with it) and
-  `readTrace` (what `/upload-trace` uploads). Anything else a provider does with its own
+  `readTrace` (what `/upload-trace` uploads). A provider with no on-disk transcript can
+  implement `afterExchange` with `archiveProviderExchange` from
+  `provider-contracts/exchange-archive.ts`, which appends each exchange to one markdown
+  file per thread in `conversations/`. Anything else a provider does with its own
   transcript — Claude's pre-compact archive and continuation rotation, for example — is
   provider-internal code (`providers/claude-history.ts`), not a contract field.
 - `textDelivery`, `commands` — read by the poll-loop and formatter. The formatter's
@@ -246,7 +257,7 @@ SDK message (so the idle timer stays honest) and maps recognized messages to `Pr
 - **PreToolUse hook** records the current tool + its declared timeout to `container_state` (so the host sweep widens its stuck tolerance while a long Bash runs) and, as defense-in-depth, blocks any `SDK_DISALLOWED_TOOLS` call that slips through. It does **not** sanitize bash env vars — there is no such hook.
 - **PostToolUse / PostToolUseFailure** hooks clear the in-flight tool
 - **PreCompact** hook archives the transcript to `conversations/` before compaction
-- `maybeRotateContinuation` drops an oversized/aged transcript (default caps 12 MB / 14 days, both operator-overridable) so a cold container isn't killed reloading days of `.jsonl` before the host idle ceiling; `isSessionInvalid` clears a continuation whose transcript is gone
+- `maybeRotateContinuation` drops a continuation whose transcript is gone (Claude Code deletes transcripts after `cleanupPeriodDays`, 30 by default) or oversized/aged (default caps 12 MB / 14 days, both operator-overridable), so a cold container neither resumes into a deleted transcript nor is killed reloading days of `.jsonl` before the host idle ceiling; `isSessionInvalid` clears a continuation whose resume still fails
 - `additionalDirectories` for multi-directory access
 
 ### Codex Provider
@@ -572,17 +583,22 @@ written by the host) resolves the name to routing fields.
   name: 'send_message',
   params: {
     text: string,    // message content (required)
-    to?: string,     // destination name (e.g. "family", "worker-1").
-                     // Optional when the agent has exactly one destination.
+    to: string,      // destination name (e.g. "family", "worker-1") (required —
+                     // the agent always addresses a destination explicitly)
   }
 }
 ```
 
-Implementation: `resolveRouting(to)` looks up the destination. With no `to`, it defaults to
-the session's own reply routing (`session_routing`); if the destination resolves to the same
-channel the session is bound to, the session's `thread_id` is preserved so the reply lands
-in-thread, otherwise `thread_id` is null. The tool then writes a `messages_out` row with
-`kind: 'chat'` and content `{ text }`, and returns the new `seq` as the message id.
+Implementation: `resolveRouting(to)` looks up the destination. A channel destination gets its
+`thread_id` from `resolveDestinationThread` (`db/session-routing.ts`): the thread of the message
+being answered (the reply stamp the poll loop publishes in `session_state` at batch start and again at
+every turn boundary, since the query stays open and later messages are pushed into it) when that message came from the destination channel; otherwise the latest
+`messages_in` row from that channel. The poll loop's `<message to>` deliveries use the same resolver with the batch's routing
+context, so all explicit sends thread identically, and a message arriving mid-turn from another
+thread cannot pull the reply away. `session_routing.thread_id` is never consulted — it is null for
+every session that isn't per-thread. An agent destination always gets a null `thread_id`. The tool
+then writes a `messages_out` row with `kind: 'chat'` and content `{ text }`, and returns the new
+`seq` as the message id.
 
 #### send_file
 
@@ -593,7 +609,7 @@ Send a file to a named destination (same destination model as `send_message`).
   name: 'send_file',
   params: {
     path: string,          // file path (relative to /workspace/agent/ or absolute) (required)
-    to?: string,           // destination name; optional if the agent has one destination
+    to: string,            // destination name (required)
     text?: string,         // optional accompanying message
     filename?: string,     // display name (default: basename of path)
   }
@@ -605,6 +621,11 @@ Implementation:
 2. Generate a message ID and create `/workspace/outbox/{messageId}/`
 3. Copy the file into that outbox directory
 4. Write a `messages_out` row (`kind: 'chat'`) with content `{ text, files: [filename] }`
+
+`send_card` and `ask_user_question` go to the chat the session is bound to (`session_routing`), threaded like
+`send_message` / `send_file`: `resolveDestinationThread` with the published reply stamp — the
+thread of the message being answered, else the chat's latest `messages_in` thread. The bound
+`thread_id` is the last resort, when that yields no thread (a per-thread session stays in it).
 
 #### send_card
 
@@ -749,7 +770,9 @@ admin approval, applied host-side):
 
 - **`install_packages`** — `{ apt?: string[], npm?: string[], reason?: string }`. Package
   names are validated at the tool boundary and re-validated on the host. On approval the
-  host rebuilds the per-agent image and restarts the container.
+  host rebuilds the per-agent image and restarts the container. When the shared agent image
+  changes later (an update or a manual rebuild), the host rebuilds the per-agent image on top
+  of it at the next start or spawn (`refreshStaleGroupImage`).
 - **`add_mcp_server`** — `{ name, command, args?, env? }`. Wires an existing third-party MCP
   server into the agent's `container.json`; on approval the host updates the config and
   restarts (no rebuild — Bun runs the TS directly).
@@ -822,9 +845,10 @@ The agent-runner tracks a single opaque `continuation` token per provider:
 
 Because it lives in the session folder's `outbound.db`, the continuation survives container
 teardown and restart — a fresh container reads it back and resumes. `/clear` deletes the row
-to start a clean session. Before resuming, `maybeRotateContinuation` may archive and drop an
-oversized/aged transcript (so a cold container isn't killed reloading it), and
-`isSessionInvalid` clears a continuation whose backing transcript has gone missing.
+to start a clean session. Before resuming, `maybeRotateContinuation` drops a continuation whose
+transcript is gone (so the turn starts fresh instead of failing with "No conversation found"),
+and may archive and drop an oversized/aged transcript (so a cold container isn't killed
+reloading it). `isSessionInvalid` clears a continuation whose resume still fails.
 
 ### Container Startup
 

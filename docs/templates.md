@@ -23,11 +23,12 @@ consequences:
 
 Templates are purely additive and require no DB migration. **Templates
 are stamped only from a local directory**: `templates/` at the
-project root by default (committed but shipped empty), or whatever
+project root by default (only its README is committed; everything else there
+is gitignored), or whatever
 `NANOCLAW_TEMPLATES_DIR` points at (a local path only). The public registry
 ([`nanocoai/nanoclaw-templates`](https://github.com/nanocoai/nanoclaw-templates))
-is a copy source: setup can fetch a chosen template into that local directory,
-or you can populate it yourself.
+is a copy source: setup and an agent's `create_agent` can fetch a chosen
+template into that local directory, or you can populate it yourself.
 
 > **Migrating from the pre-plugin layout?** The old format (a bare
 > `context/instructions.md` marker, `.mcp.json`) is no longer read; stamping
@@ -82,6 +83,21 @@ unsupported MCP transport, an unknown manifest field), the create response
 carries a `templateReport` listing each item by name — components are never
 silently stripped.
 
+**From chat:** ask an agent for one ("I need an SDR agent"). The agent lists
+what exists with `ncl templates list` (this machine, no network) or
+`ncl templates list --registry` (the public library's index), offers a match,
+and once you pick it calls `create_agent({ name, template: "sales/sdr" })`.
+
+- A template not yet on this machine is fetched into the templates directory
+  first; a local copy always wins and is never overwritten.
+- `create_agent` keeps its usual approval rule: a trusted (`cli_scope: global`)
+  agent creates directly, any other agent's request waits for an admin. The
+  approval card names the template and whether approving downloads it, and the
+  approval covers only that template.
+- Nothing is downloaded before approval, and a failed download creates nothing.
+- The new agent runs on its creator's provider and is wired to it like any
+  agent made with `create_agent`. In Slack it also gets its own bot, as usual.
+
 ### The template ref
 
 `--template <ref>` is a path **relative to the local templates directory**
@@ -90,9 +106,9 @@ e.g. `sales/sdr` → `templates/sales/sdr`. The plugin root is the leaf folder;
 its manifest `name` is just `sdr`.
 
 For safety the ref must stay inside the templates directory: absolute paths, a
-leading `~`, and `../` escapes are rejected. There is no `--source`, no git URL,
-and no remote fetch at `ncl` time. Populate `templates/` first by hand or with
-setup's library picker, then stamp.
+leading `~`, and `../` escapes are rejected. There is no `--source` and no git
+URL, and `ncl groups create --template` never fetches. Populate `templates/`
+first by hand or with setup's library picker, then stamp.
 
 `NANOCLAW_TEMPLATES_DIR` may point the library at another **local** directory; it
 is never a URL and never changes at runtime.
@@ -137,14 +153,16 @@ Notes:
 
 - **No provider, model, effort, or packages in a template.** Those are set on
   the agent later via `ncl groups config update`. The runtime defaults to the
-  install's configured provider.
+  install's configured provider; an agent made by `create_agent` takes its
+  creator's.
 - **The persona is optional**, to the loader and to the first-party registry
   alike (registry CI only rejects an `instructions.md` that exists but is
   empty). Without one, the stamped agent uses NanoClaw's default project doc.
   Keep `instructions.md` focused
   (under ~200 lines): it's always in the agent's prompt, and some providers
-  cap that doc (Codex ~32 KB), so an over-long persona gets truncated. Put
-  bulk material in `skills/` or extra context files instead.
+  cap that doc (Codex 64 KiB), so an over-long persona first crowds out
+  NanoClaw's own instruction sections, then gets cut itself. Put bulk
+  material in `skills/` or extra context files instead.
 - Skills are copied into the agent's own skills overlay, keyed to that group,
   never shared across groups.
 
@@ -280,7 +298,7 @@ tasks.
 The script is passed unchanged to NanoClaw's normal task creation and execution
 path. See [Scheduled Tasks](scheduled-tasks.md#script-gates) for the script
 contract, testing workflow, frequency limit, and failure behavior. Avoid putting
-secrets directly in scripts; prefer runtime credential injection through OneCLI.
+secrets directly in scripts; prefer runtime credential injection through the installed gateway.
 
 Tasks start **paused**, so stamping a template never starts background work
 without user consent. Until the setup welcome flow offers activation, inspect
@@ -354,22 +372,28 @@ starts there: codex sets it natively, and providers whose runtime cannot
 subdirectory named as `cwd` is created at stamp time; `./`/`${PLUGIN_ROOT}`
 directories must exist in the shipped plugin.
 
-Credentials are held by the **credentials proxy** and injected into outbound
-HTTPS calls at the proxy boundary, matched by API host, at request time. The key
-never sits in `mcp.json`, the container env, or chat context. See
-[the credentials proxy section in CLAUDE.md](../CLAUDE.md#secrets--credentials--onecli)
+Credentials are held by the **credentials proxy** (the installed credential
+gateway) and injected into outbound HTTPS calls at the proxy boundary, matched
+by API host, at request time. The key never sits in `mcp.json`, the container
+env, or chat context. See
+[the credentials section in CLAUDE.md](../CLAUDE.md#secrets--credentials--gateways)
 for the model.
+
+The gateway also decides which agents receive a stored key. Some inject it for
+every agent; others only for agents it has been attached to. The installed
+gateway's `/add-<gateway>` skill says which, and how to attach a key.
 
 Two ways a credential gets connected:
 
 1. **Up front.** Register the secret with the credentials proxy (its web UI or
-   CLI), matched to the service's API host (e.g. `api.example.com`). Matching
-   credentials are injected automatically, so usually nothing else is needed.
+   CLI), matched to the service's API host (e.g. `api.example.com`). On a
+   gateway that attaches keys per agent, attach it to the agent too.
 2. **On demand (the common path).** Don't set anything up first. The first time
-   the agent calls a service with no credential, the API returns **401/403** and
-   the agent replies with a prefilled connect link for that host. The user opens
-   it, pastes the key, and asks the agent to retry. The key lands in the
-   credentials proxy, which injects it on every later call.
+   the agent calls a service with no credential, the call fails with an auth
+   error and the agent replies with the connect link the gateway returned for
+   that host. The user opens it and saves the key. A gateway that attaches keys
+   per agent may not attach a key saved this way to the agent that asked; if
+   so, attach it (see the gateway's skill). Then ask the agent to retry.
 
 ### MCP servers that require an env var to boot
 
@@ -406,12 +430,16 @@ named*, user-owned server with `ncl groups config add-mcp-server --headers`.
 
 The credentials proxy can _hold_ a credentialed outbound request and require a
 human to approve it before it leaves the proxy: enforcement the agent can't talk
-around. This is matched on the outbound HTTP request (host + method + path),
-configured on the credentials proxy, and answered by NanoClaw (it DMs an approver). The host side is
-already wired; see
-[the credentialed-approval flow in CLAUDE.md](../CLAUDE.md#requiring-approval-for-credential-use)
-and the [`sales/sdr` template README](https://github.com/nanocoai/nanoclaw-templates/blob/main/sales/sdr/README.md)
-for a worked example.
+around. The hold is configured on the gateway and answered by NanoClaw (it DMs
+an approver). What a gateway can hold differs: some match any request on host,
+method and path, others only named actions of an app connection, and a plain
+API key may not be holdable at all. The installed gateway's skill says what
+yours supports. The host side is already wired; see
+[Approvals in CLAUDE.md](../CLAUDE.md#approvals).
+
+The [`sales/sdr` template README](https://github.com/nanocoai/nanoclaw-templates/blob/main/sales/sdr/README.md)
+has a worked example. It needs a gateway that holds requests by host, method
+and path.
 
 ## Contributing a template
 
