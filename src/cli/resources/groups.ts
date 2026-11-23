@@ -689,12 +689,11 @@ registerResource({
         // in place instead, and say which of the two happened.
         const updated = at !== -1;
         // An unchanged re-add writes nothing, so it cannot overwrite a concurrent
-        // remove-mount of another entry with the list it read earlier.
-        if (!updated || existing[at].readonly !== mount.readonly) {
-          if (updated) existing[at] = mount;
-          else existing.push(mount);
-          await updateContainerConfigJson(id, 'additional_mounts', existing);
-        }
+        // remove-mount with the list it read earlier, and asks for no restart.
+        if (updated && existing[at].readonly === mount.readonly) return { unchanged: mount };
+        if (updated) existing[at] = mount;
+        else existing.push(mount);
+        await updateContainerConfigJson(id, 'additional_mounts', existing);
         const note = readWrite
           ? `Read-write requested. It is granted only if the matched mount-allowlist root has \`allowReadWrite: true\`; ` +
             `otherwise the mount is forced read-only. Run \`ncl groups restart --id ${id}\` to apply.`

@@ -590,14 +590,16 @@ describe('groups config (host-only)', () => {
       expect(await mountsOf()).toEqual([{ hostPath: '/data/shared', containerPath: 'shared' }]);
     });
 
-    it('an unchanged re-add writes nothing', async () => {
+    it('an unchanged re-add writes nothing and reports unchanged', async () => {
       expect((await addMount('same-1', { rw: true })).ok).toBe(true);
       await getDb().run(
         `UPDATE container_configs SET updated_at = '2000-01-01T00:00:00.000Z' WHERE agent_group_id = ?`,
         GID,
       );
       const res = await addMount('same-2', { rw: true });
-      expect(res.ok && 'updated' in (res.data as object)).toBe(true);
+      expect(res.ok && res.data).toEqual({
+        unchanged: { hostPath: '/data/shared', containerPath: 'shared', readonly: false },
+      });
       expect((await getContainerConfig(GID))!.updated_at).toBe('2000-01-01T00:00:00.000Z');
     });
 
