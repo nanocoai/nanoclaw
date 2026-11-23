@@ -19,14 +19,14 @@ const SKILL = [
 const pins = groupPins(scanSkill('.claude/skills/add-chat/SKILL.md', SKILL)).pins;
 
 // What channels lists, and what its pnpm-lock.yaml installs (with pnpm's peer suffix).
-const channels = (spec: string, installed: string) => ({
+const channels = (spec: string, installed: string, lockedSpec = spec) => ({
   pkg: { dependencies: { 'chat-adapter': spec, 'runner-sdk': '^1.0.0' } },
   lock: {
     importers: {
       '.': {
         dependencies: {
-          'chat-adapter': { version: `${installed}(chat@4.41.1)` },
-          'runner-sdk': { version: '1.0.0' },
+          'chat-adapter': { specifier: lockedSpec, version: `${installed}(chat@4.41.1)` },
+          'runner-sdk': { specifier: '^1.0.0', version: '1.0.0' },
         },
       },
     },
@@ -38,11 +38,19 @@ describe('channelsPinProblems', () => {
     const { pkg, lock } = channels('^0.1.1', '0.1.1');
     const problems = channelsPinProblems(pins, pkg, lock, 'origin/channels');
     expect(problems).toEqual([
-      'chat-adapter: origin/channels has "^0.1.1" (lockfile: 0.1.1), the skills pin 0.3.0 (.claude/skills/add-chat/SKILL.md:4)',
+      'chat-adapter: origin/channels has "^0.1.1" (lockfile: "^0.1.1" -> 0.1.1), the skills pin 0.3.0 (.claude/skills/add-chat/SKILL.md:4)',
     ]);
     const result = report(problems, 'origin/channels');
     expect(result.ok).toBe(false);
     expect(result.message).toContain('in a PR to channels, set each package to the pinned version');
+  });
+
+  it('fails when package.json changed but the lockfile was not regenerated', () => {
+    // It installs the pinned 0.3.0, but was made from "0.3.0", not package.json's "^0.3.0".
+    const { pkg, lock } = channels('^0.3.0', '0.3.0', '0.3.0');
+    expect(channelsPinProblems(pins, pkg, lock, 'origin/channels')).toEqual([
+      'chat-adapter: origin/channels has "^0.3.0" (lockfile: "0.3.0" -> 0.3.0), the skills pin 0.3.0 (.claude/skills/add-chat/SKILL.md:4)',
+    ]);
   });
 
   it('passes when channels installs the pinned version, ignoring pins for other package.json files', () => {

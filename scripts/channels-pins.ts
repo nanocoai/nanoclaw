@@ -11,10 +11,14 @@ import { parse } from 'yaml';
 import { GENERATE, NpmPin, collect, groupPins } from './skill-pins.js';
 
 const SECTIONS = ['dependencies', 'devDependencies', 'optionalDependencies'] as const;
+type Section = (typeof SECTIONS)[number];
 
 type Manifest = Partial<Record<(typeof SECTIONS)[number], Record<string, string>>>;
 type Lockfile = {
-  importers?: Record<string, Partial<Record<(typeof SECTIONS)[number], Record<string, { version?: string }>>>>;
+  importers?: Record<
+    string,
+    Partial<Record<(typeof SECTIONS)[number], Record<string, { specifier?: string; version?: string }>>>
+  >;
 };
 
 /** A pin `nc:dep` writes into the host package.json (no cwd, or cwd `.`). */
@@ -24,33 +28,34 @@ function hostPin(pin: NpmPin): boolean {
   return cwd === undefined || cwd === '.' || cwd === './';
 }
 
-/** The version pnpm installed: `0.1.1(chat@4.41.1)(...)` -> `0.1.1`. */
-function resolved(lock: Lockfile, name: string): string | undefined {
-  const root = lock.importers?.['.'];
-  for (const section of SECTIONS) {
-    const version = root?.[section]?.[name]?.version;
-    if (version) return version.replace(/\(.*$/, '');
-  }
-  return undefined;
+/** The lockfile's entry in the same section: the specifier it was made from, and the version installed. */
+function locked(lock: Lockfile, section: Section, name: string): { specifier?: string; version?: string } {
+  const entry = lock.importers?.['.']?.[section]?.[name];
+  // `0.1.1(chat@4.41.1)(...)` -> `0.1.1`
+  return { specifier: entry?.specifier, version: entry?.version?.replace(/\(.*$/, '') };
 }
 
 /**
  * Packages both channels' package.json and a host skill pin list, where the
- * version channels' lockfile installs is not the pin. Packages channels does
- * not list are fine: the skill adds them on install.
+ * version channels' lockfile installs is not the pin, or the lockfile was made
+ * from another specifier than package.json has (stale, so what it installs is
+ * not what a fresh install gets). Packages channels does not list are fine:
+ * the skill adds them on install.
  */
 export function channelsPinProblems(pins: Map<string, NpmPin[]>, pkg: Manifest, lock: Lockfile, ref: string): string[] {
   const problems: string[] = [];
   for (const [name, list] of [...pins].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     const host = list.filter(hostPin);
     if (!host.length) continue;
-    const spec = SECTIONS.map((s) => pkg[s]?.[name]).find((v) => v !== undefined);
-    if (spec === undefined) continue;
+    const section = SECTIONS.find((s) => pkg[s]?.[name] !== undefined);
+    if (section === undefined) continue;
+    const spec = pkg[section]![name];
     const want = host[0].version;
-    const got = resolved(lock, name);
-    if (got === want) continue;
+    const { specifier, version } = locked(lock, section, name);
+    if (version === want && specifier === spec) continue;
     const at = host.map((p) => `${p.file}:${p.line}`).join(', ');
-    problems.push(`${name}: ${ref} has "${spec}" (lockfile: ${got ?? 'missing'}), the skills pin ${want} (${at})`);
+    const lockText = version ? `lockfile: "${specifier ?? '?'}" -> ${version}` : 'not in the lockfile';
+    problems.push(`${name}: ${ref} has "${spec}" (${lockText}), the skills pin ${want} (${at})`);
   }
   return problems;
 }
@@ -60,11 +65,13 @@ export function report(problems: string[], ref: string): { ok: boolean; message:
   return {
     ok: false,
     message: [
-      `${ref} installs different versions than the skills pin:`,
+      `${ref} package.json or pnpm-lock.yaml does not match the skill pins:`,
       ...problems.map((p) => `  ${p}`),
-      'Fix: in a PR to channels, set each package to the pinned version in package.json, run',
-      '`pnpm install`, and commit package.json and pnpm-lock.yaml (rename any patches/ file named',
-      `for the old version). If channels is right instead, change the pin in the skill and run \`${GENERATE}\`.`,
+      'Fix: in a PR to channels, set each package to the pinned version in package.json. If it has a',
+      'patch, rename its patches/ file and update its pnpm.patchedDependencies key and path to match.',
+      'Then run `pnpm install` and commit package.json, pnpm-lock.yaml and patches/. Where the',
+      'lockfile specifier differs from package.json, the lockfile is stale: `pnpm install` alone fixes it.',
+      `If channels is right instead, change the pin in the skill and run \`${GENERATE}\`.`,
     ].join('\n'),
   };
 }
