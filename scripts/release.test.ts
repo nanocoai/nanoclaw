@@ -1081,7 +1081,7 @@ describe('release workflow channel branch step', () => {
   /** Runs the plan step, then the move step with the plan's outputs, as the job does. */
   function run(
     f: ReturnType<typeof fixture>,
-    options: { token?: string; ghFail?: string; lookupFail?: string; moves?: string } = {},
+    options: { token?: string; ghFail?: string; lookupFail?: string; moves?: string; version?: string } = {},
   ) {
     const summary = path.join(f.runnerTemp, 'summary.md');
     const ghLog = path.join(f.runnerTemp, 'gh.log');
@@ -1097,6 +1097,7 @@ describe('release workflow channel branch step', () => {
       LOOKUP_FAIL: options.lookupFail ?? '',
       GITHUB_REPOSITORY: 'nanocoai/nanoclaw',
       GITHUB_STEP_SUMMARY: summary,
+      RELEASE_VERSION: options.version ?? '2026.11.0',
       TARGET_SHA: f.target,
     };
     // The plan step gets no token at all.
@@ -1104,7 +1105,7 @@ describe('release workflow channel branch step', () => {
     const plan = spawnSync('bash', ['-c', planScript], {
       cwd: f.checkout,
       encoding: 'utf8',
-      env: { ...env, GITHUB_OUTPUT: output, RELEASE_VERSION: '2026.11.0', RUNNER_TEMP: f.runnerTemp },
+      env: { ...env, GITHUB_OUTPUT: output, RUNNER_TEMP: f.runnerTemp },
     });
     const outputs = Object.fromEntries(
       readFileSync(output, 'utf8')
@@ -1229,5 +1230,21 @@ describe('release workflow channel branch step', () => {
     expect(result.calls).toEqual([post('stable', f.target)]);
     expect(result.stdout).toContain('::error::Unexpected planned move: main:update');
     expect(result.stdout).toContain('::error::Channel branches not moved: main:update.');
+  });
+
+  it('never moves stable for a pre-release, whatever the plan says', { timeout: 30_000 }, () => {
+    const f = fixture({ existing: ['stable', 'beta'] });
+    const result = run(f, { version: '2026.11.0-beta.1', moves: 'stable:update beta:update' });
+    expect(result.status).toBe(1);
+    expect(result.calls).toEqual([patch('beta', f.target)]);
+    expect(result.stdout).toContain('::error::Unexpected planned move: stable:update');
+  });
+
+  it("hands the plan step's outputs to the move step", () => {
+    expect(releaseWorkflow).toContain('id: channel-plan');
+    expect(releaseWorkflow).toContain('MOVES: ${{ steps.channel-plan.outputs.moves }}');
+    expect(releaseWorkflow).toContain('PLAN_FAILED: ${{ steps.channel-plan.outputs.failed }}');
+    expect(planScript).toContain('echo "moves=${MOVES# }" >> "$GITHUB_OUTPUT"');
+    expect(planScript).toContain('echo "failed=${FAILED# }" >> "$GITHUB_OUTPUT"');
   });
 });

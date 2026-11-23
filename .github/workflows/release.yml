@@ -518,6 +518,7 @@ jobs:
           GH_TOKEN: ${{ secrets.CHANNEL_BRANCH_TOKEN }}
           MOVES: ${{ steps.channel-plan.outputs.moves }}
           PLAN_FAILED: ${{ steps.channel-plan.outputs.failed }}
+          RELEASE_VERSION: ${{ inputs.version }}
           TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           set -euo pipefail
@@ -525,8 +526,14 @@ jobs:
           for MOVE in $MOVES; do
             BRANCH=${MOVE%%:*}
             # The plan came from a step that ran code from disk: take only what it may ask for.
-            case "$MOVE" in
-              stable:update | stable:create | beta:update | beta:create) ;;
+            # A pre-release was approved for beta only, so it never moves stable.
+            case "$RELEASE_VERSION:$MOVE" in
+              *-*:stable:*) ALLOWED=false ;;
+              *:stable:update | *:stable:create | *:beta:update | *:beta:create) ALLOWED=true ;;
+              *) ALLOWED=false ;;
+            esac
+            case "$ALLOWED" in
+              true) ;;
               *)
                 echo "::error::Unexpected planned move: $MOVE"
                 FAILED="$FAILED $MOVE"
