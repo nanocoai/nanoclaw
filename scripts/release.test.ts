@@ -1141,7 +1141,7 @@ describe('release workflow channel branch step', () => {
         GH_TOKEN: options.token ?? 'app-token',
         TAG_COMMIT: options.tagCommit ?? f.target,
         TAG_TYPE: options.tagType ?? 'tag',
-        RELEASED: options.released ?? 'true',
+        RELEASED: options.released ?? `false true ${(options.version ?? '2026.11.0').includes('-')}`,
         TIP_STABLE: options.tips?.stable ?? '',
         TIP_BETA: options.tips?.beta ?? '',
         MOVES: options.moves ?? outputs.moves ?? '',
@@ -1252,10 +1252,10 @@ describe('release workflow channel branch step', () => {
     const programs = moveScript
       .split('\n')
       .filter((line) => line && !line.startsWith('#'))
-      // A command substitution can run anything, so a line with one always counts.
+      // A command substitution, or `&&` before anything but a test, can run anything: those lines always count.
       .filter(
         (line) =>
-          /\$\(|`/.test(line.replace(/\\`/g, '')) ||
+          /\$\(|`|&&\s*[^[\s]/.test(line.replace(/\\`/g, '')) ||
           !/^(echo |set |FAILED=|BRANCH=|ALLOWED=|ANNOTATED=|ARGS=|for |do$|done$|case |esac$|fi$|then$|else$|if \[|elif |continue$|exit |;;$|\*\)|stable:update|true\)|-X )/.test(
             line,
           ),
@@ -1263,7 +1263,7 @@ describe('release workflow channel branch step', () => {
     expect(programs).toEqual([
       'TAG=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}" --jq \'.object.type + " " + .object.sha\') || TAG=""',
       'TAG=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG#* }" --jq \'.object.type + " " + .object.sha\') || TAG=""',
-      'RELEASED=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}" --jq \'.draft == false and .immutable == true\') || RELEASED=""',
+      'RELEASED=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}" --jq \'[.draft, .immutable, .prerelease] | map(tostring) | join(" ")\') || RELEASED=""',
       'CURRENT=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" --jq \'.object.sha\' 2>/dev/null) || CURRENT=""',
       'if ! gh api "${ARGS[@]}" >/dev/null; then',
     ]);
@@ -1330,7 +1330,7 @@ describe('release workflow channel branch step', () => {
     expect(result.lookups).toEqual([
       'api repos/nanocoai/nanoclaw/git/ref/tags/v2026.11.0 --jq .object.type + " " + .object.sha',
       'api repos/nanocoai/nanoclaw/git/tags/tagobject --jq .object.type + " " + .object.sha',
-      'api repos/nanocoai/nanoclaw/releases/tags/v2026.11.0 --jq .draft == false and .immutable == true',
+      'api repos/nanocoai/nanoclaw/releases/tags/v2026.11.0 --jq [.draft, .immutable, .prerelease] | map(tostring) | join(" ")',
     ]);
     expect(result.stdout).toContain(`::error::Tag v2026.11.0 does not point at ${f.target}`);
   });
@@ -1339,7 +1339,14 @@ describe('release workflow channel branch step', () => {
     'moves nothing for a lightweight tag or a release that is not published and immutable',
     { timeout: 30_000 },
     () => {
-      for (const options of [{ tagType: 'commit' as const }, { released: 'false' }, { released: '' }]) {
+      // tag type, then draft / immutable / prerelease
+      for (const options of [
+        { tagType: 'commit' as const },
+        { released: 'true true false' },
+        { released: 'false false false' },
+        { released: 'false true true' },
+        { released: '' },
+      ]) {
         const f = fixture({ existing: ['stable'] });
         const result = run(f, options);
         expect(result.status).toBe(1);

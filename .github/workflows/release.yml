@@ -571,8 +571,10 @@ jobs:
               ANNOTATED=true
               TAG=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG#* }" --jq '.object.type + " " + .object.sha') || TAG=""
             done
-            RELEASED=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}" --jq '.draft == false and .immutable == true') || RELEASED=""
-            if [ "$ANNOTATED" != true ] || [ "$TAG" != "commit $TARGET_SHA" ] || [ "$RELEASED" != true ]; then
+            # draft, immutable, prerelease: a stable version must not be a GitHub pre-release.
+            RELEASED=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}" --jq '[.draft, .immutable, .prerelease] | map(tostring) | join(" ")') || RELEASED=""
+            case "$RELEASE_VERSION" in *-*) WANT="false true true" ;; *) WANT="false true false" ;; esac
+            if [ "$ANNOTATED" != true ] || [ "$TAG" != "commit $TARGET_SHA" ] || [ "$RELEASED" != "$WANT" ]; then
               echo "::error::Tag v${RELEASE_VERSION} does not point at ${TARGET_SHA} as an annotated tag with a published, immutable release (tag: ${TAG:-none}, released: ${RELEASED:-no}). No branch was moved."
               echo "- Channel branches NOT moved: \`v${RELEASE_VERSION}\` is not an annotated tag on \`${TARGET_SHA}\` with a published, immutable release." >> "$GITHUB_STEP_SUMMARY"
               exit 1
