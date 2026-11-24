@@ -42,14 +42,23 @@ describe('channelsPinProblems', () => {
     ]);
     const result = report(problems, 'origin/channels');
     expect(result.ok).toBe(false);
-    expect(result.message).toContain('in a PR to channels, set each package to the pinned version');
+    expect(result.message).toContain('if this change moved a skill pin, open a PR to channels');
+    expect(result.message).toContain('the exact pinned version (no ^ or ~)');
+  });
+
+  it('fails on a range, even while the lockfile installs the pinned version', () => {
+    // pino drifted this way: "^9.6.0" installed 9.6.0 until the lockfile moved to 9.14.0.
+    const { pkg, lock } = channels('^0.3.0', '0.3.0');
+    expect(channelsPinProblems(pins, pkg, lock, 'origin/channels')).toEqual([
+      'chat-adapter: origin/channels has "^0.3.0" (lockfile: "^0.3.0" -> 0.3.0), the skills pin 0.3.0 (.claude/skills/add-chat/SKILL.md:4)',
+    ]);
   });
 
   it('fails when package.json changed but the lockfile was not regenerated', () => {
-    // It installs the pinned 0.3.0, but was made from "0.3.0", not package.json's "^0.3.0".
-    const { pkg, lock } = channels('^0.3.0', '0.3.0', '0.3.0');
+    // It installs the pinned 0.3.0, but was made from "^0.3.0", not package.json's "0.3.0".
+    const { pkg, lock } = channels('0.3.0', '0.3.0', '^0.3.0');
     expect(channelsPinProblems(pins, pkg, lock, 'origin/channels')).toEqual([
-      'chat-adapter: origin/channels has "^0.3.0" (lockfile: "0.3.0" -> 0.3.0), the skills pin 0.3.0 (.claude/skills/add-chat/SKILL.md:4)',
+      'chat-adapter: origin/channels has "0.3.0" (lockfile: "^0.3.0" -> 0.3.0), the skills pin 0.3.0 (.claude/skills/add-chat/SKILL.md:4)',
     ]);
   });
 

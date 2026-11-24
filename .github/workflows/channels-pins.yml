@@ -1,0 +1,45 @@
+# Checks that the channels branch installs the adapter versions the skills on
+# main pin. PRs into channels run no CI, so it runs here: on main changes that
+# move a pin, and weekly for changes pushed only to channels. Its own workflow
+# so a red result never fails the Registry skills run on unrelated PRs.
+name: channels-pins
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/skill-pins/package.json
+      - .github/workflows/channels-pins.yml
+      - scripts/channels-pins.ts
+      - scripts/skill-pins.ts
+  push:
+    branches: [main]
+    paths:
+      - .github/skill-pins/package.json
+      - .github/workflows/channels-pins.yml
+      - scripts/channels-pins.ts
+      - scripts/skill-pins.ts
+  schedule:
+    - cron: '41 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  channels-pins:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: git fetch --no-tags --depth=1 origin +refs/heads/channels:refs/remotes/origin/channels
+      - name: The channels package.json installs the versions skills pin
+        run: pnpm run skill-pins:channels origin/channels
