@@ -183,9 +183,11 @@ export function discoverRuntimeModels(provider: string, refresh = false, chatgpt
   return models;
 }
 
-function answer<T>(value: T | symbol): T {
+// Exclude<T, symbol>, not T | symbol: clack 1.6+ types the cancel value as its
+// own unique symbol, so T would otherwise infer as string | unique symbol.
+function answer<T>(value: T): Exclude<T, symbol> {
   if (p.isCancel(value)) throw new Error('Model selection cancelled; settings unchanged.');
-  return value as T;
+  return value as Exclude<T, symbol>;
 }
 
 export async function chooseOpenCodeModel(provider: string, models: string[], current?: string): Promise<string> {
