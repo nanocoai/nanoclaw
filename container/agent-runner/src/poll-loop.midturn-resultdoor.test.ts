@@ -1380,7 +1380,7 @@ describe('no-answer nudge', () => {
 
     await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', (e) => exchanges.push(e), 'prompt', undefined, true);
 
-    expect(exchanges.map((e) => e.prompt)).toEqual(['prompt']);
+    expect(exchanges.map((e) => [e.prompt, e.status])).toEqual([['prompt', 'undelivered']]);
   });
 
   it('an idle pre-warmed query gets no nudge', async () => {

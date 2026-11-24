@@ -623,17 +623,15 @@ export async function processQuery(
         // log-only result; a turn woken only by a failure notice may need none.
         // With a follow-up queued, the next turn sees this message too, and a
         // retry behind it could not say which message it answers.
-        const nudgeIfNoAnswer = (): void => {
-          if (
-            !answering ||
-            routing.taskRun ||
-            routing.failureNoticeWake ||
-            unwrappedNudged ||
-            queuedTurns.length > 0 ||
-            midTurnReplied > 0 ||
-            repliedInWindow(turnStartSeq, routing)
-          )
-            return;
+        const needsAnswerNudge = (): boolean =>
+          answering &&
+          !routing.taskRun &&
+          !routing.failureNoticeWake &&
+          !unwrappedNudged &&
+          queuedTurns.length === 0 &&
+          midTurnReplied === 0 &&
+          !repliedInWindow(turnStartSeq, routing);
+        const pushAnswerNudge = (): void => {
           unwrappedNudged = true;
           log('No-answer nudge pushed: empty result and nothing was sent this turn');
           const names = getAllDestinations()
@@ -676,11 +674,17 @@ export async function processQuery(
           // <message> block was delivered this turn. If a reply already went
           // out as a block, the unwrapped tail stays in the scratchpad log.
           const willRetryWrapping = !failed && hasUnwrapped && !unwrappedNudged;
+          // Whitespace-only text is no answer either.
+          const willNudgeNoAnswer = !failed && !resultText.trim() && !willRetryWrapping && needsAnswerNudge();
           notifyExchangeComplete(onExchangeComplete, {
             prompt: archivePrompts[0] ?? initialPrompt,
             result: archivedResult,
             continuation: queryContinuation ?? initialContinuation,
-            status: failed ? 'error' : hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
+            status: failed
+              ? 'error'
+              : hasUnwrapped || willRetryTaskBlocks || willNudgeNoAnswer
+                ? 'undelivered'
+                : 'completed',
           });
           if (willRetryWrapping) {
             unwrappedNudged = true;
@@ -713,13 +717,12 @@ export async function processQuery(
               .join(', ');
             pushRetry(buildTaskBlockNudge(taskBlocks, names));
           }
-          // Whitespace-only text is no answer either.
-          if (!failed && !resultText.trim()) nudgeIfNoAnswer();
+          if (willNudgeNoAnswer) pushAnswerNudge();
           // Each result consumes one input; retries carry their original
           // user prompt at their own position in the FIFO queue.
           archivePrompts.shift();
         } else {
-          nudgeIfNoAnswer();
+          if (needsAnswerNudge()) pushAnswerNudge();
           archivePrompts.shift();
         }
         // Turn boundary: reset the per-turn sent count after the result's
