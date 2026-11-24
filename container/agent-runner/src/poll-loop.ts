@@ -693,7 +693,26 @@ export async function processQuery(
           // Each result consumes one input; retries carry their original
           // user prompt at their own position in the FIFO queue.
           archivePrompts.shift();
-        } else archivePrompts.shift();
+        } else {
+          // An empty result with nothing sent leaves the chat silent (#4564).
+          // Give one nudge that asks only for the answer. Task runs keep their
+          // log-only result; a turn woken only by a failure notice may need none.
+          if (
+            !routing.taskRun &&
+            !routing.failureNoticeWake &&
+            !unwrappedNudged &&
+            midTurnSent === 0 &&
+            !sentVisibleInWindow(turnStartSeq)
+          ) {
+            unwrappedNudged = true;
+            log('No-answer nudge pushed: empty result and nothing was sent this turn');
+            const names = getAllDestinations()
+              .map((d) => d.name)
+              .join(', ');
+            pushRetry(buildNoAnswerNudge(names), { after: turnStartSeq, upto: maxOutboundSeq() });
+          }
+          archivePrompts.shift();
+        }
         // Turn boundary: reset the per-turn sent count after the result's
         // nudge decision has used it. A nudge retry re-counts via its own
         // text events before the retry result, so resetting on every result
@@ -1062,6 +1081,32 @@ function chatRowsInWindow(afterSeq: number, uptoSeq = Infinity): MessageOutRow[]
     log(`Outbound lookup failed: ${err instanceof Error ? err.message : String(err)}`);
     return [];
   }
+}
+
+/**
+ * Did this turn send anything the user can see? Chat rows (text, files,
+ * reactions) and chat-sdk rows (cards, questions) both count. A lookup error
+ * counts as nothing sent, so it fails toward the nudge.
+ */
+function sentVisibleInWindow(afterSeq: number): boolean {
+  try {
+    return getUndeliveredMessages().some(
+      (message) => (message.seq ?? 0) > afterSeq && (message.kind === 'chat' || message.kind === 'chat-sdk'),
+    );
+  } catch (err) {
+    log(`Outbound lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+/** Nudge for a chat turn that ended with no answer and sent nothing. */
+export function buildNoAnswerNudge(destinationNames: string): string {
+  return (
+    '<system>Your turn ended without a reply: nothing was sent and your final response was empty. ' +
+    'Do not redo the work. Send your answer now in <message to="name">...</message>, ' +
+    'or write <internal>no reply needed</internal> if this message needs no answer. ' +
+    `Your destinations: ${escapePromptXml(destinationNames)}.</system>`
+  );
 }
 
 const INFORMED_NUDGE_QUOTE_MAX = 200;
