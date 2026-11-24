@@ -497,6 +497,139 @@ describe('groups config (host-only)', () => {
     }
   });
 
+  // Regression tests for #3690 — `--ro` was the only flag, so it produced either
+  // `readonly: true` or (when omitted) no key at all. `validateMount` treats an
+  // absent key exactly like `readonly: true`, which made `--ro` a no-op and left
+  // no sanctioned way to create a read-write mount. `--rw` is the opt-in; the
+  // conservative default is unchanged.
+  describe('add-mount readonly flags (#3690)', () => {
+    const GID = 'ag-mount-rw';
+    const mountsOf = async () => JSON.parse((await getContainerConfig(GID))!.additional_mounts);
+    const addMount = (id: string, extra: Record<string, unknown>) =>
+      dispatch(
+        {
+          id,
+          command: 'groups-config-add-mount',
+          args: { id: GID, host: '/data/shared', container: 'shared', ...extra },
+        },
+        { caller: 'host' },
+      );
+
+    beforeEach(async () => {
+      await createAgentGroup({ id: GID, name: 'mrw', folder: 'mrw', agent_provider: null, created_at: now() });
+      await ensureContainerConfig(GID);
+    });
+
+    it('--rw stores readonly: false, the only value mount-security reads as a read-write request', async () => {
+      const res = await addMount('rw-1', { rw: true });
+      expect(res.ok).toBe(true);
+      expect(await mountsOf()).toEqual([{ hostPath: '/data/shared', containerPath: 'shared', readonly: false }]);
+    });
+
+    it('with neither flag stores no readonly key — the conservative default, unchanged', async () => {
+      const res = await addMount('def-1', {});
+      expect(res.ok).toBe(true);
+      const mounts = await mountsOf();
+      expect(mounts).toEqual([{ hostPath: '/data/shared', containerPath: 'shared' }]);
+      expect('readonly' in mounts[0]).toBe(false);
+    });
+
+    it('--ro stores readonly: true', async () => {
+      const res = await addMount('ro-1', { ro: true });
+      expect(res.ok).toBe(true);
+      expect(await mountsOf()).toEqual([{ hostPath: '/data/shared', containerPath: 'shared', readonly: true }]);
+    });
+
+    it('flips an existing mount to read-write instead of silently doing nothing', async () => {
+      // The likeliest first use of --rw: a mount added read-only that now needs
+      // writes. The dedupe used to skip the write and still report success, so the
+      // operator restarted and got a still-read-only mount with nothing to say why.
+      expect((await addMount('flip-1', {})).ok).toBe(true);
+      expect((await mountsOf())[0].readonly).toBeUndefined();
+
+      const res = await addMount('flip-2', { rw: true });
+      expect(res.ok).toBe(true);
+      const mounts = await mountsOf();
+      expect(mounts).toHaveLength(1);
+      expect(mounts[0].readonly).toBe(false);
+    });
+
+    it('rejects --ro together with --rw and writes nothing', async () => {
+      const res = await addMount('both-1', { ro: true, rw: true });
+      expect(res.ok).toBe(false);
+      expect(errorMessage(res)).toBe('--ro (or --readonly) and --rw are mutually exclusive');
+      expect(await mountsOf()).toEqual([]);
+    });
+
+    it('a re-add without a flag resets a read-write mount to the read-only default and reports updated', async () => {
+      const first = await addMount('down-1', { rw: true });
+      expect(first.ok && 'added' in (first.data as object)).toBe(true);
+
+      const res = await addMount('down-2', {});
+      expect(res.ok).toBe(true);
+      expect(res.ok && 'updated' in (res.data as object)).toBe(true);
+      expect(await mountsOf()).toEqual([{ hostPath: '/data/shared', containerPath: 'shared' }]);
+    });
+
+    // The argv parser turns `--ro yes` into the string "yes"; a loose truthy
+    // check let `--ro yes --rw` slip past the conflict check and store read-write.
+    it.each([
+      ['--ro yes --rw', { ro: 'yes', rw: true }],
+      ['--rw yes', { rw: 'yes' }],
+    ])('rejects a non-boolean value (%s) and writes nothing', async (_label, extra) => {
+      const res = await addMount('strict-1', extra);
+      expect(res.ok).toBe(false);
+      expect(errorMessage(res)).toMatch(/is a flag; pass it on its own/);
+      expect(await mountsOf()).toEqual([]);
+    });
+
+    // `--readonly false` used to store read-only (the string "false" was truthy).
+    // Only --rw may request write, so it must still not grant it.
+    it('--readonly false does not request read-write', async () => {
+      expect((await addMount('legacy-1', { readonly: 'false' })).ok).toBe(true);
+      expect(await mountsOf()).toEqual([{ hostPath: '/data/shared', containerPath: 'shared' }]);
+    });
+
+    it('an unchanged re-add writes nothing and reports unchanged', async () => {
+      expect((await addMount('same-1', { rw: true })).ok).toBe(true);
+      await getDb().run(
+        `UPDATE container_configs SET updated_at = '2000-01-01T00:00:00.000Z' WHERE agent_group_id = ?`,
+        GID,
+      );
+      const res = await addMount('same-2', { rw: true });
+      expect(res.ok && res.data).toMatchObject({
+        unchanged: { hostPath: '/data/shared', containerPath: 'shared', readonly: false },
+        note: expect.stringContaining('allowReadWrite'),
+      });
+      expect(JSON.stringify(res)).not.toContain('restart');
+      expect((await getContainerConfig(GID))!.updated_at).toBe('2000-01-01T00:00:00.000Z');
+    });
+
+    it('treats an absent readonly key and --ro as the same mode on re-add', async () => {
+      expect((await addMount('implicit-1', {})).ok).toBe(true);
+      await getDb().run(
+        `UPDATE container_configs SET updated_at = '2000-01-01T00:00:00.000Z' WHERE agent_group_id = ?`,
+        GID,
+      );
+      const res = await addMount('implicit-2', { ro: true });
+      expect(res.ok && res.data).toEqual({ unchanged: { hostPath: '/data/shared', containerPath: 'shared' } });
+      expect((await getContainerConfig(GID))!.updated_at).toBe('2000-01-01T00:00:00.000Z');
+    });
+
+    it('validates every alias even when another one is valid', async () => {
+      const res = await addMount('alias-1', { ro: true, readonly: 'yes' });
+      expect(res.ok).toBe(false);
+      expect(await mountsOf()).toEqual([]);
+    });
+
+    it('accepts the boolean spellings other CLI flags accept', async () => {
+      expect((await addMount('spell-1', { rw: 'true' })).ok).toBe(true);
+      expect((await mountsOf())[0].readonly).toBe(false);
+      expect((await addMount('spell-2', { ro: '1' })).ok).toBe(true);
+      expect((await mountsOf())[0].readonly).toBe(true);
+    });
+  });
+
   describe("--speed validates against the tiers the group's provider declares", () => {
     const GID = 'ag-speed';
     const speedOf = async (): Promise<string | null> => (await getContainerConfig(GID))!.speed;

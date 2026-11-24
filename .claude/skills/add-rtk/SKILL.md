@@ -47,7 +47,7 @@ Note the group ID (e.g. `ag-1776342942165-ptgddd`). Repeat Steps 3–5 for each 
 
 ## Step 3 — Mount rtk into the container config
 
-Mount the host rtk binary read-only into the container with the host-only `add-mount` verb. It is idempotent — re-running skips the entry if it is already present:
+Mount the host rtk binary read-only into the container with the host-only `add-mount` verb. It is idempotent: re-running updates the existing entry instead of adding a second one:
 
 ```bash
 ncl groups config add-mount --id <group-id> \
