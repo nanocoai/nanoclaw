@@ -1369,30 +1369,18 @@ describe('no-answer nudge', () => {
     expect(pushes).toEqual([]);
   });
 
-  it('a card the host failed to deliver does not count as the reply', async () => {
+  it('a whitespace-only result still reports the exchange', async () => {
     seedDest();
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: 's1' };
-      writeMessageOut({
-        id: 'card-1',
-        kind: 'chat-sdk',
-        platform_id: 'chan-1',
-        channel_type: 'discord',
-        thread_id: null,
-        content: JSON.stringify({ type: 'card', card: { title: 'Pick one' }, fallbackText: '' }),
-      });
-      getInboundDb()
-        .prepare(
-          'INSERT INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, NULL, ?, ?)',
-        )
-        .run('card-1', 'failed', new Date().toISOString());
-      yield { type: 'result', text: '' };
+      yield { type: 'result', text: '\n  ' };
     }
-    const { query, pushes } = makeStubQuery(events());
+    const { query } = makeStubQuery(events());
+    const exchanges: ProviderExchange[] = [];
 
-    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', (e) => exchanges.push(e), 'prompt', undefined, true);
 
-    expect(noAnswerNudges(pushes)).toHaveLength(1);
+    expect(exchanges.map((e) => e.prompt)).toEqual(['prompt']);
   });
 
   it('an idle pre-warmed query gets no nudge', async () => {

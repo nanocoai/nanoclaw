@@ -6,7 +6,7 @@ import {
   markScriptSkipped,
   type MessageInRow,
 } from './db/messages-in.js';
-import { getDeliveryStatus, getUndeliveredMessages, writeMessageOut, type MessageOutRow } from './db/messages-out.js';
+import { getUndeliveredMessages, writeMessageOut, type MessageOutRow } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { resolveDestinationThread } from './db/session-routing.js';
 import { touchHeartbeat } from './heartbeat.js';
@@ -618,8 +618,30 @@ export async function processQuery(
         markCompleted(initialBatchIds);
         const resultText = event.text ?? '';
         const failed = event.isError === true;
-        // Whitespace-only text is no answer either: it would trim to nothing.
-        if (resultText.trim() || failed) {
+        // An empty result with nothing sent leaves the chat silent (#4564).
+        // Give one nudge that asks only for the answer. Task runs keep their
+        // log-only result; a turn woken only by a failure notice may need none.
+        // With a follow-up queued, the next turn sees this message too, and a
+        // retry behind it could not say which message it answers.
+        const nudgeIfNoAnswer = (): void => {
+          if (
+            !answering ||
+            routing.taskRun ||
+            routing.failureNoticeWake ||
+            unwrappedNudged ||
+            queuedTurns.length > 0 ||
+            midTurnReplied > 0 ||
+            repliedInWindow(turnStartSeq, routing)
+          )
+            return;
+          unwrappedNudged = true;
+          log('No-answer nudge pushed: empty result and nothing was sent this turn');
+          const names = getAllDestinations()
+            .map((d) => d.name)
+            .join(', ');
+          pushRetry(buildNoAnswerNudge(names), { after: turnStartSeq, upto: maxOutboundSeq() });
+        };
+        if (resultText || failed) {
           const { hasUnwrapped, taskBlocks, undelivered } = await dispatchResultText(resultText, routing, {
             midTurnSent,
             midTurnReplied,
@@ -691,31 +713,13 @@ export async function processQuery(
               .join(', ');
             pushRetry(buildTaskBlockNudge(taskBlocks, names));
           }
+          // Whitespace-only text is no answer either.
+          if (!failed && !resultText.trim()) nudgeIfNoAnswer();
           // Each result consumes one input; retries carry their original
           // user prompt at their own position in the FIFO queue.
           archivePrompts.shift();
         } else {
-          // An empty result with nothing sent leaves the chat silent (#4564).
-          // Give one nudge that asks only for the answer. Task runs keep their
-          // log-only result; a turn woken only by a failure notice may need none.
-          // With a follow-up queued, the next turn sees this message too, and a
-          // retry behind it could not say which message it answers.
-          if (
-            answering &&
-            !routing.taskRun &&
-            !routing.failureNoticeWake &&
-            !unwrappedNudged &&
-            queuedTurns.length === 0 &&
-            midTurnReplied === 0 &&
-            !repliedInWindow(turnStartSeq, routing)
-          ) {
-            unwrappedNudged = true;
-            log('No-answer nudge pushed: empty result and nothing was sent this turn');
-            const names = getAllDestinations()
-              .map((d) => d.name)
-              .join(', ');
-            pushRetry(buildNoAnswerNudge(names), { after: turnStartSeq, upto: maxOutboundSeq() });
-          }
+          nudgeIfNoAnswer();
           archivePrompts.shift();
         }
         // Turn boundary: reset the per-turn sent count after the result's
@@ -1091,8 +1095,8 @@ function chatRowsInWindow(afterSeq: number, uptoSeq = Infinity): MessageOutRow[]
 /**
  * Did this turn send a reply? Chat rows (text, files, reactions) and chat-sdk
  * rows (cards, questions) count, except a send to another agent (see
- * answersBatch) and a row the host already failed to deliver. A lookup error
- * counts as no reply, so it fails toward the nudge.
+ * answersBatch). A lookup error counts as no reply, so it fails toward the
+ * nudge.
  */
 function repliedInWindow(afterSeq: number, routing: RoutingContext): boolean {
   try {
@@ -1101,8 +1105,7 @@ function repliedInWindow(afterSeq: number, routing: RoutingContext): boolean {
         (message.seq ?? 0) > afterSeq &&
         (message.kind === 'chat' || message.kind === 'chat-sdk') &&
         (message.channel_type !== 'agent' ||
-          (routing.channelType === 'agent' && message.platform_id === routing.platformId)) &&
-        getDeliveryStatus(message.id) !== 'failed',
+          (routing.channelType === 'agent' && message.platform_id === routing.platformId)),
     );
   } catch (err) {
     log(`Outbound lookup failed: ${err instanceof Error ? err.message : String(err)}`);
