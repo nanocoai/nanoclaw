@@ -92,5 +92,9 @@ describe('no-answer nudge in the poll loop', () => {
     });
     expect(noAnswerNudges(pushes)).toEqual([]);
     expect(pushes).toHaveLength(1);
+    const replies = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(replies.map((row) => [JSON.parse(row.content).text, row.thread_id, row.in_reply_to])).toEqual([
+      ['Answered B', 'thread-b', 'request-b'],
+    ]);
   });
 });
