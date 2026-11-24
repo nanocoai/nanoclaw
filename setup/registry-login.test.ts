@@ -30,6 +30,18 @@ vi.mock('./lib/registry-state.js', async (importOriginal) => ({
 vi.mock('./install-cred-helper.js', () => ({
   installCredentialHelper: vi.fn(() => ({ helperPath: '/dev/null/helper', onPath: true })),
 }));
+// The terminal on the interactive path: the line typed at the sign-in prompt,
+// and a yes/no answered by pressing Enter, which takes what clack preselected
+// (Yes when the caller doesn't say).
+const typedLine = vi.hoisted(() => ({ value: '' }));
+vi.mock('readline/promises', () => ({
+  default: { createInterface: () => ({ question: async () => typedLine.value, close: () => {} }) },
+}));
+vi.mock('@clack/prompts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@clack/prompts')>()),
+  log: { message: vi.fn(), warn: vi.fn(), success: vi.fn() },
+  confirm: vi.fn(async (opts: { initialValue?: boolean }) => opts.initialValue ?? true),
+}));
 
 /** Nothing listens here, and nothing is meant to: every fetch is stubbed. */
 const TARGET = 'https://registry.example.invalid';
@@ -177,5 +189,45 @@ describe('a stored credential issued by a different service', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(emitted.at(-1)).toMatchObject({ STATUS: 'skipped', REASON: 'non-interactive' });
     expect(storedToken(home)).toBe('nct_stale');
+  });
+});
+
+describe('the product-email question after an interactive sign-in', () => {
+  it('pressing Enter is a no, and the no is what gets recorded', async () => {
+    homeWith(undefined);
+    vi.stubEnv('NANOCLAW_WORKOS_CLIENT_ID', '');
+    const isTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    typedLine.value = 'nce_typed_code';
+    const preferences: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: { body?: string }) => {
+        if (url.endsWith('/v1/auth-config')) {
+          return { status: 503, text: async () => JSON.stringify({ device_flow_available: false }) };
+        }
+        if (url.endsWith('/v1/enroll')) {
+          // No email_updates field: this account has never been asked.
+          return {
+            status: 201,
+            text: async () =>
+              JSON.stringify({ token: 'nct_new', account_id: 'acct_new', email: 'someone@example.invalid' }),
+          };
+        }
+        if (url.endsWith('/v1/account/preferences')) preferences.push(JSON.parse(init?.body ?? '{}'));
+        return { status: 200, text: async () => '{}' };
+      }),
+    );
+
+    try {
+      await expect(runLogin(['--api', TARGET])).resolves.toBe(0);
+    } finally {
+      if (isTTY) Object.defineProperty(process.stdin, 'isTTY', isTTY);
+      else delete (process.stdin as { isTTY?: boolean }).isTTY;
+    }
+
+    const { confirm } = await import('@clack/prompts');
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(preferences).toEqual([{ email_updates: false, consent_version: 'cli-v1', source: 'cli' }]);
   });
 });
