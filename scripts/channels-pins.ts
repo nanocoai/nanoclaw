@@ -5,6 +5,7 @@
 //   pnpm run skill-pins:channels [ref]   ref defaults to origin/channels
 
 import { execFileSync } from 'node:child_process';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 
@@ -25,7 +26,8 @@ type Lockfile = {
 function hostPin(pin: NpmPin): boolean {
   if (pin.via !== 'nc:dep') return false;
   const cwd = pin.detail.match(/(?:^| )cwd:(\S+)/)?.[1];
-  return cwd === undefined || cwd === '.' || cwd === './';
+  // normalize, not relative: relative would resolve against process.cwd().
+  return cwd === undefined || path.posix.normalize(`${cwd}/`) === './';
 }
 
 /** The lockfile's entry in the same section: the specifier it was made from, and the version installed. */
@@ -70,9 +72,11 @@ export function report(problems: string[], ref: string): { ok: boolean; message:
       'Fix: if this change moved a skill pin, open a PR to channels with the same version, link it',
       'here, and merge that one first. Otherwise channels drifted on its own: fix it in a PR to channels.',
       'In that PR, set package.json to the exact pinned version (no ^ or ~). If the package has a patch,',
-      'rename its patches/ file and update its pnpm.patchedDependencies key and path to match. Then run',
-      '`pnpm install` and commit package.json, pnpm-lock.yaml and patches/. If package.json is already',
-      'exact and only the lockfile specifier differs, the lockfile is stale: `pnpm install` alone fixes it.',
+      'do what the skill does for that version: move the patch to it (rename the patches/ file, and set',
+      'its pnpm.patchedDependencies key and path to the new name), or drop it if the new version no',
+      'longer needs it. Then run `pnpm install` and commit package.json, pnpm-lock.yaml and patches/.',
+      'If package.json is already exact and only the lockfile specifier differs, the lockfile is stale:',
+      '`pnpm install` alone fixes it.',
       `If channels is right instead, change the pin in the skill and run \`${GENERATE}\`.`,
     ].join('\n'),
   };

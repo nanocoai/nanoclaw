@@ -62,6 +62,14 @@ describe('channelsPinProblems', () => {
     ]);
   });
 
+  it('treats a cwd that resolves to the root as the host package.json', () => {
+    const skill = '```nc:dep cwd:./.\nchat-adapter@0.3.0\n```\n';
+    const rootPins = groupPins(scanSkill('.claude/skills/add-chat/SKILL.md', skill)).pins;
+    expect(rootPins.get('chat-adapter')?.[0].detail).toContain('cwd:./.');
+    const { pkg, lock } = channels('^0.1.1', '0.1.1');
+    expect(channelsPinProblems(rootPins, pkg, lock, 'origin/channels')).toHaveLength(1);
+  });
+
   it('passes when channels installs the pinned version, ignoring pins for other package.json files', () => {
     // runner-sdk differs, but its pin goes into container/agent-runner, not the host package.json.
     const { pkg, lock } = channels('0.3.0', '0.3.0');
