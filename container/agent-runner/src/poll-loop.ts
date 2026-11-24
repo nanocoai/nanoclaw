@@ -6,7 +6,7 @@ import {
   markScriptSkipped,
   type MessageInRow,
 } from './db/messages-in.js';
-import { getUndeliveredMessages, writeMessageOut, type MessageOutRow } from './db/messages-out.js';
+import { getDeliveryStatus, getUndeliveredMessages, writeMessageOut, type MessageOutRow } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { resolveDestinationThread } from './db/session-routing.js';
 import { touchHeartbeat } from './heartbeat.js';
@@ -618,7 +618,8 @@ export async function processQuery(
         markCompleted(initialBatchIds);
         const resultText = event.text ?? '';
         const failed = event.isError === true;
-        if (resultText || failed) {
+        // Whitespace-only text is no answer either: it would trim to nothing.
+        if (resultText.trim() || failed) {
           const { hasUnwrapped, taskBlocks, undelivered } = await dispatchResultText(resultText, routing, {
             midTurnSent,
             midTurnReplied,
@@ -697,12 +698,16 @@ export async function processQuery(
           // An empty result with nothing sent leaves the chat silent (#4564).
           // Give one nudge that asks only for the answer. Task runs keep their
           // log-only result; a turn woken only by a failure notice may need none.
+          // With a follow-up queued, the next turn sees this message too, and a
+          // retry behind it could not say which message it answers.
           if (
+            answering &&
             !routing.taskRun &&
             !routing.failureNoticeWake &&
             !unwrappedNudged &&
-            midTurnSent === 0 &&
-            !sentVisibleInWindow(turnStartSeq)
+            queuedTurns.length === 0 &&
+            midTurnReplied === 0 &&
+            !repliedInWindow(turnStartSeq, routing)
           ) {
             unwrappedNudged = true;
             log('No-answer nudge pushed: empty result and nothing was sent this turn');
@@ -1084,14 +1089,20 @@ function chatRowsInWindow(afterSeq: number, uptoSeq = Infinity): MessageOutRow[]
 }
 
 /**
- * Did this turn send anything the user can see? Chat rows (text, files,
- * reactions) and chat-sdk rows (cards, questions) both count. A lookup error
- * counts as nothing sent, so it fails toward the nudge.
+ * Did this turn send a reply? Chat rows (text, files, reactions) and chat-sdk
+ * rows (cards, questions) count, except a send to another agent (see
+ * answersBatch) and a row the host already failed to deliver. A lookup error
+ * counts as no reply, so it fails toward the nudge.
  */
-function sentVisibleInWindow(afterSeq: number): boolean {
+function repliedInWindow(afterSeq: number, routing: RoutingContext): boolean {
   try {
     return getUndeliveredMessages().some(
-      (message) => (message.seq ?? 0) > afterSeq && (message.kind === 'chat' || message.kind === 'chat-sdk'),
+      (message) =>
+        (message.seq ?? 0) > afterSeq &&
+        (message.kind === 'chat' || message.kind === 'chat-sdk') &&
+        (message.channel_type !== 'agent' ||
+          (routing.channelType === 'agent' && message.platform_id === routing.platformId)) &&
+        getDeliveryStatus(message.id) !== 'failed',
     );
   } catch (err) {
     log(`Outbound lookup failed: ${err instanceof Error ? err.message : String(err)}`);

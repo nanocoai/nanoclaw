@@ -1154,6 +1154,8 @@ describe('no-answer nudge', () => {
       async function* events(): AsyncGenerator<ProviderEvent> {
         yield { type: 'init', continuation: 's1' };
         yield { type: 'result', text: '' };
+        // Answer only once the nudge arrived, as a real provider would.
+        if (noAnswerNudges(pushes).length !== 1) return;
         if (midTurn) yield { type: 'text', text: answer };
         yield { type: 'result', text: answer };
       }
@@ -1278,6 +1280,130 @@ describe('no-answer nudge', () => {
       undefined,
       true,
     );
+
+    expect(pushes).toEqual([]);
+  });
+
+  it.each(PROVIDER_MODES)('a whitespace-only result gets the nudge (%s)', async (provider, midTurn) => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: '\n  ' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], provider, undefined, 'prompt', undefined, midTurn);
+
+    expect(noAnswerNudges(pushes)).toHaveLength(1);
+  });
+
+  it('a block only to another agent then an empty result still gets the nudge', async () => {
+    seedDest();
+    seedAgentDest('helper', 'ag-helper');
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'text', text: '<message to="helper">Check this</message>' };
+      yield { type: 'result', text: '' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
+
+    expect(getUndeliveredMessages().filter((m) => m.channel_type === 'agent')).toHaveLength(1);
+    expect(noAnswerNudges(pushes)).toHaveLength(1);
+  });
+
+  it.each(PROVIDER_MODES)(
+    'a tool send only to another agent then an empty result still gets the nudge (%s)',
+    async (provider, midTurn) => {
+      seedDest();
+      seedAgentDest('helper', 'ag-helper');
+      async function* events(): AsyncGenerator<ProviderEvent> {
+        yield { type: 'init', continuation: 's1' };
+        writeMessageOut({
+          id: 'a2a-1',
+          kind: 'chat',
+          platform_id: 'ag-helper',
+          channel_type: 'agent',
+          thread_id: null,
+          content: JSON.stringify({ text: 'Check this' }),
+        });
+        yield { type: 'result', text: '' };
+      }
+      const { query, pushes } = makeStubQuery(events());
+
+      await processQuery(query, CHAT_ROUTING, ['m1'], provider, undefined, 'prompt', undefined, midTurn);
+
+      expect(noAnswerNudges(pushes)).toHaveLength(1);
+    },
+  );
+
+  it('a send back to the agent that woke the turn counts as the reply', async () => {
+    seedDest();
+    seedAgentDest('caller', 'ag-caller');
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      writeMessageOut({
+        id: 'a2a-1',
+        kind: 'chat',
+        platform_id: 'ag-caller',
+        channel_type: 'agent',
+        thread_id: null,
+        content: JSON.stringify({ text: 'Here is the result' }),
+      });
+      yield { type: 'result', text: '' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(
+      query,
+      { ...CHAT_ROUTING, platformId: 'ag-caller', channelType: 'agent' },
+      ['m1'],
+      'claude',
+      undefined,
+      'prompt',
+      undefined,
+      true,
+    );
+
+    expect(pushes).toEqual([]);
+  });
+
+  it('a card the host failed to deliver does not count as the reply', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      writeMessageOut({
+        id: 'card-1',
+        kind: 'chat-sdk',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        thread_id: null,
+        content: JSON.stringify({ type: 'card', card: { title: 'Pick one' }, fallbackText: '' }),
+      });
+      getInboundDb()
+        .prepare(
+          'INSERT INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, NULL, ?, ?)',
+        )
+        .run('card-1', 'failed', new Date().toISOString());
+      yield { type: 'result', text: '' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
+
+    expect(noAnswerNudges(pushes)).toHaveLength(1);
+  });
+
+  it('an idle pre-warmed query gets no nudge', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: '' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, [], 'claude', undefined, '', undefined, true);
 
     expect(pushes).toEqual([]);
   });
