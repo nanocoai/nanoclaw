@@ -17,10 +17,10 @@ importers:
   .:
     dependencies:
       '@beeper/chat-adapter-matrix':
-        specifier: ^0.2.0
+        specifier: 0.2.0
         version: 0.2.0(patch_hash=d8f9cda088701285b3be191ea30edfd2e96ccb7b97f2934fa8c26c1fa424c020)(@opentelemetry/api@1.9.1)(zod@4.6.5)
       '@bitbasti/chat-adapter-webex':
-        specifier: ^0.1.0
+        specifier: 0.1.0
         version: 0.1.0(chat@4.41.1(zod@4.6.5))(zod@4.6.5)
       '@chat-adapter/discord':
         specifier: 4.41.1
@@ -62,7 +62,7 @@ importers:
         specifier: 0.3.0
         version: 0.3.0(@chat-adapter/shared@4.41.1(zod@4.6.5))(@react-email/render@2.3.1(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(chat@4.41.1(zod@4.6.5))(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@types/qrcode':
-        specifier: ^1.5.6
+        specifier: 1.5.6
         version: 1.5.6
       '@whiskeysockets/baileys':
         specifier: 7.0.0-rc14
@@ -74,7 +74,7 @@ importers:
         specifier: 4.41.1
         version: 4.41.1(zod@4.6.5)
       chat-adapter-imessage:
-        specifier: ^0.1.1
+        specifier: 0.1.1
         version: 0.1.1(chat@4.41.1(zod@4.6.5))(typescript@5.9.3)(zod@4.6.5)
       cron-parser:
         specifier: 5.5.0
@@ -89,10 +89,10 @@ importers:
         specifier: 9.6.0
         version: 9.6.0
       qrcode:
-        specifier: ^1.5.4
+        specifier: 1.5.4
         version: 1.5.4
       wechat-ilink-client:
-        specifier: ^0.1.0
+        specifier: 0.1.0
         version: 0.1.0
       ws:
         specifier: 8.21.3
