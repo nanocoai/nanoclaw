@@ -4,7 +4,9 @@ import { randomUUID } from 'crypto';
 import {
   mcpServerPluginOwner,
   parseMcpServerConfig,
+  validateAptPackageName,
   validateMcpServerName,
+  validateNpmPackageName,
   type AdditionalMountConfig,
   type McpServerConfig,
 } from '../../container-config.js';
@@ -582,6 +584,8 @@ registerResource({
         const apt = args.apt as string | undefined;
         const npm = args.npm as string | undefined;
         if (!apt && !npm) throw new Error('Provide --apt <pkg> or --npm <pkg>');
+        if (apt) validateAptPackageName(apt);
+        if (npm) validateNpmPackageName(npm);
 
         if (apt) {
           const existing = JSON.parse(row.packages_apt) as string[];

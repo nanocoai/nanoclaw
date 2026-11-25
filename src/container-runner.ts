@@ -24,7 +24,12 @@ import {
   INSTALL_SLUG,
   TIMEZONE,
 } from './config.js';
-import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
+import {
+  CONTAINER_PLUGINS_DIR,
+  materializeContainerJson,
+  validateAptPackageName,
+  validateNpmPackageName,
+} from './container-config.js';
 import { getAllContainerConfigs, getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
@@ -1733,6 +1738,8 @@ async function buildAgentGroupImageNow(agentGroupId: string, { pin = true } = {}
   if (aptPackages.length === 0 && npmPackages.length === 0) {
     throw new Error('No packages to install. Use install_packages first.');
   }
+  for (const pkg of aptPackages) validateAptPackageName(pkg);
+  for (const pkg of npmPackages) validateNpmPackageName(pkg);
 
   // Image building is not on the runtime path (drivers never build) and shells
   // the local Docker daemon. Both call sites gate on the `imageBuild`

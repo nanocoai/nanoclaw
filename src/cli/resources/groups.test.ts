@@ -42,7 +42,7 @@ import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
 import { initSessionFolder } from '../../session-manager.js';
 import { dispatch } from '../dispatch.js';
 import { projectDestinationsToSessions } from './destinations.js';
-import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
+import { ensureContainerConfig, getContainerConfig, updateContainerConfigJson } from '../../db/container-configs.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { configFromDb } from '../../container-config.js';
 import type { ContainerConfig } from '../../container-config.js';
@@ -726,5 +726,59 @@ describe('groups config (host-only)', () => {
       expect((await getContainerConfig(GID))!.provider).toBe(TURBO_PROVIDER);
       expect(await speedOf()).toBe('turbo');
     });
+  });
+});
+
+describe('groups config add-package validation', () => {
+  const GID = 'ag-pkg';
+  beforeEach(async () => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    await runMigrations(await initTestDb());
+    await createAgentGroup({ id: GID, name: GID, folder: GID, agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+  });
+  afterEach(async () => {
+    await closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  it('accepts valid apt and npm package names and rejects shell/Dockerfile injection strings', async () => {
+    for (const badApt of ['curl; id', 'curl && rm -rf /', '$(whoami)', 'UPPERCASE', '-flag']) {
+      const resp = await dispatch(
+        { id: 'bad-apt', command: 'groups-config-add-package', args: { id: GID, apt: badApt } },
+        { caller: 'host' },
+      );
+      expect(resp.ok, badApt).toBe(false);
+    }
+    for (const badNpm of ['pkg; id', '@scope/bad pkg', 'pkg\nRUN id', 'pkg$(id)', '@Bad/pkg']) {
+      const resp = await dispatch(
+        { id: 'bad-npm', command: 'groups-config-add-package', args: { id: GID, npm: badNpm } },
+        { caller: 'host' },
+      );
+      expect(resp.ok, badNpm).toBe(false);
+    }
+
+    const okResp = await dispatch(
+      {
+        id: 'good-pkg',
+        command: 'groups-config-add-package',
+        args: { id: GID, apt: 'ripgrep', npm: '@scope/my-tool' },
+      },
+      { caller: 'host' },
+    );
+    expect(okResp.ok).toBe(true);
+    const config = await getContainerConfig(GID);
+    expect(JSON.parse(config!.packages_apt)).toEqual(['ripgrep']);
+    expect(JSON.parse(config!.packages_npm)).toEqual(['@scope/my-tool']);
+
+    // remove-package still permits clearing a pre-existing invalid entry directly.
+    await updateContainerConfigJson(GID, 'packages_apt', ['bad;pkg']);
+    const rmResp = await dispatch(
+      { id: 'rm-bad', command: 'groups-config-remove-package', args: { id: GID, apt: 'bad;pkg' } },
+      { caller: 'host' },
+    );
+    expect(rmResp.ok).toBe(true);
+    expect(JSON.parse((await getContainerConfig(GID))!.packages_apt)).toEqual([]);
   });
 });

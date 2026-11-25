@@ -24,10 +24,12 @@ vi.mock('./config.js', async (importOriginal) => ({
 vi.mock('./db/agent-groups.js', () => ({
   getAgentGroup: vi.fn(async (id: string) => ({ id })),
 }));
-vi.mock('./db/container-configs.js', () => ({
+const containerConfigMocks = vi.hoisted(() => ({
   getContainerConfig: vi.fn(async () => ({ packages_apt: '["curl"]', packages_npm: '[]' })),
   updateContainerConfigScalars: vi.fn(async () => undefined),
 }));
+
+vi.mock('./db/container-configs.js', () => containerConfigMocks);
 vi.mock('./drivers/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./drivers/index.js')>()),
   getSessionDriver: () => ({ capabilities: () => ({ imageBuild: true }) }),
@@ -67,12 +69,45 @@ function recordedCalls(): string[][] {
     .map((name) => fs.readFileSync(path.join(callsDir, name), 'utf8').replace(/\n$/, '').split('\n'));
 }
 
+function resetCalls(): void {
+  for (const name of fs.readdirSync(callsDir)) {
+    fs.rmSync(path.join(callsDir, name), { force: true });
+  }
+}
+
 describe('buildAgentGroupImage', () => {
   it('hands docker the Dockerfile path as one argument when the install folder has a space', async () => {
+    resetCalls();
+    containerConfigMocks.getContainerConfig.mockResolvedValueOnce({
+      packages_apt: '["curl"]',
+      packages_npm: '[]',
+    });
     await buildAgentGroupImage('ag-1');
     expect(recordedCalls()).toEqual([
       ['image', 'inspect', '--format', '{{.Id}}', 'nanoclaw-agent:fixture'],
       ['build', '-t', 'nanoclaw-agent:ag-1', '-f', path.join(fixture.dataDir, 'Dockerfile.ag-1'), '.'],
     ]);
+  });
+
+  it('refuses invalid apt package names before writing a Dockerfile or calling docker', async () => {
+    resetCalls();
+    containerConfigMocks.getContainerConfig.mockResolvedValueOnce({
+      packages_apt: '["curl && id"]',
+      packages_npm: '[]',
+    });
+    await expect(buildAgentGroupImage('ag-bad-apt')).rejects.toThrow(/Invalid apt package name/);
+    expect(recordedCalls()).toEqual([]);
+    expect(fs.existsSync(path.join(fixture.dataDir, 'Dockerfile.ag-bad-apt'))).toBe(false);
+  });
+
+  it('refuses invalid npm package names before writing a Dockerfile or calling docker', async () => {
+    resetCalls();
+    containerConfigMocks.getContainerConfig.mockResolvedValueOnce({
+      packages_apt: '[]',
+      packages_npm: '["typescript;id"]',
+    });
+    await expect(buildAgentGroupImage('ag-bad-npm')).rejects.toThrow(/Invalid npm package name/);
+    expect(recordedCalls()).toEqual([]);
+    expect(fs.existsSync(path.join(fixture.dataDir, 'Dockerfile.ag-bad-npm'))).toBe(false);
   });
 });

@@ -96,6 +96,28 @@ const CAMEL_SPLIT_RE = /([a-z0-9])([A-Z])/g;
  */
 const MCP_SERVER_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const APT_PACKAGE_NAME_RE = /^[a-z0-9][a-z0-9._+-]*$/;
+const NPM_PACKAGE_NAME_RE = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+
+export function isValidAptPackageName(name: string): boolean {
+  return APT_PACKAGE_NAME_RE.test(name);
+}
+
+export function isValidNpmPackageName(name: string): boolean {
+  return NPM_PACKAGE_NAME_RE.test(name);
+}
+
+export function validateAptPackageName(name: string): void {
+  if (!isValidAptPackageName(name)) {
+    throw new Error(`Invalid apt package name "${name}": must match ${APT_PACKAGE_NAME_RE}`);
+  }
+}
+
+export function validateNpmPackageName(name: string): void {
+  if (!isValidNpmPackageName(name)) {
+    throw new Error(`Invalid npm package name "${name}": must match ${NPM_PACKAGE_NAME_RE}`);
+  }
+}
 
 /** The owning plugin's name when a stored MCP server entry was stamped from a plugin. */
 export function mcpServerPluginOwner(entry: unknown): string | undefined {
