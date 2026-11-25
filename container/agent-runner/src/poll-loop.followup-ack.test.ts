@@ -87,25 +87,22 @@ it('keeps an idle-time follow-up processing until its turn produces a result', a
   await run;
 });
 
-it('keeps a follow-up queued behind an in-flight turn processing until its own result', async () => {
+it('acks a follow-up pushed during a running turn at push time', async () => {
   const { query, emit, pushes } = controlledQuery();
   const run = processQuery(query, ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
 
   emit({ type: 'init', continuation: 'sess-1' });
-  // m1's turn is still in flight when m2 is pushed.
+  // m1's turn is still in flight when m2 is pushed. A provider may fold m2
+  // into that turn and emit one result for both, so m2 cannot wait for its own.
   insertChat('m2', 'one more thing');
   await waitFor(() => pushes.length === 1);
-  expect(ackStatus('m2')).toBe('processing');
-
-  emit({ type: 'result', text: '' }); // answers m1 only
-  await waitFor(() => ackStatus('m1') === 'completed');
-  expect(ackStatus('m2')).toBe('processing');
-
-  emit({ type: 'result', text: '' }); // answers m2
   await waitFor(() => ackStatus('m2') === 'completed');
 
+  emit({ type: 'result', text: '' });
+  await waitFor(() => ackStatus('m1') === 'completed');
   emit('end');
   await run;
+  expect(ackStatus('m2')).toBe('completed');
 });
 
 it('acks a pushed follow-up completed when the stream ends before its result', async () => {
@@ -119,5 +116,32 @@ it('acks a pushed follow-up completed when the stream ends before its result', a
 
   emit('end');
   await run;
+  expect(ackStatus('m2')).toBe('completed');
+});
+
+it('acks an idle-time follow-up completed when its turn throws', async () => {
+  const pushes: string[] = [];
+  let fail: ((err: Error) => void) | undefined;
+  let step = 0;
+  async function* events(): AsyncGenerator<ProviderEvent> {
+    yield { type: 'init', continuation: 'sess-1' };
+    yield { type: 'result', text: '' };
+    step = 1;
+    await new Promise<void>((_, reject) => (fail = reject));
+  }
+  const query = { push: (m: string) => void pushes.push(m), end: () => {}, events: events(), abort: () => {} };
+  const run = processQuery(query, ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+  const settled = run.then(
+    () => 'resolved',
+    () => 'rejected',
+  );
+
+  await waitFor(() => step === 1 && ackStatus('m1') === 'completed');
+  insertChat('m2', 'are you there?');
+  await waitFor(() => pushes.length === 1);
+  expect(ackStatus('m2')).toBe('processing');
+
+  fail!(new Error('stream broke'));
+  await settled;
   expect(ackStatus('m2')).toBe('completed');
 });

@@ -243,6 +243,20 @@ describe('decideStuckAction', () => {
     expect(res.action).toBe('kill-ceiling');
   });
 
+  it('does not let new arrivals keep deferring while an older message waits unclaimed', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
+      containerState: null,
+      claims: [],
+      unclaimedDue: [
+        { messageId: 'm-old', dueSince: new Date(BASE - CLAIM_STUCK_MS - 1).toISOString() },
+        { messageId: 'm-new', dueSince: new Date(BASE - 200).toISOString() },
+      ],
+    });
+    expect(res.action).toBe('kill-ceiling');
+  });
+
   it('does not let a future-dated message defer the ceiling', () => {
     const res = decideStuckAction({
       now: BASE,

@@ -24,7 +24,7 @@
  *        living forever (see decideStuckAction's grace-period comment).
  *
  *        Deferred while there is fresh work: a message claimed within the
- *        claim tolerance, or a due message not yet claimed that arrived
+ *        claim tolerance, or due messages not yet claimed that all arrived
  *        within it. Writing a message reconciles the session, and an idle
  *        container just past the ceiling would otherwise be stopped by the
  *        very message it is about to answer (#4558). The deferral is bounded:
@@ -132,7 +132,12 @@ export function decideStuckAction(args: {
     const heartbeatAge = now - effectiveHeartbeatMs;
     const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
     // A container answering (or about to answer) a fresh message is not idle.
-    const freshWork = claims.some((c) => isFresh(c.statusChanged)) || unclaimedDue.some((m) => isFresh(m.dueSince));
+    // Every unclaimed message must be fresh: one left waiting past the
+    // tolerance means the container is not picking work up, and a steady
+    // stream of new arrivals must not keep it alive.
+    const freshWork =
+      claims.some((c) => isFresh(c.statusChanged)) ||
+      (unclaimedDue.length > 0 && unclaimedDue.every((m) => isFresh(m.dueSince)));
     if (heartbeatAge > ceiling && !freshWork) {
       return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
     }

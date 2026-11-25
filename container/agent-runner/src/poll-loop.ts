@@ -430,26 +430,24 @@ export async function processQuery(
     unwrappedNudged: boolean;
     taskBlockNudged: boolean;
     nudgedWindow?: SeqWindow;
-    /** Follow-up messages this turn answers; acked completed at its result. */
-    messageIds: string[];
   };
   const queuedTurns: QueuedTurn[] = [];
   // On a wrap-nudge retry: the rows the nudged turn wrote. The turn boundary
   // moved past them, so both doors check retry blocks against this window and
   // skip exact repeats. Follow-ups queued in between keep their own window.
   let nudgedWindow: SeqWindow | undefined;
-  // The inbound messages the turn in flight answers. A follow-up stays
-  // 'processing' until its turn's result, never acked completed at push time:
-  // if the container dies first (an idle stop racing the message that woke
-  // it, #4558), the host resets the claim to pending and the message is
-  // retried instead of silently lost.
+  // Messages acked at the running turn's result: the initial batch, or a
+  // follow-up that arrived while the query was idle (#4558: if the container
+  // dies first, the host resets the claim and the message is retried).
+  // A follow-up pushed while a turn is running is acked at push, as before:
+  // a provider may fold it into the running turn and emit one result for both.
   let turnMessageIds: string[] = initialBatchIds;
-  const adoptTurn = (next: QueuedTurn): void => {
+  const adoptTurn = (next: QueuedTurn, messageIds: string[] = []): void => {
     Object.assign(routing, next.routing);
     unwrappedNudged = next.unwrappedNudged;
     taskBlockNudged = next.taskBlockNudged;
     nudgedWindow = next.nudgedWindow;
-    turnMessageIds = next.messageIds;
+    turnMessageIds = messageIds;
     publishReplyRoute(routing);
     answering = true;
   };
@@ -457,13 +455,7 @@ export async function processQuery(
   // Preserve its original route, prompt and retry guards until it is answered.
   const pushRetry = (prompt: string, retryOf?: SeqWindow): void => {
     query.push(prompt);
-    queuedTurns.push({
-      routing: { ...routing },
-      unwrappedNudged,
-      taskBlockNudged,
-      nudgedWindow: retryOf,
-      messageIds: [],
-    });
+    queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged, nudgedWindow: retryOf });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
   };
 
@@ -559,15 +551,11 @@ export async function processQuery(
           routing: extractRouting(keep),
           unwrappedNudged: false,
           taskBlockNudged: false,
-          messageIds: keptIds,
         };
         if (answering) {
-          // Waiting behind the turn in flight, which may sit in a long tool
-          // call with no events. The poller is alive, so say so: otherwise
-          // this newer claim outdates the heartbeat and trips claim-stuck.
           queuedTurns.push(next);
-          touchHeartbeat();
-        } else adoptTurn(next);
+          markCompleted(keptIds);
+        } else adoptTurn(next, keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
         // terminates the container on unhandled-rejection. The initial-batch
@@ -735,8 +723,9 @@ export async function processQuery(
       }
     }
   } catch (err) {
-    // Freeze the queue before awaiting notices. Abandoned follow-ups are acked
-    // completed in the finally below, so an abandoned turn cannot rely on redelivery.
+    // Freeze the queue before awaiting notices. Queued follow-ups were acked at
+    // push and the turn in flight is acked in the finally below, so an abandoned
+    // turn cannot rely on redelivery.
     done = true;
     const cancelled = endedForCommand || signal?.aborted;
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -782,11 +771,10 @@ export async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
-    // The stream ended (or failed, with notices sent above) before these
-    // turns got a result. Ack them as before; only a dead container leaves
-    // them 'processing' for the host to retry.
-    const unanswered = [...turnMessageIds, ...queuedTurns.flatMap((turn) => turn.messageIds)];
-    if (unanswered.length > 0) markCompleted(unanswered);
+    // The stream ended (or failed, with notices sent above) before the turn
+    // in flight got a result. Ack it as before; only a dead container leaves
+    // it 'processing' for the host to retry.
+    if (turnMessageIds.length > 0) markCompleted(turnMessageIds);
   }
 
   return { continuation: queryContinuation };
