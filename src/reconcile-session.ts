@@ -23,6 +23,14 @@
  *        and so never writes a heartbeat — still ages out instead of
  *        living forever (see decideStuckAction's grace-period comment).
  *
+ *        Deferred while there is fresh work: a message claimed within the
+ *        claim tolerance, or a due message not yet claimed that arrived
+ *        within it. Writing a message reconciles the session, and an idle
+ *        container just past the ceiling would otherwise be stopped by the
+ *        very message it is about to answer (#4558). The deferral is bounded:
+ *        past the tolerance, an unclaimed message no longer defers, and a
+ *        silent claim is the claim-stuck check's job.
+ *
  *     2. Message-scoped stuck: for each 'processing' row, tolerance =
  *        max(60s, current_bash_timeout_ms_if_Bash_running). If
  *        (claim_age > tolerance) AND (heartbeat_mtime <= status_changed)
@@ -90,9 +98,18 @@ export function decideStuckAction(args: {
   containerStartedAtMs?: number; // fallback when heartbeat file absent
   containerState: ContainerState | null;
   claims: Array<{ messageId: string; statusChanged: string }>;
+  /** Due trigger messages the container has not claimed yet. */
+  unclaimedDue?: Array<{ messageId: string; dueSince: string }>;
 }): StuckDecision {
-  const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims } = args;
+  const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims, unclaimedDue = [] } = args;
   const declaredBashMs = bashTimeoutMs(containerState);
+  const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0);
+  const isFresh = (iso: string): boolean => {
+    const at = Date.parse(iso);
+    if (Number.isNaN(at)) return false;
+    const age = now - at;
+    return age >= 0 && age <= tolerance;
+  };
 
   // Ceiling check prefers the heartbeat file's mtime. A freshly-spawned
   // container hasn't had any SDK activity yet so no heartbeat file exists —
@@ -114,12 +131,13 @@ export function decideStuckAction(args: {
   if (effectiveHeartbeatMs !== 0) {
     const heartbeatAge = now - effectiveHeartbeatMs;
     const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
-    if (heartbeatAge > ceiling) {
+    // A container answering (or about to answer) a fresh message is not idle.
+    const freshWork = claims.some((c) => isFresh(c.statusChanged)) || unclaimedDue.some((m) => isFresh(m.dueSince));
+    if (heartbeatAge > ceiling && !freshWork) {
       return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
     }
   }
 
-  const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0);
   for (const claim of claims) {
     const claimedAt = Date.parse(claim.statusChanged);
     if (Number.isNaN(claimedAt)) continue;
@@ -271,12 +289,14 @@ async function enforceRunningContainerSla(
     return { ...claim, statusChanged: new Date(incarnationStartMs).toISOString() };
   });
 
+  const claimedIds = new Set(gatedClaims.map((c) => c.messageId));
   const decision = decideStuckAction({
     now: Date.now(),
     heartbeatMtimeMs: gatedHeartbeatMs,
     containerStartedAtMs: getContainerStartedAtMs(session.id),
     containerState: outDb.getContainerState(),
     claims: gatedClaims,
+    unclaimedDue: inDb.getDueInboundMessages().filter((m) => !claimedIds.has(m.messageId)),
   });
 
   if (decision.action === 'ok') return;

@@ -47,6 +47,12 @@ export interface MessageRetry {
   processAfter: string | null;
 }
 
+/** A due trigger message, with the later of its timestamp and process_after. */
+export interface DueMessage {
+  messageId: string;
+  dueSince: string;
+}
+
 export interface ProcessingClaim {
   messageId: string;
   statusChanged: string;
@@ -101,6 +107,8 @@ export interface InboundMailbox {
   replaceDestinations(entries: Destination[]): void;
   insertMessage(message: InboundMessage): Promise<void>;
   countDueMessages(): number;
+  /** The pending trigger messages a container would pick up now (system rows excluded). */
+  getDueInboundMessages(): DueMessage[];
   markMessageFailed(messageId: string): void;
   retryWithBackoff(messageId: string, backoffSec: number): void;
   getMessageForRetry(messageId: string, status: 'pending' | 'processing'): MessageRetry | undefined;

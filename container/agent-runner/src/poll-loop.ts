@@ -430,17 +430,26 @@ export async function processQuery(
     unwrappedNudged: boolean;
     taskBlockNudged: boolean;
     nudgedWindow?: SeqWindow;
+    /** Follow-up messages this turn answers; acked completed at its result. */
+    messageIds: string[];
   };
   const queuedTurns: QueuedTurn[] = [];
   // On a wrap-nudge retry: the rows the nudged turn wrote. The turn boundary
   // moved past them, so both doors check retry blocks against this window and
   // skip exact repeats. Follow-ups queued in between keep their own window.
   let nudgedWindow: SeqWindow | undefined;
+  // The inbound messages the turn in flight answers. A follow-up stays
+  // 'processing' until its turn's result, never acked completed at push time:
+  // if the container dies first (an idle stop racing the message that woke
+  // it, #4558), the host resets the claim to pending and the message is
+  // retried instead of silently lost.
+  let turnMessageIds: string[] = initialBatchIds;
   const adoptTurn = (next: QueuedTurn): void => {
     Object.assign(routing, next.routing);
     unwrappedNudged = next.unwrappedNudged;
     taskBlockNudged = next.taskBlockNudged;
     nudgedWindow = next.nudgedWindow;
+    turnMessageIds = next.messageIds;
     publishReplyRoute(routing);
     answering = true;
   };
@@ -448,7 +457,13 @@ export async function processQuery(
   // Preserve its original route, prompt and retry guards until it is answered.
   const pushRetry = (prompt: string, retryOf?: SeqWindow): void => {
     query.push(prompt);
-    queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged, nudgedWindow: retryOf });
+    queuedTurns.push({
+      routing: { ...routing },
+      unwrappedNudged,
+      taskBlockNudged,
+      nudgedWindow: retryOf,
+      messageIds: [],
+    });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
   };
 
@@ -544,10 +559,15 @@ export async function processQuery(
           routing: extractRouting(keep),
           unwrappedNudged: false,
           taskBlockNudged: false,
+          messageIds: keptIds,
         };
-        if (answering) queuedTurns.push(next);
-        else adoptTurn(next);
-        markCompleted(keptIds);
+        if (answering) {
+          // Waiting behind the turn in flight, which may sit in a long tool
+          // call with no events. The poller is alive, so say so: otherwise
+          // this newer claim outdates the heartbeat and trips claim-stuck.
+          queuedTurns.push(next);
+          touchHeartbeat();
+        } else adoptTurn(next);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
         // terminates the container on unhandled-rejection. The initial-batch
@@ -610,12 +630,13 @@ export async function processQuery(
         }
       } else if (event.type === 'result') {
         // A result — with or without text — means the turn is done. Mark
-        // the initial batch completed now so the host sweep doesn't see
-        // stale 'processing' claims while the query stays open for
-        // follow-up pushes. The agent may have responded via MCP
-        // (send_message) mid-turn, or the message may not need a response
-        // at all — either way the turn is finished.
-        markCompleted(initialBatchIds);
+        // the messages it answered (the initial batch, or a follow-up)
+        // completed now so the host sweep doesn't see stale 'processing'
+        // claims while the query stays open for follow-up pushes. The agent
+        // may have responded via MCP (send_message) mid-turn, or the message
+        // may not need a response at all — either way the turn is finished.
+        if (turnMessageIds.length > 0) markCompleted(turnMessageIds);
+        turnMessageIds = [];
         const resultText = event.text ?? '';
         const failed = event.isError === true;
         if (resultText || failed) {
@@ -714,8 +735,8 @@ export async function processQuery(
       }
     }
   } catch (err) {
-    // Freeze the queue before awaiting notices. Follow-ups have already been
-    // acknowledged, so an abandoned queued turn cannot rely on redelivery.
+    // Freeze the queue before awaiting notices. Abandoned follow-ups are acked
+    // completed in the finally below, so an abandoned turn cannot rely on redelivery.
     done = true;
     const cancelled = endedForCommand || signal?.aborted;
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -761,6 +782,11 @@ export async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
+    // The stream ended (or failed, with notices sent above) before these
+    // turns got a result. Ack them as before; only a dead container leaves
+    // them 'processing' for the host to retry.
+    const unanswered = [...turnMessageIds, ...queuedTurns.flatMap((turn) => turn.messageIds)];
+    if (unanswered.length > 0) markCompleted(unanswered);
   }
 
   return { continuation: queryContinuation };

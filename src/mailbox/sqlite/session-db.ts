@@ -118,6 +118,20 @@ export function countDueMessages(db: Database.Database): number {
   ).count;
 }
 
+export function getDueInboundMessages(
+  db: Database.Database,
+): Array<{ id: string; timestamp: string; processAfter: string | null }> {
+  return db
+    .prepare(
+      `SELECT id, timestamp, process_after AS processAfter FROM messages_in
+       WHERE status = 'pending'
+         AND trigger = 1
+         AND kind != 'system'
+         AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))`,
+    )
+    .all() as Array<{ id: string; timestamp: string; processAfter: string | null }>;
+}
+
 export function markMessageFailed(db: Database.Database, messageId: string): void {
   db.prepare("UPDATE messages_in SET status = 'failed' WHERE id = ?").run(messageId);
 }

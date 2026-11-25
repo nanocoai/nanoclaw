@@ -199,6 +199,61 @@ describe('decideStuckAction', () => {
     expect(res.action).toBe('ok');
   });
 
+  // #4558: writing a message reconciles the session. An idle container just
+  // past the ceiling must not be stopped by the message it is about to answer.
+  it('defers the ceiling while a fresh message waits to be claimed', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
+      containerState: null,
+      claims: [],
+      unclaimedDue: [{ messageId: 'm-new', dueSince: new Date(BASE - 200).toISOString() }],
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('defers the ceiling while a fresh claim waits for its first event', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
+      containerState: null,
+      claims: [claim('m-new', 1_000)],
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('stops deferring once an unclaimed message outlives the claim tolerance', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
+      containerState: null,
+      claims: [],
+      unclaimedDue: [{ messageId: 'm-old', dueSince: new Date(BASE - CLAIM_STUCK_MS - 1).toISOString() }],
+    });
+    expect(res.action).toBe('kill-ceiling');
+  });
+
+  it('still stops on the ceiling when the only claim is past tolerance', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
+      containerState: null,
+      claims: [claim('m-stuck', CLAIM_STUCK_MS + 1)],
+    });
+    expect(res.action).toBe('kill-ceiling');
+  });
+
+  it('does not let a future-dated message defer the ceiling', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
+      containerState: null,
+      claims: [],
+      unclaimedDue: [{ messageId: 'm-skew', dueSince: new Date(BASE + 60_000).toISOString() }],
+    });
+    expect(res.action).toBe('kill-ceiling');
+  });
+
   it('ignores claims with unparseable timestamps', () => {
     const res = decideStuckAction({
       now: BASE,
@@ -350,6 +405,27 @@ describe('resetStuckProcessingRows — orphan claim cleanup', () => {
     expect(outDb.getProcessingClaims()).toEqual([]);
     const row = inDb.prepare('SELECT tries FROM messages_in WHERE id = ?').get('m-2') as { tries: number };
     expect(row.tries).toBe(1); // not bumped, the skip path held
+  });
+});
+
+describe('getDueInboundMessages', () => {
+  it('lists due trigger messages by the later of timestamp and process_after', () => {
+    const { inDb } = makeSessionDbs();
+    const insert = inDb.prepare(
+      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, content)
+       VALUES (?, ?, ?, ?, ?, ?, '{}')`,
+    );
+    insert.run('chat', 'chat', '2026-04-20T12:00:00.000Z', 'pending', null, 1);
+    insert.run('task', 'task', '2026-04-20T11:00:00.000Z', 'pending', '2026-04-20T11:30:00.000Z', 1);
+    insert.run('context', 'chat', '2026-04-20T12:00:00.000Z', 'pending', null, 0);
+    insert.run('system', 'system', '2026-04-20T12:00:00.000Z', 'pending', null, 1);
+    insert.run('done', 'chat', '2026-04-20T12:00:00.000Z', 'completed', null, 1);
+    insert.run('future', 'task', '2026-04-20T12:00:00.000Z', 'pending', '2999-01-01T00:00:00.000Z', 1);
+
+    expect(inDb.getDueInboundMessages().sort((a, b) => a.messageId.localeCompare(b.messageId))).toEqual([
+      { messageId: 'chat', dueSince: '2026-04-20T12:00:00.000Z' },
+      { messageId: 'task', dueSince: '2026-04-20T11:30:00.000Z' },
+    ]);
   });
 });
 
