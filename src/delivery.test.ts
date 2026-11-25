@@ -37,6 +37,7 @@ import {
   runMigrations,
   createAgentGroup,
   createMessagingGroup,
+  createPendingApproval,
   getPendingQuestion,
 } from './db/index.js';
 import { getDeliveredIds } from './mailbox/sqlite/session-db.js';
@@ -897,5 +898,350 @@ describe('deliverSessionMessages — agent questions', () => {
     expect(delivered).toContainEqual({ text: 'hello' });
     // The body is stored too, so the answered card can keep it.
     expect((await getPendingQuestion('q-1'))?.question).toBe('Which?');
+  });
+});
+
+describe('deliverSessionMessages — container edit & host-only field boundary', () => {
+  function insertRow(
+    agentGroupId: string,
+    sessionId: string,
+    row: { id: string; kind: string; content: Record<string, unknown> },
+  ): void {
+    const db = new Database(outboundDbPath(agentGroupId, sessionId));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES (?, datetime('now'), ?, 'telegram:123', 'telegram', ?)`,
+    ).run(row.id, row.kind, JSON.stringify(row.content));
+    db.close();
+  }
+
+  function deliveryStatus(agentGroupId: string, sessionId: string, msgId: string): string | undefined {
+    const db = openInboundDb(agentGroupId, sessionId);
+    const row = db.prepare('SELECT status FROM delivered WHERE message_out_id = ?').get(msgId) as
+      { status: string } | undefined;
+    db.close();
+    return row?.status;
+  }
+
+  it.each([
+    {
+      name: 'chat edit with questionId',
+      kind: 'chat',
+      content: { operation: 'edit', questionId: 'appr-1', messageId: 'plat-1', text: 'Harmless question' },
+    },
+    {
+      name: 'chat edit with questionId only',
+      kind: 'chat',
+      content: { operation: 'edit', questionId: 'appr-1', text: 'Harmless question' },
+    },
+    {
+      name: 'chat edit with terminalCard',
+      kind: 'chat',
+      content: {
+        operation: 'edit',
+        messageId: 'plat-1',
+        text: 'Decoy',
+        terminalCard: { title: 'T', question: 'Q', resolution: 'Approved' },
+      },
+    },
+    {
+      name: 'chat edit with requirePresentation',
+      kind: 'chat',
+      content: { operation: 'edit', messageId: 'plat-1', text: 'Decoy', requirePresentation: true },
+    },
+    {
+      name: 'chat-sdk edit carrying terminal approval card payload',
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        questionId: 'appr-1',
+        messageId: 'plat-1',
+        text: 'Decoy',
+        terminalCard: { title: 'T', question: 'Q', resolution: 'Approved' },
+      },
+    },
+    {
+      name: 'chat-sdk edit without host-only fields',
+      kind: 'chat-sdk',
+      content: { operation: 'edit', messageId: 'plat-1', text: 'Decoy' },
+    },
+    {
+      name: 'chat edit with empty messageId after stripping agent group suffix',
+      kind: 'chat',
+      content: { operation: 'edit', messageId: ':ag-1', text: 'Decoy' },
+    },
+    {
+      name: 'chat edit missing text string',
+      kind: 'chat',
+      content: { operation: 'edit', messageId: 'plat-1', markdown: 'Decoy' },
+    },
+    {
+      name: 'plain chat row carrying terminalCard',
+      kind: 'chat',
+      content: { text: 'Hi', terminalCard: { title: 'T', question: 'Q', resolution: 'R' } },
+    },
+    {
+      name: 'plain chat row carrying requirePresentation',
+      kind: 'chat',
+      content: { text: 'Hi', requirePresentation: true },
+    },
+  ])('refuses $name on attempt 1 without invoking the channel adapter', async ({ kind, content }) => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertRow('ag-1', session.id, { id: 'forged-1', kind, content });
+
+    const sent: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, body) {
+        sent.push(body);
+        return 'pm-1';
+      },
+    });
+
+    await deliverSessionMessages(session);
+    // Second poll confirms it was closed on attempt 1 (zero retries).
+    await deliverSessionMessages(session);
+
+    expect(sent).toEqual([]);
+    expect(deliveryStatus('ag-1', session.id, 'forged-1')).toBe('failed');
+  });
+
+  it('refuses a container ask_question with requirePresentation before persisting a pending question', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertRow('ag-1', session.id, {
+      id: 'forged-q',
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q-forged-pres',
+        title: 'Pick one',
+        question: 'Which option?',
+        options: ['A', 'B'],
+        requirePresentation: true,
+      },
+    });
+
+    const sent: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, body) {
+        sent.push(body);
+        return 'pm-1';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(sent).toEqual([]);
+    expect(deliveryStatus('ag-1', session.id, 'forged-q')).toBe('failed');
+    expect(await getPendingQuestion('q-forged-pres')).toBeUndefined();
+  });
+
+  it('refuses a container ask_question whose questionId collides with an open approval or is non-string', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    await createPendingApproval({
+      approval_id: 'appr-open-1',
+      session_id: session.id,
+      request_id: 'appr-open-1',
+      action: 'install_packages',
+      payload: '{}',
+      created_at: now(),
+      channel_type: 'telegram',
+      platform_id: 'telegram:123',
+      platform_message_id: 'plat-approval-1',
+      status: 'pending',
+      title: 'Install packages',
+      question: 'Install ripgrep?',
+      options_json: JSON.stringify([{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }]),
+    });
+
+    insertRow('ag-1', session.id, {
+      id: 'q-collide',
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'appr-open-1',
+        title: 'Quick question',
+        question: 'Continue?',
+        options: [{ label: 'Yes', value: 'approve' }],
+      },
+    });
+    insertRow('ag-1', session.id, {
+      id: 'q-array-id',
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: ['appr-open-1'],
+        title: 'Quick question',
+        question: 'Continue?',
+        options: [{ label: 'Yes', value: 'approve' }],
+      },
+    });
+
+    const sent: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, body) {
+        sent.push(body);
+        return 'pm-1';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(sent).toEqual([]);
+    expect(deliveryStatus('ag-1', session.id, 'q-collide')).toBe('failed');
+    expect(deliveryStatus('ag-1', session.id, 'q-array-id')).toBe('failed');
+    expect(await getPendingQuestion('appr-open-1')).toBeUndefined();
+  });
+
+  it('still retries a legitimate ask_question row after a transient adapter failure', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertRow('ag-1', session.id, {
+      id: 'q-retry-row',
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q-retry-id',
+        title: 'Pick one',
+        question: 'A or B?',
+        options: ['A', 'B'],
+      },
+    });
+
+    let attempts = 0;
+    setDeliveryAdapter({
+      async deliver() {
+        attempts++;
+        if (attempts === 1) throw new Error('transient network error');
+        return 'plat-q-retry';
+      },
+    });
+
+    await deliverSessionMessages(session);
+    expect(attempts).toBe(1);
+    expect(deliveryStatus('ag-1', session.id, 'q-retry-row')).toBeUndefined();
+
+    await deliverSessionMessages(session);
+    expect(attempts).toBe(2);
+    expect(deliveryStatus('ag-1', session.id, 'q-retry-row')).toBe('delivered');
+  });
+
+  it('refuses a container edit targeting a message not delivered by this session', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertRow('ag-1', session.id, {
+      id: 'edit-foreign',
+      kind: 'chat',
+      content: { operation: 'edit', messageId: 'plat-host-card-99', text: 'Reworded card' },
+    });
+
+    const sent: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, body) {
+        sent.push(body);
+        return 'pm-1';
+      },
+    });
+
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+
+    expect(sent).toEqual([]);
+    expect(deliveryStatus('ag-1', session.id, 'edit-foreign')).toBe('failed');
+  });
+
+  it.each(['pending', 'approved'] as const)(
+    'refuses a container edit targeting a %s approval message id even on a per-chat id collision',
+    async (status) => {
+      await seedAgentAndChannel();
+      const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+      // Simulate a platform with per-chat sequential ids (e.g. Telegram): this
+      // session delivered message id "42" in one chat, while an approval card
+      // in the target chat also has platform_message_id "42".
+      await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.markDelivered('prior-msg', '42'));
+      await createPendingApproval({
+        approval_id: `appr-${status}`,
+        session_id: session.id,
+        request_id: `appr-${status}`,
+        action: 'install_packages',
+        payload: '{}',
+        created_at: now(),
+        channel_type: 'telegram',
+        platform_id: 'telegram:123',
+        platform_message_id: '42',
+        status,
+        title: 'Install packages',
+        question: 'Install ripgrep?',
+        options_json: JSON.stringify([{ label: 'Approve', selectedLabel: 'Approved', value: 'approve' }]),
+      });
+      insertRow('ag-1', session.id, {
+        id: 'edit-bare',
+        kind: 'chat',
+        content: { operation: 'edit', messageId: '42', text: 'Reworded approval' },
+      });
+      insertRow('ag-1', session.id, {
+        id: 'edit-suffixed',
+        kind: 'chat',
+        content: { operation: 'edit', messageId: '42:ag-1', text: 'Reworded approval' },
+      });
+
+      const sent: string[] = [];
+      setDeliveryAdapter({
+        async deliver(_ct, _pid, _tid, _kind, body) {
+          sent.push(body);
+          return 'pm-1';
+        },
+      });
+
+      await deliverSessionMessages(session);
+
+      expect(sent).toEqual([]);
+      expect(deliveryStatus('ag-1', session.id, 'edit-bare')).toBe('failed');
+      expect(deliveryStatus('ag-1', session.id, 'edit-suffixed')).toBe('failed');
+    },
+  );
+
+  it('allowlists legitimate container edits of session-delivered messages to { operation, messageId, text }', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertRow('ag-1', session.id, {
+      id: 'orig-1',
+      kind: 'chat',
+      content: { text: 'Original message' },
+    });
+    const sent: Array<{ kind: string; content: string }> = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, kind, body) {
+        sent.push({ kind, content: body });
+        return 'plat-own-42';
+      },
+    });
+    await deliverSessionMessages(session);
+    sent.length = 0;
+
+    insertRow('ag-1', session.id, {
+      id: 'edit-legit',
+      kind: 'chat',
+      content: {
+        operation: 'edit',
+        messageId: 'plat-own-42:ag-1',
+        text: 'Moved to 3pm.',
+        batch: ['in-1'],
+        unexpectedField: 'must-not-forward',
+        type: 'ask_question',
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(sent).toEqual([
+      {
+        kind: 'chat',
+        content: JSON.stringify({ operation: 'edit', messageId: 'plat-own-42', text: 'Moved to 3pm.' }),
+      },
+    ]);
+    expect(deliveryStatus('ag-1', session.id, 'edit-legit')).toBe('delivered');
   });
 });

@@ -255,6 +255,14 @@ export function getDeliveredIds(db: Database.Database): Set<string> {
   );
 }
 
+export function hasDeliveredPlatformMessage(db: Database.Database, platformMessageId: string): boolean {
+  return (
+    db
+      .prepare("SELECT 1 FROM delivered WHERE platform_message_id = ? AND status = 'delivered' LIMIT 1")
+      .get(platformMessageId) !== undefined
+  );
+}
+
 export function markDelivered(db: Database.Database, messageOutId: string, platformMessageId: string | null): void {
   db.prepare(
     "INSERT OR IGNORE INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, ?, 'delivered', ?)",

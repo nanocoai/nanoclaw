@@ -153,7 +153,9 @@ describe('requestApproval delivery failure', () => {
       question: 'Approve the thing?',
     });
 
-    expect(await getPendingApprovalsByAction('test_action')).toHaveLength(1);
+    const rows = await getPendingApprovalsByAction('test_action');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.platform_message_id).toBe('pm-1');
     expect(vi.mocked(writeSessionMessage)).not.toHaveBeenCalled();
   });
 });

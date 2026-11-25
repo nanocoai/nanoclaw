@@ -28,7 +28,12 @@ import {
   type RawOption,
 } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { createPendingApproval, deletePendingApproval, getSession } from '../../db/sessions.js';
+import {
+  bindPendingApprovalMessage,
+  createPendingApproval,
+  deletePendingApproval,
+  getSession,
+} from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { requestWake } from '../../request-wake.js';
 import { log } from '../../log.js';
@@ -286,8 +291,9 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
 
   const adapter = getDeliveryAdapter();
   if (adapter) {
+    let platformMessageId: string | undefined;
     try {
-      await adapter.deliver(
+      platformMessageId = await adapter.deliver(
         target.messagingGroup.channel_type,
         target.messagingGroup.platform_id,
         approvalCardThread(session, target.messagingGroup),
@@ -314,6 +320,14 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
           : `could not deliver approval request to ${target.userId}.`;
       await notifyAgent(session, `${action} failed: ${reason}`);
       return;
+    }
+    if (platformMessageId) {
+      // eslint-disable-next-line no-catch-all/no-catch-all -- card is already live; binding failure must not drop it
+      try {
+        await bindPendingApprovalMessage(approvalId, platformMessageId);
+      } catch (err) {
+        log.warn('Failed to bind approval card platform message id', { action, approvalId, err });
+      }
     }
   }
 

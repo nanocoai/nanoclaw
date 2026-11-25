@@ -14,6 +14,7 @@ import {
   getRunningSessions,
   getActiveSessions,
   createPendingQuestion,
+  getPendingQuestion,
   isTaskThread,
   TASKS_SYSTEM_THREAD_ID,
 } from './db/sessions.js';
@@ -440,6 +441,9 @@ async function completeDelivery(
   }
 }
 
+/** Refusal of a container-originated outbound row that must fail on attempt 1 without retries. */
+class PermanentDeliveryError extends Error {}
+
 /** Never throws. */
 async function failDelivery(
   msg: OutboundMessage,
@@ -447,6 +451,15 @@ async function failDelivery(
   agentGroup: AgentGroup,
   err: unknown,
 ): Promise<void> {
+  if (err instanceof PermanentDeliveryError) {
+    log.warn('Message delivery refused permanently', {
+      messageId: msg.id,
+      sessionId: session.id,
+      err,
+    });
+    await markFailed(msg, session, agentGroup);
+    return;
+  }
   const attempts = await recordAttemptRow(msg.id, session.id, err);
   if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
     log.error('Message delivery failed permanently, giving up', {
@@ -667,32 +680,105 @@ async function deliverMessage(
     deliverInstance = mg.instance;
   }
 
+  // Container-originated channel rows come from untrusted outbound.db state.
+  // Reject host-only protocol fields and allowlist container edits so a
+  // compromised container cannot hijack open approval messages or spoof
+  // host-authored terminal cards.
+  const record = isRecord(content) ? content : null;
+  const isEdit = record?.operation === 'edit';
+  let sanitizedEditContent: string | undefined;
+  if (isEdit) {
+    if (msg.kind !== 'chat') {
+      throw new PermanentDeliveryError('Agents can only edit plain chat messages.');
+    }
+    if (
+      hasOwnDefined(record, 'questionId') ||
+      hasOwnDefined(record, 'terminalCard') ||
+      hasOwnDefined(record, 'requirePresentation')
+    ) {
+      throw new PermanentDeliveryError('Agents cannot supply host-only fields in a message edit.');
+    }
+    if (typeof record.messageId !== 'string' || typeof record.text !== 'string') {
+      throw new PermanentDeliveryError('A message edit must specify a message id and text.');
+    }
+    const platformMessageId = stripAgentGroupSuffix(record.messageId, session.agent_group_id);
+    if (platformMessageId.length === 0) {
+      throw new PermanentDeliveryError('A message edit must specify a message id and text.');
+    }
+    const ownsTarget = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) =>
+      mailbox.hasDeliveredPlatformMessage(platformMessageId),
+    );
+    if (!ownsTarget) {
+      throw new PermanentDeliveryError('Agents can only edit messages delivered by their own session.');
+    }
+    if (msg.channelType && msg.platformId && (await hasTable(getDb(), 'pending_approvals'))) {
+      const approvalRow = await getDb().get(
+        'SELECT 1 FROM pending_approvals WHERE platform_message_id = ? AND (channel_type IS NULL OR channel_type = ?) AND (platform_id IS NULL OR platform_id = ?) LIMIT 1',
+        platformMessageId,
+        msg.channelType,
+        msg.platformId,
+      );
+      if (approvalRow) {
+        throw new PermanentDeliveryError('Agents cannot edit a host approval message.');
+      }
+    }
+    sanitizedEditContent = JSON.stringify({
+      operation: 'edit',
+      messageId: platformMessageId,
+      text: record.text,
+    });
+  } else if (
+    record !== null &&
+    (hasOwnDefined(record, 'terminalCard') || hasOwnDefined(record, 'requirePresentation'))
+  ) {
+    throw new PermanentDeliveryError('Agents cannot supply host-only fields in an outbound message.');
+  }
+
+  // The agent names its own ask_question id, and card clicks resolve by that id
+  // across both pending_questions and host approval tables. Refuse any
+  // malformed or already-taken id before storing or delivering (allowing only
+  // retries of this same row's own pending question).
+  if (!isEdit && record !== null && record.type === 'ask_question' && hasOwnDefined(record, 'questionId')) {
+    if (typeof record.questionId !== 'string' || record.questionId.length === 0) {
+      throw new PermanentDeliveryError('An ask_question must specify a non-empty string questionId.');
+    }
+    if (await hasConflictingQuestionId(record.questionId, session.id, msg.id)) {
+      throw new PermanentDeliveryError(`Question id ${record.questionId} already names an open request.`);
+    }
+  }
+
   // Track pending questions for ask_user_question flow.
   // Guarded: without the interactive module, `pending_questions` doesn't
   // exist and we skip persistence — the card still delivers to the user,
   // but the response path has nowhere to land and will log unclaimed.
-  if (content.type === 'ask_question' && content.questionId && (await hasTable(getDb(), 'pending_questions'))) {
-    const title = content.title as string | undefined;
-    const rawOptions = content.options as unknown;
+  if (
+    !isEdit &&
+    record !== null &&
+    record.type === 'ask_question' &&
+    typeof record.questionId === 'string' &&
+    (await hasTable(getDb(), 'pending_questions'))
+  ) {
+    const title = record.title as string | undefined;
+    const rawOptions = record.options as unknown;
     if (!title || !Array.isArray(rawOptions)) {
       log.error('ask_question missing required title/options — not persisting', {
-        questionId: content.questionId,
+        questionId: record.questionId,
       });
     } else {
       const inserted = await createPendingQuestion({
-        question_id: content.questionId,
+        question_id: record.questionId,
         session_id: session.id,
         message_out_id: msg.id,
         platform_id: msg.platformId,
         channel_type: msg.channelType,
         thread_id: msg.threadId,
         title,
-        question: typeof content.question === 'string' ? content.question : '',
+        question: typeof record.question === 'string' ? record.question : '',
         options: normalizeOptions(rawOptions as never),
         created_at: new Date().toISOString(),
       });
       if (inserted) {
-        log.info('Pending question created', { questionId: content.questionId, sessionId: session.id });
+        log.info('Pending question created', { questionId: record.questionId, sessionId: session.id });
       }
     }
   }
@@ -707,16 +793,18 @@ async function deliverMessage(
   // File I/O lives in session-manager.ts (symmetric with inbound
   // extractAttachmentFiles) — delivery just hands buffers to the adapter.
   const files =
-    Array.isArray(content.files) && content.files.length > 0
-      ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
+    !isEdit && record !== null && Array.isArray(record.files) && record.files.length > 0
+      ? readOutboxFiles(session.agent_group_id, session.id, msg.id, record.files as string[])
       : undefined;
 
   // Agent-asked questions keep their own markup; host-built cards never come
   // through here, so only they get a channel's card-text escape.
   const deliveredContent =
-    content.type === 'ask_question'
-      ? JSON.stringify({ ...content, fromAgent: true })
-      : withPlatformMessageId(content, msg.content, session.agent_group_id);
+    sanitizedEditContent !== undefined
+      ? sanitizedEditContent
+      : record?.type === 'ask_question'
+        ? JSON.stringify({ ...record, fromAgent: true })
+        : withPlatformMessageId(content, msg.content, session.agent_group_id);
   // A row id is unique only within its session's mailbox; the session id makes it unique host-wide.
   const deliveryId = `${session.id}:${msg.id}`;
   const platformMsgId = await deliveryAdapter.deliver(
@@ -899,6 +987,45 @@ export function stopDeliveryPolls(): void {
   sweepPolling = false;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasOwnDefined(record: Record<string, unknown>, key: string): boolean {
+  return Object.hasOwn(record, key) && record[key] !== undefined;
+}
+
+function stripAgentGroupSuffix(messageId: string, agentGroupId: string): string {
+  const suffix = `:${agentGroupId}`;
+  return messageId.endsWith(suffix) ? messageId.slice(0, -suffix.length) : messageId;
+}
+
+async function hasConflictingQuestionId(questionId: string, sessionId: string, messageOutId: string): Promise<boolean> {
+  const db = getDb();
+  if (await hasTable(db, 'pending_approvals')) {
+    const row = await db.get('SELECT 1 FROM pending_approvals WHERE approval_id = ? LIMIT 1', questionId);
+    if (row) return true;
+  }
+  if (await hasTable(db, 'pending_channel_approvals')) {
+    const row = await db.get(
+      'SELECT 1 FROM pending_channel_approvals WHERE messaging_group_id = ? LIMIT 1',
+      questionId,
+    );
+    if (row) return true;
+  }
+  if (await hasTable(db, 'pending_sender_approvals')) {
+    const row = await db.get('SELECT 1 FROM pending_sender_approvals WHERE id = ? LIMIT 1', questionId);
+    if (row) return true;
+  }
+  if (await hasTable(db, 'pending_questions')) {
+    const stored = await getPendingQuestion(questionId);
+    if (stored && (stored.session_id !== sessionId || stored.message_out_id !== messageOutId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * The router stores inbound rows as `<platform message id>:<agent group id>`
  * (see messageIdForAgent in router.ts), and the agent's add_reaction tool
@@ -909,7 +1036,8 @@ export function stopDeliveryPolls(): void {
 export function withPlatformMessageId(content: unknown, raw: string, agentGroupId: string): string {
   if (!content || typeof content !== 'object') return raw;
   const { operation, messageId } = content as { operation?: unknown; messageId?: unknown };
-  const suffix = `:${agentGroupId}`;
-  if (!operation || typeof messageId !== 'string' || !messageId.endsWith(suffix)) return raw;
-  return JSON.stringify({ ...content, messageId: messageId.slice(0, -suffix.length) });
+  if (!operation || typeof messageId !== 'string') return raw;
+  const stripped = stripAgentGroupSuffix(messageId, agentGroupId);
+  if (stripped === messageId) return raw;
+  return JSON.stringify({ ...content, messageId: stripped });
 }

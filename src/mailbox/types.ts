@@ -106,6 +106,7 @@ export interface InboundMailbox {
   getMessageForRetry(messageId: string, status: 'pending' | 'processing'): MessageRetry | undefined;
   applyProcessingAcks(acks: ProcessingAck[]): void;
   getDeliveredIds(): Set<string>;
+  hasDeliveredPlatformMessage(platformMessageId: string): boolean;
   markDelivered(messageOutId: string, platformMessageId: string | null): void;
   markDeliveryFailed(messageOutId: string): void;
   getInboundSourceSessionId(messageId: string): string | null;
