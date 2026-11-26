@@ -21,8 +21,8 @@ importers:
         specifier: 4.41.1
         version: 4.41.1
       cron-parser:
-        specifier: 5.5.0
-        version: 5.5.0
+        specifier: 5.10.6
+        version: 5.10.6
       kleur:
         specifier: ^4.1.5
         version: 4.1.5
@@ -646,8 +646,8 @@ packages:
   concat-map@0.0.1:
     resolution: {integrity: sha512-/Srv4dswyQNBfohGpz9o6Yb3Gz3SrUDqBH5rTuhGR7ahtlbYKnVxw2bCFMRljaA7EXHaXZ8wsHdodFvbkhKmqg==}
 
-  cron-parser@5.5.0:
-    resolution: {integrity: sha512-oML4lKUXxizYswqmxuOCpgFS8BNUJpIu6k/2HVHyaL8Ynnf3wdf9tkns0yRdJLSIjkJ+b0DXHMZEHGpMwjnPww==}
+  cron-parser@5.10.6:
+    resolution: {integrity: sha512-kpoxgQyveO1l29nw+FWdvmotyV7eOSzGHQpxiXOEZIDOjqO1iR6kfgJ0PVHTuV26uBemKq3ppzma7dHFAG7viw==}
     engines: {node: '>=18'}
 
   cross-spawn@7.0.6:
@@ -1872,7 +1872,7 @@ snapshots:
 
   concat-map@0.0.1: {}
 
-  cron-parser@5.5.0:
+  cron-parser@5.10.6:
     dependencies:
       luxon: 3.7.2
 
