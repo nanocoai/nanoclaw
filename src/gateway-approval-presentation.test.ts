@@ -196,3 +196,21 @@ it('measures legacy title budget after escaping, but returns a plain title', () 
   expect(card.title).toBe('Approve external request');
   expect(card.question).toContain('*Request:* ' + oversized.replaceAll('_', '\\_'));
 });
+
+it('escapes request.question and enforces the title cap in displayFields mode', () => {
+  const longTitle = 'Approve wire transfer to external vendor account '.repeat(2).trim();
+  const card = gatewayApprovalPresentation({
+    ...request(),
+    title: longTitle,
+    question: 'Notify <@everyone> via [click](https://evil.example) *now* \u202Etxt',
+    displayFields: [{ label: 'Amount', type: 'text', value: '$100' }],
+  });
+  expect(card.title).toBe('Approve external request');
+  expect(card.question).toContain(`*Request:* ${longTitle}\n`);
+  expect(card.question).toContain('\\<@everyone\\>');
+  expect(card.question).toContain('\\[click\\]\\(https://evil.example\\)');
+  expect(card.question).toContain('\\*now\\*');
+  expect(card.question).toContain('\\\\u202etxt');
+  expect(card.question).not.toContain('<@everyone>');
+  expect(card.question).not.toContain('\u202E');
+});

@@ -24,7 +24,7 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
   if (request.displayFields !== undefined) {
     if (!Array.isArray(request.displayFields) || request.displayFields.length > 24)
       throw new Error('Invalid gateway display fields');
-    const lines = [request.question];
+    const lines = [safeMultiline(request.question)];
     for (const field of request.displayFields) {
       if (!field || typeof field.label !== 'string' || !field.label || field.label.length > 200)
         throw new Error('Invalid gateway display label');
@@ -50,11 +50,13 @@ export function gatewayApprovalPresentation(request: GatewayApprovalRequest): { 
       }
     }
     let question = lines.join('\n');
-    let title = request.title;
-    // Showing hidden characters can make a title too long for a channel, so a
-    // title with any goes, shown, into the body under a fixed title.
-    if (plainTitle(title) !== title)
-      [title, question] = ['Approve external request', `*Request:* ${safe(title)}\n${question}`];
+    let title = plainTitle(request.title);
+    const escapedTitle = safe(request.title);
+    // Showing hidden characters or escaping punctuation can make a title too
+    // long for a channel, so a title with hidden characters or over the cap
+    // goes, shown, into the body under a fixed title.
+    if (title !== request.title || escapedTitle.length > MAX_CARD_TITLE_CHARS)
+      [title, question] = ['Approve external request', `*Request:* ${escapedTitle}\n${question}`];
     if (Buffer.byteLength(question, 'utf8') > 262144) throw new Error('Gateway display too large');
     return { title, question };
   }
