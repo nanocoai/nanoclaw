@@ -20,7 +20,7 @@ import {
   initTestDb,
   runMigrations,
 } from './db/index.js';
-import { findSessionForAgent } from './db/sessions.js';
+import { findSessionForAgent, getSessionsByAgentGroup } from './db/sessions.js';
 import { inboundDbPath } from './mailbox/sqlite/paths.js';
 import { settleEchoFans } from './modules/cross-session-context/index.js';
 import { routeInbound } from './router.js';
@@ -40,8 +40,12 @@ vi.mock('./container-runner.js', () => ({
   getActiveContainerCount: vi.fn().mockReturnValue(0),
   killContainer: vi.fn(),
 }));
-// Lets a test make the backfill throw: an exit between taking the write turn and the write.
-const backfill = vi.hoisted(() => ({ fail: false }));
+// Lets a test make the backfill throw or hold: an exit or delay between taking the write turn and the write.
+const backfill = vi.hoisted(() => ({
+  fail: false,
+  hold: undefined as Promise<void> | undefined,
+  onHoldEntered: undefined as (() => void) | undefined,
+}));
 vi.mock('./modules/cross-session-context/index.js', async () => {
   const actual = await vi.importActual<typeof import('./modules/cross-session-context/index.js')>(
     './modules/cross-session-context/index.js',
@@ -49,6 +53,14 @@ vi.mock('./modules/cross-session-context/index.js', async () => {
   return {
     ...actual,
     backfillSession: (async (...args: Parameters<typeof actual.backfillSession>) => {
+      if (backfill.hold) {
+        const wait = backfill.hold;
+        const onEntered = backfill.onHoldEntered;
+        backfill.hold = undefined;
+        backfill.onHoldEntered = undefined;
+        onEntered?.();
+        await wait;
+      }
       if (backfill.fail) throw new Error('left before the write');
       return actual.backfillSession(...args);
     }) as typeof actual.backfillSession,
@@ -150,6 +162,8 @@ beforeEach(async () => {
   calls.first = 0;
   calls.second = 0;
   backfill.fail = false;
+  backfill.hold = undefined;
+  backfill.onHoldEntered = undefined;
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
   await runMigrations(await initTestDb());
@@ -330,5 +344,117 @@ describe('wake context', () => {
     await gatherWakeContext(await input('m2'));
 
     expect(await rows()).toEqual(['m1:ag-1', 'alpha']);
+  });
+
+  it('does not write wake context for a later conversation ahead of an earlier slash command on the same agent-shared session', async () => {
+    await createMessagingGroup({
+      id: 'mg-shared-a',
+      channel_type: 'testchat',
+      platform_id: 'testchat:S-A',
+      instance: 'testchat',
+      name: 'DM A',
+      is_group: 0,
+      unknown_sender_policy: 'public',
+      created_at: at(0),
+    });
+    await createMessagingGroup({
+      id: 'mg-shared-b',
+      channel_type: 'testchat',
+      platform_id: 'testchat:S-B',
+      instance: 'testchat',
+      name: 'DM B',
+      is_group: 0,
+      unknown_sender_policy: 'public',
+      created_at: at(0),
+    });
+    for (const [id, mgId] of [
+      ['mga-sa', 'mg-shared-a'],
+      ['mga-sb', 'mg-shared-b'],
+    ]) {
+      await createMessagingGroupAgent({
+        id,
+        messaging_group_id: mgId,
+        agent_group_id: 'ag-1',
+        engage_mode: 'pattern',
+        engage_pattern: '.',
+        sender_scope: 'all',
+        ignored_message_policy: 'drop',
+        session_mode: 'agent-shared',
+        priority: 0,
+        threads: 0,
+        created_at: at(0),
+      });
+    }
+
+    // Seed the agent-shared session first so both concurrent arrivals share it immediately.
+    await routeInbound({
+      channelType: 'testchat',
+      platformId: 'testchat:S-A',
+      threadId: null,
+      message: {
+        id: 'seed',
+        kind: 'chat-sdk',
+        content: JSON.stringify({ id: 'seed', sender: 'Alex', senderId: 'U1', text: 'hello' }),
+        timestamp: at(1),
+        isMention: true,
+        isGroup: false,
+      },
+    });
+
+    // Hold backfill for the slash command on S-A while a fast message arrives on S-B.
+    let releaseBackfill!: () => void;
+    let holdEntered!: () => void;
+    const enteredHold = new Promise<void>((resolve) => (holdEntered = resolve));
+    backfill.hold = new Promise<void>((resolve) => (releaseBackfill = resolve));
+    backfill.onHoldEntered = holdEntered;
+    providers.first = async (wake) => (wake.trigger.id === 'msg-b' ? [block('b', 'beta', 'context for B')] : []);
+
+    const cmd = routeInbound({
+      channelType: 'testchat',
+      platformId: 'testchat:S-A',
+      threadId: null,
+      message: {
+        id: 'cmd-a',
+        kind: 'chat-sdk',
+        content: JSON.stringify({ id: 'cmd-a', sender: 'Alex', senderId: 'U1', text: '/mycmd' }),
+        timestamp: at(2),
+        isMention: true,
+        isGroup: false,
+      },
+    });
+    await enteredHold;
+    const msgB = routeInbound({
+      channelType: 'testchat',
+      platformId: 'testchat:S-B',
+      threadId: null,
+      message: {
+        id: 'msg-b',
+        kind: 'chat-sdk',
+        content: JSON.stringify({ id: 'msg-b', sender: 'Alex', senderId: 'U1', text: 'follow-up' }),
+        timestamp: at(3),
+        isMention: true,
+        isGroup: false,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // While cmd-a holds the write turn, msg-b must not have run wake context yet.
+    expect(calls.first).toBe(1); // only 'seed' ran so far
+    releaseBackfill();
+    await Promise.all([cmd, msgB]);
+
+    const sessions = await getSessionsByAgentGroup('ag-1');
+    expect(sessions).toHaveLength(1);
+    const db = new Database(inboundDbPath('ag-1', sessions[0]!.id), { readonly: true });
+    try {
+      const order = (
+        db.prepare('SELECT id, content FROM messages_in ORDER BY seq').all() as Array<{
+          id: string;
+          content: string;
+        }>
+      ).map((r) => (JSON.parse(r.content).block as ContextBlock | undefined)?.tag ?? r.id);
+      expect(order).toEqual(['seed:ag-1', 'cmd-a:ag-1', 'beta', 'msg-b:ag-1']);
+    } finally {
+      db.close();
+    }
   });
 });

@@ -614,6 +614,7 @@ async function deliverToAgent(
   // finally releases the turn on every way out, so no exit holds the next message.
   const turn = takeWriteTurn(session.id);
   try {
+    await turn.previous;
     if (wake) {
       // Cross-session context backfill: a just-born or long-idle session is
       // seeded with its conversation's recent top-level timeline from the
@@ -628,7 +629,6 @@ async function deliverToAgent(
       }
     }
 
-    await turn.previous;
     await writeSessionMessage(session.agent_group_id, session.id, {
       id: messageId,
       kind: event.message.kind,
