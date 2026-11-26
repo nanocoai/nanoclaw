@@ -1,7 +1,8 @@
 export interface RunBunResult {
   /** null when a signal ended the child; see signalCode. */
   exitCode: number | null;
-  signalCode: NodeJS.Signals | null;
+  // @types/bun 1.4 types Subprocess.signalCode as a name or a number.
+  signalCode: NodeJS.Signals | number | null;
   stdout: string;
   stderr: string;
 }
