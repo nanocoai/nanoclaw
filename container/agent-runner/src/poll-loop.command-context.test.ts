@@ -63,6 +63,7 @@ class RecordingProvider extends MockProvider {
 }
 
 describe('a command batched with accumulated context only', () => {
+  // The mock provider has no trace, so /upload-trace replies without a network call.
   for (const command of ['/clear', '/upload-trace']) {
     it(`${command}: starts no turn for the context, which rides along with the next message`, async () => {
       const provider = new RecordingProvider();
