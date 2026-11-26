@@ -19,6 +19,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { AnchoredDir } from '../anchored-dir.js';
+import { isSafeAttachmentName } from '../attachment-safety.js';
 import { mcpServerPluginOwner, resolveGroupTimezone, type McpServerConfig } from '../container-config.js';
 import { getAgentGroup, getAllAgentGroups } from '../db/agent-groups.js';
 import { getContainerConfig, updateContainerConfigJson } from '../db/container-configs.js';
@@ -35,7 +36,13 @@ import { resolveLocalTemplate } from './local-dir.js';
 import { parsePluginManifest, PLUGIN_MANIFEST_FILE } from './manifest.js';
 import { pluginDataCwdSubpaths } from './mcp.js';
 import { parseTemplate, type Template } from './parse.js';
-import { copyPluginDir, walkPluginDir } from './plugin-dir.js';
+import {
+  copyPluginDir,
+  MAX_PLUGIN_DEPTH,
+  MAX_PLUGIN_FILES,
+  MAX_PLUGIN_TOTAL_BYTES,
+  walkPluginDir,
+} from './plugin-dir.js';
 import { prepareTemplateTasks } from './tasks.js';
 
 export interface RestampChange {
@@ -124,7 +131,7 @@ export async function restampAgentFromTemplate(
   const ops: Array<() => void | Promise<void>> = [];
 
   // --- plugin files: plugins/<name> replaced wholesale ---------------------
-  if (dirsEqual(tpl.dir, oldPluginDir)) {
+  if (dirsEqual(hostTree(tpl.dir), hostTree(oldPluginDir))) {
     changes.push({ surface: 'plugin', name: `plugins/${tpl.name}`, action: 'unchanged' });
   } else {
     changes.push({
@@ -187,10 +194,12 @@ export async function restampAgentFromTemplate(
   const oldContext = new Map(old.contextExtras.map((e) => [e.name, e.content]));
   const newContext = new Map(tpl.contextExtras.map((e) => [e.name, e.content]));
   for (const name of new Set([...oldContext.keys(), ...newContext.keys()])) {
-    const target = contextTarget(groupDir, name);
+    assertInsideGroup(groupDir, name);
     const segments = name.split('/');
     const leaf = segments.pop()!;
-    const live = readRegularFile(target)?.bytes.toString('utf-8');
+    const live = readTreeFile(liveTree(groupDir, []), name)?.bytes.toString('utf-8');
+    // What holds the name when the host cannot load it: a link, an unreadable or oversized file.
+    const unread = (): 'none' | 'file' | 'other' => liveEntry(liveTree(groupDir, name.split('/')));
     const wanted = newContext.get(name);
     if (wanted !== undefined) {
       if (live === wanted) {
@@ -201,7 +210,7 @@ export async function restampAgentFromTemplate(
         surface: 'context',
         name,
         action: live === undefined ? 'create' : 'update',
-        ...(live !== undefined && live !== oldContext.get(name) ? { customized: true } : {}),
+        ...((live === undefined ? unread() !== 'none' : live !== oldContext.get(name)) ? { customized: true } : {}),
       });
       ops.push(() => {
         withWritableDir(groupDir, segments, (dir) => {
@@ -209,7 +218,8 @@ export async function restampAgentFromTemplate(
           dir.writeNewFile(leaf, Buffer.from(wanted));
         });
       });
-    } else if (live !== undefined) {
+    } else if (live !== undefined || unread() === 'file') {
+      // A regular file is still the stamped name, loadable or not: remove it. A link is left alone.
       changes.push({
         surface: 'context',
         name,
@@ -242,10 +252,11 @@ export async function restampAgentFromTemplate(
   };
   const oldSkills = new Map(old.skills.map((s) => [s.name, s.srcDir]));
   const newSkills = new Map(tpl.skills.map((s) => [s.name, s.srcDir]));
+  // .claude-shared is host-owned; `skills` and every name below it are not.
+  const overlayTree = (name: string): TreeRef => liveTree(path.dirname(overlayRoot), ['skills', name]);
   for (const [name, srcDir] of newSkills) {
-    const overlay = path.join(overlayRoot, name);
     const oldSrc = oldSkills.get(name);
-    if (!fs.existsSync(overlay)) {
+    if (liveEntry(overlayTree(name)) === 'none') {
       changes.push({
         surface: 'skill',
         name,
@@ -253,27 +264,26 @@ export async function restampAgentFromTemplate(
         ...(oldSrc !== undefined ? { customized: true, note: 'was removed locally; recreated' } : {}),
       });
       ops.push(() => copySkill(srcDir, name));
-    } else if (dirsEqual(overlay, srcDir)) {
+    } else if (dirsEqual(overlayTree(name), hostTree(srcDir))) {
       changes.push({ surface: 'skill', name, action: 'unchanged' });
     } else {
       changes.push({
         surface: 'skill',
         name,
         action: 'update',
-        ...(oldSrc === undefined || !dirsEqual(overlay, oldSrc) ? { customized: true } : {}),
+        ...(oldSrc === undefined || !dirsEqual(overlayTree(name), hostTree(oldSrc)) ? { customized: true } : {}),
       });
       ops.push(() => copySkill(srcDir, name));
     }
   }
   for (const [name, oldSrc] of oldSkills) {
     if (newSkills.has(name)) continue;
-    const overlay = path.join(overlayRoot, name);
-    if (!fs.existsSync(overlay)) continue;
+    if (liveEntry(overlayTree(name)) === 'none') continue;
     changes.push({
       surface: 'skill',
       name,
       action: 'remove',
-      ...(!dirsEqual(overlay, oldSrc) ? { customized: true } : {}),
+      ...(!dirsEqual(overlayTree(name), hostTree(oldSrc)) ? { customized: true } : {}),
     });
     ops.push(() => withWritableDir(path.dirname(overlayRoot), ['skills'], (dir) => dir.remove(name, true)));
   }
@@ -449,33 +459,118 @@ export function formatRestampResult(result: RestampResult): string {
   return lines.join('\n');
 }
 
-/** Resolve a context-relative extra to its workspace path, contained in groupDir. */
-function contextTarget(groupDir: string, name: string): string {
-  const target = path.join(groupDir, ...name.split('/'));
-  const rel = path.relative(groupDir, target);
+/** Refuse a context-relative extra whose path leaves the group folder. */
+function assertInsideGroup(groupDir: string, name: string): void {
+  const rel = path.relative(groupDir, path.join(groupDir, ...name.split('/')));
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
     throw new Error(`context file "${name}" escapes the group folder`);
   }
-  return target;
 }
 
-function listFilesRecursive(root: string): Map<string, string> {
-  const out = new Map<string, string>();
-  if (!fs.existsSync(root)) return out;
-  for (const entry of fs.readdirSync(root, { recursive: true }) as string[]) {
-    const abs = path.join(root, entry);
-    // lstat: symlinks are never plugin content, so a (possibly dangling) link
-    // compares as an absent file instead of crashing the plan. So does an
-    // entry the container removed, or put under a non-folder, since the listing.
-    let stat: fs.Stats | undefined;
-    try {
-      stat = fs.lstatSync(abs);
-    } catch (err) {
-      if (!NOT_A_REGULAR_FILE.has((err as NodeJS.ErrnoException).code ?? '')) throw err;
-    }
-    if (stat?.isFile()) out.set(entry.split(path.sep).join('/'), abs);
+/**
+ * A folder restamp reads: the host-owned `root`, then `segments` below it.
+ * Every name below the root is opened one at a time, pinned, and never through
+ * a symlink, because in a `live` tree the container owns those names and can
+ * rename any of them at any moment.
+ */
+interface TreeRef {
+  root: string;
+  segments: readonly string[];
+  live: boolean;
+}
+
+const hostTree = (root: string): TreeRef => ({ root, segments: [], live: false });
+const liveTree = (root: string, segments: readonly string[]): TreeRef => ({ root, segments, live: true });
+
+/** Thrown when a tree is past the plugin caps, so it cannot be a template copy. */
+class NotATemplateCopy extends Error {}
+
+/**
+ * Run one read of `tree`. In a live tree the container can swap a folder for a
+ * link, remove it or make it unreadable mid-walk; that means "not what the
+ * template stamped", never a failed plan. A host-owned tree still throws.
+ */
+function readTree<T>(tree: TreeRef, read: () => T): T | undefined {
+  try {
+    return read();
+  } catch (err) {
+    if (tree.live && madeUnreadableByContainer(err)) return undefined;
+    throw err;
   }
-  return out;
+}
+
+function madeUnreadableByContainer(err: unknown): boolean {
+  if (err instanceof NotATemplateCopy) return true;
+  // AnchoredDir wraps its refusal of a non-folder around the open error.
+  const { code, cause } = err as NodeJS.ErrnoException;
+  const errno = code ?? (cause as NodeJS.ErrnoException | undefined)?.code ?? '';
+  // ENAMETOOLONG: a listed name that is not UTF-8 can grow when it is encoded again.
+  return NOT_A_REGULAR_FILE.has(errno) || ['EACCES', 'EPERM', 'ENAMETOOLONG'].includes(errno);
+}
+
+/**
+ * What holds the last name of a live tree, without looking through it: a
+ * symlink there (dangling or not) is an entry apply must replace, never a
+ * folder to enter. A parent that cannot be read counts as 'other', so the
+ * plan says "changed" rather than "create".
+ */
+function liveEntry(tree: TreeRef): 'none' | 'file' | 'other' {
+  const leaf = tree.segments[tree.segments.length - 1];
+  const found = readTree(tree, () => {
+    const dir = AnchoredDir.open(tree.root, tree.segments.slice(0, -1));
+    if (!dir) return 'none';
+    try {
+      return dir.lstat(leaf).isFile() ? 'file' : 'other';
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'none';
+      throw err;
+    } finally {
+      dir.close();
+    }
+  });
+  return found ?? 'other';
+}
+
+/** Relative '/'-separated paths of the regular files in `tree`; empty when the folder is missing. */
+function listTreeFiles(tree: TreeRef): Set<string> {
+  const files = new Set<string>();
+  const top = AnchoredDir.open(tree.root, tree.segments);
+  if (!top) return files;
+  let entries = 0;
+  const visit = (dir: AnchoredDir, prefix: string, depth: number): void => {
+    for (const name of dir.entries()) {
+      // A tree past the plugin caps is no template copy; stop before walking it all.
+      if (++entries > MAX_PLUGIN_FILES) throw new NotATemplateCopy('more entries than a plugin can hold');
+      // Nor is one with a name AnchoredDir refuses, such as a backslash: plugins cannot ship those.
+      if (!isSafeAttachmentName(name)) throw new NotATemplateCopy(`entry name ${JSON.stringify(name)}`);
+      // Symlinks are never plugin content, so a link compares as an absent
+      // file. So does an entry the container removed since the listing.
+      let stat: fs.Stats;
+      try {
+        stat = dir.lstat(name);
+      } catch (err) {
+        if (NOT_A_REGULAR_FILE.has((err as NodeJS.ErrnoException).code ?? '')) continue;
+        throw err;
+      }
+      if (stat.isFile()) files.add(prefix + name);
+      if (!stat.isDirectory()) continue;
+      // Each level holds a descriptor, and the container picks the depth.
+      if (depth >= MAX_PLUGIN_DEPTH) throw new NotATemplateCopy('nested deeper than a plugin can be');
+      const child = dir.openDir(name);
+      if (!child) continue;
+      try {
+        visit(child, `${prefix}${name}/`, depth + 1);
+      } finally {
+        child.close();
+      }
+    }
+  };
+  try {
+    visit(top, '', 0);
+  } finally {
+    top.close();
+  }
+  return files;
 }
 
 /** Pin writable descendants of a stable root for the entire operation. */
@@ -494,15 +589,14 @@ function withWritableDir(root: string, segments: string[], action: (dir: Anchore
  * executable bit (the copier preserves it, so a chmod-only template revision
  * must read as a change, not "unchanged").
  */
-function dirsEqual(a: string, b: string): boolean {
-  const filesA = listFilesRecursive(a);
-  const filesB = listFilesRecursive(b);
-  if (filesA.size !== filesB.size) return false;
-  for (const [rel, absA] of filesA) {
-    const absB = filesB.get(rel);
-    if (absB === undefined) return false;
-    const fileA = readRegularFile(absA);
-    const fileB = readRegularFile(absB);
+function dirsEqual(a: TreeRef, b: TreeRef): boolean {
+  const filesA = readTree(a, () => listTreeFiles(a));
+  const filesB = readTree(b, () => listTreeFiles(b));
+  if (filesA === undefined || filesB === undefined || filesA.size !== filesB.size) return false;
+  for (const rel of filesA) {
+    if (!filesB.has(rel)) return false;
+    const fileA = readTreeFile(a, rel);
+    const fileB = readTreeFile(b, rel);
     if (fileA === undefined || fileB === undefined) return false;
     if ((fileA.mode & 0o111) !== (fileB.mode & 0o111) || !fileA.bytes.equals(fileB.bytes)) return false;
   }
@@ -513,22 +607,49 @@ function dirsEqual(a: string, b: string): boolean {
 const NOT_A_REGULAR_FILE = new Set(['ENOENT', 'ENOTDIR', 'ELOOP', 'ENXIO', 'EOPNOTSUPP']);
 
 /**
- * The bytes and mode of `file`, or undefined unless it is a regular file.
- * Group and overlay folders are container-writable, so the name can change
- * after any earlier check: open without following a symlink or blocking on a
- * FIFO, and take both from that one descriptor.
+ * The bytes and mode of the file at `rel` in `tree`, or undefined unless it is
+ * a regular file under real folders. A live name can change after any earlier
+ * check, so each call starts again from the root: pin every folder on the way,
+ * open the file without following a symlink or blocking on a FIFO, and take
+ * bytes and mode from that one descriptor.
  */
-function readRegularFile(file: string): { bytes: Buffer; mode: number } | undefined {
+function readTreeFile(tree: TreeRef, rel: string): { bytes: Buffer; mode: number } | undefined {
+  const folders = rel.split('/');
+  const leaf = folders.pop()!;
+  return readTree(tree, () => {
+    const dir = AnchoredDir.open(tree.root, [...tree.segments, ...folders]);
+    if (!dir) return undefined;
+    try {
+      return readRegularFile(dir, leaf);
+    } finally {
+      dir.close();
+    }
+  });
+}
+
+function readRegularFile(dir: AnchoredDir, name: string): { bytes: Buffer; mode: number } | undefined {
   let fd: number;
   try {
-    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    // O_NOFOLLOW | O_NONBLOCK, then an fstat check that the descriptor is a regular file.
+    fd = dir.openReadFd(name);
   } catch (err) {
-    if (NOT_A_REGULAR_FILE.has((err as NodeJS.ErrnoException).code ?? '')) return undefined;
+    // No code: openReadFd's own refusal of an opened non-file, such as a FIFO.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === undefined || NOT_A_REGULAR_FILE.has(code)) return undefined;
     throw err;
   }
   try {
     const stat = fs.fstatSync(fd);
-    return stat.isFile() ? { bytes: fs.readFileSync(fd), mode: stat.mode } : undefined;
+    // The container picks a live file's size and can grow it mid-read: load at
+    // most what a whole plugin may hold, and never more than this fstat saw.
+    if (stat.size > MAX_PLUGIN_TOTAL_BYTES) throw new NotATemplateCopy('file larger than a plugin can be');
+    const bytes = Buffer.alloc(stat.size + 1);
+    let length = 0;
+    for (let read = -1; read !== 0 && length < bytes.length; length += read) {
+      read = fs.readSync(fd, bytes, length, bytes.length - length, null);
+    }
+    if (length > stat.size) throw new NotATemplateCopy('file grew while it was read');
+    return { bytes: bytes.subarray(0, length), mode: stat.mode };
   } finally {
     fs.closeSync(fd);
   }
