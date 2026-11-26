@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { execFileSync, spawn, type ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -33,6 +34,7 @@ import type { AgentGroup } from '../types.js';
 import { NANOCLAW_EXTENSION_NS } from './extension.js';
 import { MCP_SCHEMA_URL, PLUGIN_SCHEMA_URL } from './manifest.js';
 import { createAgentFromTemplate } from './create-agent.js';
+import { MAX_PLUGIN_DEPTH, MAX_PLUGIN_FILES, MAX_PLUGIN_TOTAL_BYTES } from './plugin-dir.js';
 import { restampAgentFromTemplate, type RestampChange } from './restamp.js';
 
 const TPL = path.join(TEMPLATES_DIR, 'sales', 'sdr');
@@ -156,14 +158,31 @@ async function stamp(): Promise<AgentGroup> {
 const overlaySkill = (groupId: string, skill: string): string =>
   path.join(DATA_DIR, 'v2-sessions', groupId, '.claude-shared', 'skills', skill, 'SKILL.md');
 
-/** Replace the directory's path after apply has pinned it, before it uses the returned handle. */
+/** Give the v1 widget skill a nested executable, so its overlay has a folder to swap. */
+function addWidgetScript(): void {
+  fs.mkdirSync(path.join(TPL, 'skills', 'widget', 'scripts'));
+  fs.writeFileSync(path.join(TPL, 'skills', 'widget', 'scripts', 'run.sh'), '#!/bin/sh\n', { mode: 0o755 });
+}
+
+/** Move `directory` out of the tree and leave a symlink to it, so following the link finds the same files. */
+function swapForSymlink(directory: string): string {
+  const outside = path.join(TEST_ROOT, `outside-${path.basename(directory)}`);
+  fs.renameSync(directory, outside);
+  fs.symlinkSync(outside, directory);
+  return outside;
+}
+
+/**
+ * Replace the directory's path after apply has pinned it, before it uses the
+ * returned handle. Only apply opens with `create`; the plan's reads do not.
+ */
 function replaceDirectoryAfterOpen(directory: string, outside: string): string {
   const moved = `${directory}-moved`;
   const openDir = AnchoredDir.prototype.openDir;
   let replaced = false;
   vi.spyOn(AnchoredDir.prototype, 'openDir').mockImplementation(function (this: AnchoredDir, name, create) {
     const dir = openDir.call(this, name, create);
-    if (!replaced && dir && name === path.basename(directory)) {
+    if (!replaced && dir && create && name === path.basename(directory)) {
       replaced = true;
       fs.renameSync(directory, moved);
       fs.symlinkSync(outside, directory);
@@ -171,6 +190,74 @@ function replaceDirectoryAfterOpen(directory: string, outside: string): string {
     return dir;
   });
   return moved;
+}
+
+// After 3 s, writes the marker (argv[2]), then opens the FIFO (argv[1]) for
+// writing every 50 ms: each open frees a read stuck on it, even one that
+// started late or shared the FIFO with another reader. Stops when the test
+// kills it, the FIFO is gone, or after 30 s.
+const UNBLOCK_FIFO = `
+  const fs = require('fs');
+  const [fifo, marker] = process.argv.slice(1);
+  const deadline = Date.now() + 33000;
+  const unblock = () => {
+    try {
+      fs.closeSync(fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK));
+    } catch (err) {
+      if (err.code !== 'ENXIO') return;
+    }
+    if (Date.now() < deadline) setTimeout(unblock, 50);
+  };
+  setTimeout(() => {
+    fs.writeFileSync(marker, '');
+    unblock();
+  }, 3000);
+`;
+
+/**
+ * Run `plan` and swap `file` for a FIFO the moment the host opens or reads it,
+ * by its path or through its pinned folder: the worst case of a race with the
+ * container. A helper process
+ * frees a read stuck on the FIFO, so a regression fails instead of hanging
+ * the worker. The plan was stuck if it returned only after the helper's
+ * marker. ("Did the FIFO have a reader?" misfires when another process, such
+ * as a file indexer, opens the new FIFO.)
+ */
+async function planWithFifoSwap<T>(
+  file: string,
+  plan: () => Promise<T>,
+): Promise<{ result: T; swapped: boolean; stuck: boolean }> {
+  const marker = path.join(TEST_ROOT, 'fifo-helper-fired');
+  const helpers: ChildProcess[] = [];
+  const id = fs.lstatSync(file);
+  // A pinned folder is addressed by an alias, so match the file itself, not its path.
+  const names = (target: unknown): boolean => {
+    if (typeof target !== 'string' || path.basename(target) !== path.basename(file)) return false;
+    const stat = fs.lstatSync(target, { throwIfNoEntry: false });
+    return stat?.ino === id.ino && stat.dev === id.dev;
+  };
+  for (const method of ['openSync', 'readFileSync'] as const) {
+    const original = fs[method] as (...args: unknown[]) => unknown;
+    vi.spyOn(fs, method).mockImplementation(((target: unknown, ...rest: unknown[]) => {
+      if (helpers.length === 0 && names(target)) {
+        fs.rmSync(file);
+        execFileSync('mkfifo', [file]);
+        helpers.push(spawn(process.execPath, ['-e', UNBLOCK_FIFO, file, marker], { stdio: 'ignore' }));
+      }
+      return original(target, ...rest);
+    }) as never);
+  }
+  try {
+    const result = await plan();
+    return { result, swapped: helpers.length > 0, stuck: fs.existsSync(marker) };
+  } finally {
+    for (const helper of helpers) {
+      if (helper.exitCode !== null || helper.signalCode !== null) continue;
+      const exited = new Promise((resolve) => helper.once('exit', resolve));
+      helper.kill();
+      await exited;
+    }
+  }
 }
 
 beforeEach(async () => {
@@ -394,6 +481,213 @@ describe('restampAgentFromTemplate', () => {
     expect(fs.lstatSync(path.join(groupDir, PERSONA_PREPEND_FILE)).isSymbolicLink()).toBe(false);
     expect(fs.readFileSync(path.join(groupDir, PERSONA_PREPEND_FILE), 'utf-8')).toBe('You are an SDR agent v2.\n');
     expect(fs.readFileSync(path.join(groupDir, 'playbook.md'), 'utf-8')).toBe('# Playbook v2\n');
+  });
+
+  it('plans a symlinked context file as absent instead of reading through it', async () => {
+    const g = await stamp();
+    const groupDir = path.join(GROUPS_DIR, g.folder);
+    // The link's target already holds exactly what v2 wants.
+    const outside = path.join(TEST_ROOT, 'outside-playbook.md');
+    fs.writeFileSync(outside, '# Playbook v2\n');
+    fs.rmSync(path.join(groupDir, 'playbook.md'));
+    fs.symlinkSync(outside, path.join(groupDir, 'playbook.md'));
+    writeTemplateV2();
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+    expect(change(plan.changes, 'context', 'playbook.md').action).toBe('create');
+  });
+
+  it('reads a context file without blocking when it turns into a FIFO', async () => {
+    const g = await stamp();
+    writeTemplateV2();
+    const run = await planWithFifoSwap(path.join(GROUPS_DIR, g.folder, 'playbook.md'), () =>
+      restampAgentFromTemplate('sales/sdr', g.id, { apply: false }),
+    );
+
+    expect(run.swapped).toBe(true);
+    expect(run.stuck, 'the plan blocked on a FIFO').toBe(false);
+    expect(change(run.result.changes, 'context', 'playbook.md').action).toBe('create');
+  });
+
+  it('compares a skill overlay without blocking when a file turns into a FIFO', async () => {
+    const g = await stamp();
+    writeTemplateV2();
+    const run = await planWithFifoSwap(overlaySkill(g.id, 'widget'), () =>
+      restampAgentFromTemplate('sales/sdr', g.id, { apply: false }),
+    );
+
+    expect(run.swapped).toBe(true);
+    expect(run.stuck, 'the plan blocked on a FIFO').toBe(false);
+    expect(change(run.result.changes, 'skill', 'widget').action).toBe('update');
+  });
+
+  it('compares a skill overlay whose entries change after the listing', async () => {
+    const g = await stamp();
+    const entries = AnchoredDir.prototype.entries;
+    // Every listing names a file the container removed since.
+    vi.spyOn(AnchoredDir.prototype, 'entries').mockImplementation(function (this: AnchoredDir) {
+      return [...entries.call(this), 'gone.md'];
+    });
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+    expect(change(plan.changes, 'skill', 'widget').action).toBe('unchanged');
+  });
+
+  // Each link's target holds exactly what the template stamped, so a read that
+  // follows the link plans "unchanged".
+  it.each(['skills', 'skills/widget', 'skills/widget/scripts'])(
+    'plans a skill as changed instead of reading through a symlinked %s folder',
+    async (folder) => {
+      addWidgetScript();
+      const g = await stamp();
+      swapForSymlink(path.join(DATA_DIR, 'v2-sessions', g.id, '.claude-shared', folder));
+
+      const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+      expect(change(plan.changes, 'skill', 'widget')).toMatchObject({ action: 'update', customized: true });
+    },
+  );
+
+  it('plans a context file under a symlinked folder as absent instead of reading through it', async () => {
+    const g = await stamp();
+    swapForSymlink(path.join(GROUPS_DIR, g.folder, 'additional_context'));
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+    expect(change(plan.changes, 'context', 'additional_context/faq.md').action).toBe('create');
+  });
+
+  it('plans a skill as changed when its folder turns into a symlink during the walk', async () => {
+    addWidgetScript();
+    const g = await stamp();
+    const scripts = path.join(path.dirname(overlaySkill(g.id, 'widget')), 'scripts');
+    const lstat = AnchoredDir.prototype.lstat;
+    const overlayScripts = fs.lstatSync(scripts).ino;
+    let swapped = false;
+    // The walk sees a real folder, then the container replaces it before the open.
+    // The template has a `scripts` folder too, so match the overlay's by inode.
+    vi.spyOn(AnchoredDir.prototype, 'lstat').mockImplementation(function (this: AnchoredDir, name) {
+      const stat = lstat.call(this, name);
+      if (!swapped && name === 'scripts' && stat.ino === overlayScripts) {
+        swapped = true;
+        swapForSymlink(scripts);
+      }
+      return stat;
+    });
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+    expect(swapped).toBe(true);
+    expect(change(plan.changes, 'skill', 'widget')).toMatchObject({ action: 'update', customized: true });
+  });
+
+  // Root reads any folder, so the unreadable case cannot be built.
+  it.skipIf(process.getuid?.() === 0)('plans a skill with an unreadable folder as changed', async () => {
+    addWidgetScript();
+    const g = await stamp();
+    const scripts = path.join(path.dirname(overlaySkill(g.id, 'widget')), 'scripts');
+    fs.chmodSync(scripts, 0);
+    try {
+      const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+      expect(change(plan.changes, 'skill', 'widget')).toMatchObject({ action: 'update', customized: true });
+    } finally {
+      fs.chmodSync(scripts, 0o755);
+    }
+  });
+
+  it('stops walking a skill overlay nested deeper than a plugin can be', async () => {
+    const g = await stamp();
+    const overlay = path.dirname(overlaySkill(g.id, 'widget'));
+    fs.mkdirSync(path.join(overlay, ...Array<string>(MAX_PLUGIN_DEPTH * 2).fill('deep')), { recursive: true });
+    const openDir = vi.spyOn(AnchoredDir.prototype, 'openDir');
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+    expect(change(plan.changes, 'skill', 'widget')).toMatchObject({ action: 'update', customized: true });
+    // Two compares walk the overlay: against the new template, then the stamped copy.
+    expect(openDir.mock.calls.filter(([name]) => name === 'deep')).toHaveLength(MAX_PLUGIN_DEPTH * 2);
+  });
+
+  it('stops walking a skill overlay with more entries than a plugin can hold', async () => {
+    const g = await stamp();
+    const overlay = path.dirname(overlaySkill(g.id, 'widget'));
+    for (let i = 0; i < MAX_PLUGIN_FILES + 100; i++) fs.writeFileSync(path.join(overlay, `extra-${i}`), '');
+    const lstat = vi.spyOn(AnchoredDir.prototype, 'lstat');
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+    expect(change(plan.changes, 'skill', 'widget')).toMatchObject({ action: 'update', customized: true });
+    const walked = lstat.mock.calls.filter(([name]) => name.startsWith('extra-')).length;
+    expect(walked).toBeGreaterThan(0);
+    expect(walked).toBeLessThanOrEqual(MAX_PLUGIN_FILES * 2);
+  });
+
+  it('plans a skill file larger than a plugin can be as changed without loading it', async () => {
+    const g = await stamp();
+    const skill = overlaySkill(g.id, 'widget');
+    fs.truncateSync(skill, MAX_PLUGIN_TOTAL_BYTES + 1);
+    const readSync = vi.spyOn(fs, 'readSync');
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+    expect(change(plan.changes, 'skill', 'widget')).toMatchObject({ action: 'update', customized: true });
+    const loaded = readSync.mock.results.reduce((sum, r) => sum + (typeof r.value === 'number' ? r.value : 0), 0);
+    expect(loaded).toBeLessThan(MAX_PLUGIN_TOTAL_BYTES);
+  });
+
+  // Root reads any file, so the unreadable case cannot be built.
+  it.skipIf(process.getuid?.() === 0)(
+    'flags an unreadable context file as customized before replacing it',
+    async () => {
+      const g = await stamp();
+      fs.chmodSync(path.join(GROUPS_DIR, g.folder, 'playbook.md'), 0);
+      writeTemplateV2();
+
+      const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: true });
+
+      expect(change(plan.changes, 'context', 'playbook.md')).toMatchObject({ action: 'create', customized: true });
+      expect(fs.readFileSync(path.join(GROUPS_DIR, g.folder, 'playbook.md'), 'utf-8')).toBe('# Playbook v2\n');
+    },
+  );
+
+  it('removes a dropped context file the host cannot load', async () => {
+    const g = await stamp();
+    const faq = path.join(GROUPS_DIR, g.folder, 'additional_context', 'faq.md');
+    fs.truncateSync(faq, MAX_PLUGIN_TOTAL_BYTES + 1);
+    writeTemplateV2();
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: true });
+
+    expect(change(plan.changes, 'context', 'additional_context/faq.md')).toMatchObject({
+      action: 'remove',
+      customized: true,
+    });
+    expect(fs.existsSync(faq)).toBe(false);
+  });
+
+  it('plans a skill as changed when its overlay holds a name no plugin can ship', async () => {
+    const g = await stamp();
+    fs.symlinkSync('/nowhere', path.join(path.dirname(overlaySkill(g.id, 'widget')), 'back\\slash'));
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: false });
+
+    expect(change(plan.changes, 'skill', 'widget')).toMatchObject({ action: 'update', customized: true });
+  });
+
+  it('removes a dangling symlink left where a dropped skill was', async () => {
+    const g = await stamp();
+    const overlay = path.dirname(overlaySkill(g.id, 'widget'));
+    fs.rmSync(overlay, { recursive: true });
+    fs.symlinkSync('/nowhere', overlay);
+    fs.rmSync(path.join(TPL, 'skills'), { recursive: true });
+
+    const plan = await restampAgentFromTemplate('sales/sdr', g.id, { apply: true });
+
+    expect(change(plan.changes, 'skill', 'widget')).toMatchObject({ action: 'remove', customized: true });
+    expect(fs.lstatSync(overlay, { throwIfNoEntry: false })).toBeUndefined();
   });
 
   it('refuses to write context through a symlinked directory', async () => {
