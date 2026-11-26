@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -276,6 +276,31 @@ describe('prepare on a release tag', () => {
       }
     }
   });
+});
+
+describe('prepare on a detached checkout', () => {
+  it(
+    'names the detached HEAD before channel resolution asks about an ahead-of-release install',
+    { timeout: 60_000 },
+    () => {
+      // An e2e install checks out the commit under test detached, newer than the latest release.
+      const { install, shas } = fixture('main');
+      git(install, ['checkout', '-q', '--detach']);
+      // A stale tracking ref shows whether prepare fetched before refusing.
+      git(install, ['update-ref', 'refs/remotes/upstream/main', shas['v2.3.0']]);
+      const repo = path.resolve(import.meta.dirname, '../..');
+      const loader = path.join(repo, 'node_modules/tsx/dist/loader.mjs');
+      const controller = path.join(repo, 'scripts/update-nanoclaw.ts');
+      const args = ['--import', loader, controller, 'prepare', '--project-root', install, '--remote', 'upstream'];
+      const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', NANOCLAW_UPDATE_DIR: temp('channel-updates-') };
+      const result = spawnSync(process.execPath, args, { encoding: 'utf8', env });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`HEAD is detached at commit ${shas.main.slice(0, 8)}`);
+      expect(result.stderr).not.toContain('ahead-of-release');
+      expect(git(install, ['rev-parse', 'upstream/main'])).toBe(shas['v2.3.0']);
+    },
+  );
 });
 
 describe('stampChannel', () => {
