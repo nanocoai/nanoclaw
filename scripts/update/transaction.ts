@@ -67,7 +67,7 @@ export interface UpdateState {
   service?: ServiceHandle;
   snapshot?: SnapshotEntry[];
   validation?: string[];
-  /** Snapshot size against free space, measured at the end of validate. */
+  /** Snapshot size against free space, measured at the end of validate. Dropped when cutover starts its own checks. */
   snapshotSpace?: SnapshotSpaceReport;
   gatewaySelection?: string;
   lastError?: string;
@@ -689,7 +689,15 @@ function snapshotSpaceShortfall(state: UpdateState, space: SnapshotSpace): strin
 }
 
 function assertSnapshotFits(state: UpdateState): void {
-  const space = measureSnapshotSpace(state);
+  let space: SnapshotSpace;
+  try {
+    space = measureSnapshotSpace(state);
+  } catch (err) {
+    // A bare EACCES or EIO does not say which step of cutover hit it.
+    throw Object.assign(new Error(`Could not measure the mutable-state snapshot: ${errorText(err)}`, { cause: err }), {
+      code: (err as NodeJS.ErrnoException).code,
+    });
+  }
   if (space.freeBytes < space.neededBytes) throw new Error(snapshotSpaceShortfall(state, space));
 }
 
@@ -1119,6 +1127,9 @@ export async function cutoverUpdate(
   if (git(runtime, state.projectRoot, ['rev-parse', 'HEAD']) !== state.originalHead) {
     throw new Error('Live checkout moved after the update was staged');
   }
+  // Cutover measures again from here, so validate's report is out of date:
+  // `status` must not show its "Snapshot fits" beside a refusal.
+  state.snapshotSpace = undefined;
   try {
     // Re-check here too: validation may have run long ago, and this is the last
     // point before the stop/drain cycle that the snapshot walk depends on.

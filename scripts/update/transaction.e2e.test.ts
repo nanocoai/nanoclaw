@@ -1328,8 +1328,10 @@ describe('update-nanoclaw transaction end to end', () => {
       let state = loadState(fixture.install, prepared.id);
       expect(state.phase).toBe('validated');
       expect(state.snapshot).toBeUndefined();
-      // `status` says why it refused.
+      // `status` says why it refused, without validate's older "Snapshot fits" beside it.
       expect(state.lastError).toMatch(/^Not enough free space for mutable-state snapshot: /);
+      expect(state.snapshotSpace).toBeUndefined();
+      expect(summarizeState(state).snapshotSpace).toBeUndefined();
       expect(exec(fixture.install, 'git', ['rev-parse', 'HEAD'])).toBe(prepared.originalHead);
 
       // Enough room: the usual flow, checked once before the stop and again after the drain.
@@ -1480,6 +1482,35 @@ describe('update-nanoclaw transaction end to end', () => {
     }
   });
 
+  it('drops validate\'s "Snapshot fits" when the disk runs short after the drain (#4478)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+    const prepared = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    let free = 10 * GIB;
+    fakeFreeSpace(() => free);
+    try {
+      const validated = await validateUpdate(fixture.install, prepared.id, runtime);
+      expect(validated.snapshotSpace?.fits).toBe(true);
+      // Short after the drain, but with room left to save state.
+      runtime.drainContainers = async () => {
+        events.push('containers drained');
+        free = 100 * MIB;
+      };
+      await expect(cutoverUpdate(fixture.install, prepared.id, runtime)).rejects.toThrow(
+        'Not enough free space for mutable-state snapshot',
+      );
+      expect(events.slice(-1)).toEqual(['service start']);
+      const state = loadState(fixture.install, prepared.id);
+      expect(state.phase).toBe('validated');
+      expect(state.lastError).toMatch(/have 100 MiB free/);
+      expect(state.snapshotSpace).toBeUndefined();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it("does not count a crashed attempt's partial snapshot against the pre-stop space check (#4478)", async () => {
     const fixture = createForkFixture();
     previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
@@ -1526,6 +1557,42 @@ describe('update-nanoclaw transaction end to end', () => {
     try {
       const state = await cutoverUpdate(fixture.install, prepared.id, runtime);
       expect(state.phase).toBe('cutover');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('refuses before stopping anything when the pre-stop walk cannot read a folder (#4478)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+    const prepared = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    await validateUpdate(fixture.install, prepared.id, runtime);
+    // Stubbed, not chmod 000: root reads any folder, so a real mode would pass in CI containers.
+    const locked = path.join(prepared.projectRoot, 'data', 'locked');
+    fs.mkdirSync(locked);
+    const readdir = fs.readdirSync;
+    vi.spyOn(fs, 'readdirSync').mockImplementation(((dir: fs.PathLike, options?: never) => {
+      if (String(dir) === locked) {
+        throw Object.assign(new Error(`EACCES: permission denied, scandir '${locked}'`), { code: 'EACCES' });
+      }
+      return readdir(dir, options);
+    }) as typeof fs.readdirSync);
+    try {
+      const before = events.length;
+      // The message says which step failed; the code stays for callers that branch on it.
+      await expect(cutoverUpdate(fixture.install, prepared.id, runtime)).rejects.toMatchObject({
+        message: `Could not measure the mutable-state snapshot: EACCES: permission denied, scandir '${locked}'`,
+        code: 'EACCES',
+      });
+      // Unlike a vanished entry, an unreadable one is not skipped: the copy would fail on it too.
+      expect(events.slice(before)).toEqual([]);
+      const state = loadState(fixture.install, prepared.id);
+      expect(state.phase).toBe('validated');
+      expect(state.snapshot).toBeUndefined();
+      expect(state.lastError).toMatch(/^Could not measure the mutable-state snapshot: EACCES/);
+      expect(exec(fixture.install, 'git', ['rev-parse', 'HEAD'])).toBe(prepared.originalHead);
     } finally {
       vi.restoreAllMocks();
     }
