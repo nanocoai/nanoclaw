@@ -75,6 +75,12 @@ interface SDKUserMessage {
   message: { role: 'user'; content: string };
   parent_tool_use_id: null;
   session_id: string;
+  /**
+   * Client id for this input. The SDK echoes the ids of every input a turn
+   * consumed on that turn's result (`user_message_uuids`), including inputs it
+   * folded into a turn that was already under way.
+   */
+  uuid?: import('crypto').UUID;
 }
 
 /**
@@ -85,12 +91,13 @@ class MessageStream {
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string): void {
+  push(text: string, uuid?: string): void {
     this.queue.push({
       type: 'user',
       message: { role: 'user', content: text },
       parent_tool_use_id: null,
       session_id: '',
+      ...(uuid ? { uuid: uuid as import('crypto').UUID } : {}),
     });
     this.waiting?.();
   }
@@ -365,7 +372,13 @@ export class ClaudeProvider implements AgentProvider {
           // (e.g. a non-retryable 403 billing_error) carry their message in
           // `errors[]` instead. Keep that actionable notice separate from
           // model output so the poll-loop can deliver it without scratchpad.
-          const m = message as { result?: string; is_error?: boolean; errors?: string[] };
+          const m = message as {
+            result?: string;
+            is_error?: boolean;
+            errors?: string[];
+            user_message_uuid?: string;
+            user_message_uuids?: string[];
+          };
           const isError = m.is_error === true;
           // Some failures (e.g. an invalid API key) leave errors[] empty and put
           // the SDK's own notice in `result`. Other result text can echo upstream
@@ -374,11 +387,20 @@ export class ClaudeProvider implements AgentProvider {
           // Notice first, hint on its own line: setup's ping shows only the first line.
           const hint = SDK_NOTICES.get(candidate);
           const resultAsError = hint ? `${candidate}\n${hint}` : '';
+          // Every input this turn consumed. Inputs waiting at a turn boundary
+          // are answered together, so one result can cover several pushes;
+          // older SDKs only stamp the last one (user_message_uuid).
+          const answered = m.user_message_uuids?.length
+            ? m.user_message_uuids
+            : m.user_message_uuid
+              ? [m.user_message_uuid]
+              : undefined;
           yield {
             type: 'result',
             text: resultAsError ? null : (m.result ?? null),
             isError,
             error: m.errors?.length ? m.errors.join('\n') : resultAsError || undefined,
+            ...(answered ? { answered } : {}),
           };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
@@ -429,6 +451,7 @@ export class ClaudeProvider implements AgentProvider {
 
     return {
       push: (msg) => stream.push(msg),
+      pushWithId: (msg: string, id: string) => stream.push(msg, id),
       end: () => stream.end(),
       events: translateEvents(),
       abort: () => {
