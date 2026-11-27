@@ -110,12 +110,14 @@ function scratchRoot(): string {
   mkdirSync(join(root, 'src/providers'), { recursive: true });
   mkdirSync(join(root, 'container/agent-runner/src/providers'), { recursive: true });
   mkdirSync(join(root, 'setup/providers'), { recursive: true });
+  mkdirSync(join(root, 'src/drivers'), { recursive: true });
   writeFileSync(join(root, 'package.json'), '{"name":"scratch"}\n');
   writeFileSync(join(root, '.env'), '');
   writeFileSync(join(root, 'src/channels/index.ts'), '// channel adapter barrel\n');
   writeFileSync(join(root, 'src/providers/index.ts'), '// provider barrel\n');
   writeFileSync(join(root, 'container/agent-runner/src/providers/index.ts'), '// container provider barrel\n');
   writeFileSync(join(root, 'setup/providers/index.ts'), '// setup provider barrel\n');
+  writeFileSync(join(root, 'src/drivers/installed.ts'), '// session driver barrel\n');
   writeFileSync(
     join(root, 'setup/index.ts'),
     ['const STEPS = {', '  // >>> nanoclaw:setup-steps', '  // <<< nanoclaw:setup-steps', '};', ''].join('\n'),

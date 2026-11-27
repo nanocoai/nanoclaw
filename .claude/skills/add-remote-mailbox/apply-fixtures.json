@@ -1,0 +1,9 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake group ids only. Shell execution is stubbed by the harness.",
+  "scenarios": [
+    {
+      "name": "two groups",
+      "inputs": { "remote_mailbox_groups": "ag-123,ag-456" }
+    }
+  ]
+}
