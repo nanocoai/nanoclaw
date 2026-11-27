@@ -100,6 +100,12 @@ describe('maintainer activity after the ask is not an answer', () => {
     expect(authorAnswered({ author: AUTHOR, askedAt, commits, events })).toBe(false);
   });
 
+  it('a maintainer "Update branch (rebase)": author kept, committer web-flow, new commit date', () => {
+    const commits = [commit({ author: AUTHOR, committer: 'web-flow', authored: BEFORE, committed: AFTER })];
+    const events = [{ event: 'head_ref_force_pushed', actor: user(MAINTAINER), created_at: AFTER }];
+    expect(authorAnswered({ author: AUTHOR, askedAt, commits, events })).toBe(false);
+  });
+
   it('a maintainer force-push, comment or review', () => {
     expect(
       authorAnswered({
