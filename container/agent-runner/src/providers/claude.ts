@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
@@ -75,6 +76,16 @@ interface SDKUserMessage {
   message: { role: 'user'; content: string };
   parent_tool_use_id: null;
   session_id: string;
+  /** Client id of this input; the CLI lists it in assistant.user_message_uuids. */
+  uuid: ReturnType<typeof randomUUID>;
+}
+
+/** The `consumed` event for an SDK frame's user_message_uuids, if it has any. */
+function consumedInputs(message: unknown): { type: 'consumed'; ids: string[] } | null {
+  const list = (message as { user_message_uuids?: unknown }).user_message_uuids;
+  if (!Array.isArray(list)) return null;
+  const ids = list.filter((id): id is string => typeof id === 'string');
+  return ids.length > 0 ? { type: 'consumed', ids } : null;
 }
 
 /**
@@ -85,14 +96,20 @@ class MessageStream {
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string): void {
+  /** Queue one input; returns the uuid it was sent with. */
+  push(text: string): ReturnType<typeof randomUUID> {
+    // The CLI echoes client uuids back in assistant.user_message_uuids,
+    // which is how translateEvents reports the inputs a turn consumed.
+    const uuid = randomUUID();
     this.queue.push({
       type: 'user',
       message: { role: 'user', content: text },
       parent_tool_use_id: null,
       session_id: '',
+      uuid,
     });
     this.waiting?.();
+    return uuid;
   }
 
   end(): void {
@@ -335,6 +352,12 @@ export class ClaudeProvider implements AgentProvider {
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'assistant') {
+          // Which pushed inputs this turn has consumed. The CLI answers inputs
+          // waiting together at a turn boundary in one turn with one result,
+          // so the poll-loop cannot count results to know which input a turn
+          // answers. Subagent frames carry no list.
+          const consumed = consumedInputs(message);
+          if (consumed) yield consumed;
           // Surface each assistant message's text as it streams in. The final
           // `result` event only carries the LAST assistant text — a wrapped
           // <message> block composed between tool calls would otherwise be
@@ -361,6 +384,11 @@ export class ClaudeProvider implements AgentProvider {
             if (text) yield { type: 'text', text };
           }
         } else if (message.type === 'result') {
+          // The result frame carries the same list; it is the only one that
+          // does when a turn ends before another assistant frame names a
+          // folded input. Reported before the result closes the turn.
+          const consumed = consumedInputs(message);
+          if (consumed) yield consumed;
           // `result` text exists only on subtype:"success"; error subtypes
           // (e.g. a non-retryable 403 billing_error) carry their message in
           // `errors[]` instead. Keep that actionable notice separate from
