@@ -52,6 +52,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - { skill: add-antigravity, bun: true }
           - { skill: add-codex, bun: true }
           - { skill: add-cursor, bun: true }
           - { skill: add-deltachat, bun: false }

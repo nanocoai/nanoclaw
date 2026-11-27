@@ -82,6 +82,13 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
     rm -rf /root/.bun && \
     test "$(bun --version)" = "${BUN_VERSION}"
 
+# Provider skills that install a native binary (one not on npm, so not in
+# cli-tools.json) insert their block between these two lines. Here the build is
+# still root, before the setuid sweep and the switch to `node`, and above the
+# often-bumped layers below, so a lockfile or CLI bump does not re-download it.
+# >>> nanoclaw:provider-binaries
+# <<< nanoclaw:provider-binaries
+
 # ---- agent-runner deps -------------------------------------------------------
 # Deps are cached independently of CLI versions. Source is NOT baked in —
 # it's provided by the shared RO mount at runtime.
