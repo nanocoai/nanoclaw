@@ -10,6 +10,9 @@ import {
   renderDraftChangelog,
 } from './release-notes.mjs';
 
+// The current prompt is covered against the live template in check-release-note.test.ts.
+const LEGACY_PROMPT = 'Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.';
+
 const TEMPLATE_BLOCK = [
   '## User and release impact',
   '',
@@ -17,7 +20,7 @@ const TEMPLATE_BLOCK = [
   '- [x] User-visible change — release note below',
   '',
   '```release-note',
-  'Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.',
+  LEGACY_PROMPT,
   '```',
   '',
 ].join('\n');
@@ -48,13 +51,12 @@ describe('release-note extraction', () => {
   });
 
   it('drops the placeholder line when the contributor wrote underneath it', () => {
-    const mixed = body(
-      [
-        'Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.',
-        'The real line.',
-      ].join('\n'),
-    );
+    const mixed = body([LEGACY_PROMPT, 'The real line.'].join('\n'));
     expect(extractReleaseNote(mixed)).toBe('The real line.');
+  });
+
+  it('treats an untouched prompt re-wrapped across lines as no note', () => {
+    expect(extractReleaseNote(body(LEGACY_PROMPT.replace('changelog. ', 'changelog.\n')))).toBeNull();
   });
 
   it('returns null for an empty block and for a body with no release-note fence', () => {
@@ -85,6 +87,18 @@ describe('release-note extraction', () => {
     expect(extractReleaseNote('  ```release-note\n  Indented.\n  ```\n')).toBeNull();
   });
 
+  it('does not let a fence line with an info string close a block (CommonMark)', () => {
+    expect(extractReleaseNote('```markdown\n```release-note\nExample.\n```\n')).toBeNull();
+  });
+
+  it('ends the note at a closing fence indented up to three spaces', () => {
+    expect(extractReleaseNote('```release-note\nA line.\n   ```\n\n## Security\n')).toBe('A line.');
+  });
+
+  it('skips a release-note block inside an HTML comment', () => {
+    expect(extractReleaseNote('<!--\n```release-note\nHidden.\n```\n-->\n' + body('Shown.'))).toBe('Shown.');
+  });
+
   it('strips HTML comments out of the harvested note', () => {
     expect(extractReleaseNote(body('Visible line. <!-- reviewer note -->'))).toBe('Visible line.');
   });
@@ -110,6 +124,17 @@ describe('breaking-change detection', () => {
 
   it('ignores a checkbox that only appears inside a fenced block', () => {
     expect(isBreakingChange('```release-note\n- [x] Breaking change\n```\n')).toBe(false);
+  });
+
+  it('ignores a breaking box inside an HTML comment', () => {
+    expect(isBreakingChange('<!--\n- [x] Breaking change — release note below\n-->\n')).toBe(false);
+    expect(collectReleaseNotes([{ number: 1, body: '<!--\n- [x] Breaking change\n-->\n' }]).missing[0].breaking).toBe(
+      false,
+    );
+  });
+
+  it('keeps a box hidden when a fence line with an info string sits inside the block', () => {
+    expect(isBreakingChange('```markdown\n```release-note\n- [x] Breaking change\n```\n')).toBe(false);
   });
 });
 
