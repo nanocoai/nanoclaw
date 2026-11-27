@@ -1,0 +1,52 @@
+{
+  "patterns": [
+    {
+      "id": "http-not-https",
+      "category": "network",
+      "severity": "LOW",
+      "regex": "fetch\\(['\"]http://(?!localhost|127\\.0\\.0\\.1)",
+      "message": "Unencrypted HTTP connection: Using http:// instead of https://",
+      "remediation": "Use HTTPS for external connections to ensure data security."
+    },
+    {
+      "id": "console-log-secrets",
+      "category": "information-disclosure",
+      "severity": "LOW",
+      "regex": "console\\.log\\([^)]*\\b(secrets|process\\.env|API_KEY|TOKEN|password)",
+      "message": "Console logging of sensitive data",
+      "remediation": "Remove console.log() statements that print sensitive information."
+    },
+    {
+      "id": "npm-install-runtime",
+      "category": "dependency-risk",
+      "severity": "LOW",
+      "regex": "(exec|spawn)(Sync)?\\(['\"]?npm\\s+install",
+      "message": "Runtime npm install detected",
+      "remediation": "Dependencies should be installed before skill execution, not at runtime."
+    },
+    {
+      "id": "git-clone-runtime",
+      "category": "dependency-risk",
+      "severity": "LOW",
+      "regex": "(exec|spawn)(Sync)?\\(['\"]?git\\s+clone",
+      "message": "Runtime git clone detected",
+      "remediation": "Code should be included in skill package, not fetched at runtime."
+    },
+    {
+      "id": "setInterval-usage",
+      "category": "resource-usage",
+      "severity": "LOW",
+      "regex": "setInterval\\(",
+      "message": "setInterval() detected: Background process created",
+      "remediation": "Document why background processes are needed and ensure cleanup."
+    },
+    {
+      "id": "setTimeout-long",
+      "category": "resource-usage",
+      "severity": "LOW",
+      "regex": "setTimeout\\([^,)]+,\\s*\\d{6,}\\)",
+      "message": "Long setTimeout detected: Delay > 100 seconds",
+      "remediation": "Document why long delays are needed."
+    }
+  ]
+}
