@@ -30,8 +30,9 @@ if command -v node >/dev/null 2>&1; then
     echo "=== END ==="
     exit 1
   fi
-  # NodeSource replaces only the system Node; one from a version manager (nvm,
-  # fnm, volta, asdf) would stay first on PATH after a sudo apt install.
+  # The system package install (NodeSource apt, zypper) replaces only the system
+  # Node; one from a version manager (nvm, fnm, volta, asdf) would stay first on
+  # PATH after a sudo install.
   if [ "$(uname -s)" = Linux ] && ! command -v uvx >/dev/null 2>&1 && ! node_from_apt "$CURRENT_NODE"; then
     echo "STATUS: failed"
     echo "ERROR: $(node_minimum_message "$CURRENT_VERSION" "$CURRENT_NODE") Update Node in your version manager to $(node_line_minimum "$NODE_LINE") or newer, then re-run setup."
@@ -68,10 +69,42 @@ else
       esac
       ;;
     Linux)
-      echo "STEP: nodesource-setup"
-      curl -fsSL "https://deb.nodesource.com/setup_${NODE_LINE}.x" | sudo -E /bin/bash -
-      echo "STEP: apt-install-nodejs"
-      sudo apt-get install -y nodejs
+      # Pick the package manager from /etc/os-release. Subshell so its vars
+      # (ID, VERSION, ...) don't leak into this script.
+      DISTRO_IDS="$( . /etc/os-release 2>/dev/null && echo "${ID_LIKE:-} ${ID:-}" )"
+      case " $DISTRO_IDS " in
+        *" debian "* | *" ubuntu "*)
+          echo "STEP: nodesource-setup"
+          curl -fsSL "https://deb.nodesource.com/setup_${NODE_LINE}.x" | sudo -E /bin/bash -
+          echo "STEP: apt-install-nodejs"
+          sudo apt-get install -y nodejs
+          ;;
+        *" suse "* | *" opensuse "* | *" sles "*)
+          # openSUSE's own repos ship versioned packages (nodejs22, nodejs24,
+          # ...) side by side; nodejs24 clears NODE_MINIMUMS. npm comes from the
+          # matching npmNN package. No third-party repo, so no curl | sudo.
+          # If your release's own repos carry no Node that meets the minimum
+          # (e.g. Leap 15.6), see which devel repositories do:
+          # https://build.opensuse.org/project/show/devel:languages:nodejs
+          SUSE_NODE_LINE=24
+          echo "STEP: zypper-install-nodejs"
+          sudo zypper --non-interactive install "nodejs${SUSE_NODE_LINE}" "npm${SUSE_NODE_LINE}"
+          ;;
+        # RHEL family: kept disabled until someone can test it. NodeSource's RPM
+        # repo targets dnf/yum.
+        # *" rhel "* | *" fedora "* | *" centos "*)
+        #   echo "STEP: nodesource-setup"
+        #   curl -fsSL "https://rpm.nodesource.com/setup_${NODE_LINE}.x" | sudo -E /bin/bash -
+        #   echo "STEP: dnf-install-nodejs"
+        #   sudo dnf install -y nodejs
+        #   ;;
+        *)
+          echo "STATUS: failed"
+          echo "ERROR: No automatic Node install for this Linux distro (${DISTRO_IDS# }). Debian/Ubuntu and openSUSE are supported. Install Node $(node_line_minimum "$NODE_LINE") or newer with your package manager, nvm, fnm or uv, then re-run."
+          echo "=== END ==="
+          exit 1
+          ;;
+      esac
       ;;
     *)
       echo "STATUS: failed"
