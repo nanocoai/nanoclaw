@@ -29,9 +29,32 @@ export interface ProviderRegistration {
   contract?: ProviderRuntimeContract;
 }
 
+/** What a wrapper gets besides the provider it wraps. */
+export interface ProviderWrapperContext {
+  /** The provider name being constructed. */
+  name: string;
+  /** The options the wrapped provider was constructed with. */
+  options: ProviderOptions;
+  /**
+   * Construct another unwrapped instance of the same provider with different
+   * options (e.g. another credential env), resolved exactly like the first.
+   * A wrapper owns every instance it creates: it forwards
+   * `registerMemorySessionHook` to each one.
+   */
+  create(options: ProviderOptions): AgentProvider;
+}
+
+/**
+ * Decorates a provider at construction time — e.g. retrying a failed attempt
+ * with another model or credentials — without editing the provider module.
+ * Returns the provider the runner uses; returning `inner` is a no-op.
+ */
+export type ProviderWrapper = (inner: AgentProvider, context: ProviderWrapperContext) => AgentProvider;
+
 const registry = new Map<string, ProviderRegistration>();
 /** Contracts registered before their provider factory arrived. */
 const pendingContracts = new Map<string, ProviderRuntimeContract>();
+const wrappers = new Map<string, ProviderWrapper[]>();
 
 export function registerProvider(name: string, registration: ProviderFactory | ProviderRegistration): void {
   const key = providerKey(name);
@@ -67,6 +90,21 @@ export function registerProviderContract(name: string, contract: ProviderRuntime
   }
   if (pendingContracts.has(key)) throw new Error(`Provider runtime contract already registered: ${key}`);
   pendingContracts.set(key, deepFreeze(contract));
+}
+
+/**
+ * Register a wrapper applied whenever `name` is constructed through
+ * `createProvider`. Order-independent with `registerProvider`; several
+ * wrappers compose in registration order (the first registered is innermost).
+ * With none registered, construction is unchanged.
+ */
+export function registerProviderWrapper(name: string, wrapper: ProviderWrapper): void {
+  const key = providerKey(name);
+  wrappers.set(key, [...(wrappers.get(key) ?? []), wrapper]);
+}
+
+export function getProviderWrappers(name: string): readonly ProviderWrapper[] {
+  return wrappers.get(name.toLowerCase()) ?? [];
 }
 
 function attachContract(entry: ProviderRegistration, contract: ProviderRuntimeContract): void {

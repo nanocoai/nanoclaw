@@ -290,7 +290,7 @@ export class ClaudeProvider implements AgentProvider {
         // turns them into throttled `activity` and nothing else.
         includePartialMessages: true,
         env: this.env,
-        model: this.inference.model,
+        model: input.model ?? this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.inference.effort as any,
         permissionMode: this.executionPolicy.permissionMode,
@@ -315,6 +315,9 @@ export class ClaudeProvider implements AgentProvider {
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
+      // Anything the attempt did that a retry would repeat: a tool call or
+      // assistant text the poll-loop may already have delivered.
+      let producedOutput = false;
       let lastStreamActivityAt = 0;
       for await (const message of sdkResult) {
         if (aborted) return;
@@ -354,11 +357,15 @@ export class ClaudeProvider implements AgentProvider {
           const content = (message as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
             ?.content;
           if (Array.isArray(content)) {
+            if (content.some((block) => block.type === 'tool_use')) producedOutput = true;
             const text = content
               .filter((block) => block.type === 'text' && block.text)
               .map((block) => block.text)
               .join('');
-            if (text) yield { type: 'text', text };
+            if (text) {
+              producedOutput = true;
+              yield { type: 'text', text };
+            }
           }
         } else if (message.type === 'result') {
           // `result` text exists only on subtype:"success"; error subtypes
@@ -379,6 +386,7 @@ export class ClaudeProvider implements AgentProvider {
             text: resultAsError ? null : (m.result ?? null),
             isError,
             error: m.errors?.length ? m.errors.join('\n') : resultAsError || undefined,
+            ...(isError ? { retryable: !producedOutput } : {}),
           };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
