@@ -5,6 +5,7 @@
  * shared between host and container. Callers own the connection lifecycle
  * (open-write-close per op). See session-manager.ts header for invariants.
  */
+import fs from 'fs';
 import Database from 'better-sqlite3';
 
 import { createInboundRecord } from '../model.js';
@@ -233,14 +234,68 @@ export interface OutboundMessage {
   content: string;
 }
 
-export function getDueOutboundMessages(db: Database.Database): OutboundMessage[] {
-  return db
-    .prepare(
-      `SELECT * FROM messages_out
-       WHERE (deliver_after IS NULL OR datetime(deliver_after) <= datetime('now'))
-       ORDER BY timestamp ASC`,
-    )
-    .all() as OutboundMessage[];
+const DUE_OUTBOUND_CLAUSE = "(deliver_after IS NULL OR datetime(deliver_after) <= datetime('now'))";
+/** SQLite's default bound-parameter ceiling is 999 on older builds; stay well under it. */
+export const SQLITE_IN_CHUNK = 500;
+
+/**
+ * Per outbound-DB file (path + inode): the highest rowid at or below which every
+ * row is already in the caller's excluded (delivered) set. messages_out rows are
+ * never deleted and SQLite has one writer at a time, so rowids only grow and a
+ * snapshot holding rowid N holds every row below it.
+ */
+const deliveredWatermarks = new Map<string, number>();
+
+function watermarkKey(db: Database.Database): string | null {
+  if (!db.name || db.memory) return null;
+  try {
+    return `${db.name}:${fs.statSync(db.name).ino}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Due outbound rows, minus `excludeIds` (the delivered set).
+ *
+ * messages_out is never pruned, so a full `SELECT *` on every 1s delivery poll
+ * re-reads everything the session ever sent. On a long-lived session (15k rows,
+ * 16MB) across every active session that saturates the host event loop. This
+ * reads only ids above a delivered watermark, then full rows for the
+ * undelivered remainder.
+ */
+export function getDueOutboundMessages(db: Database.Database, excludeIds?: ReadonlySet<string>): OutboundMessage[] {
+  const key = excludeIds ? watermarkKey(db) : null;
+  const floor = key ? (deliveredWatermarks.get(key) ?? 0) : 0;
+  const candidates = db
+    .prepare(`SELECT rowid AS rid, id, ${DUE_OUTBOUND_CLAUSE} AS due FROM messages_out WHERE rowid > ? ORDER BY rowid`)
+    .all(floor) as Array<{ rid: number; id: string; due: number }>;
+
+  let watermark = floor;
+  let advancing = true;
+  const ids: string[] = [];
+  for (const c of candidates) {
+    const id = String(c.id);
+    const excluded = excludeIds?.has(id) ?? false;
+    if (advancing && excluded) watermark = c.rid;
+    else advancing = false;
+    if (!excluded && c.due) ids.push(id);
+  }
+  if (key && watermark > floor) deliveredWatermarks.set(key, watermark);
+  if (ids.length === 0) return [];
+
+  const rows: OutboundMessage[] = [];
+  for (let i = 0; i < ids.length; i += SQLITE_IN_CHUNK) {
+    const chunk = ids.slice(i, i + SQLITE_IN_CHUNK);
+    rows.push(
+      ...(db
+        .prepare(`SELECT * FROM messages_out WHERE id IN (${chunk.map(() => '?').join(',')})`)
+        .all(...chunk) as OutboundMessage[]),
+    );
+  }
+  return rows.sort((a, b) =>
+    a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : (a.seq ?? 0) - (b.seq ?? 0),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +376,8 @@ export function migrateMessagesInTable(db: Database.Database): void {
  */
 export function getInboundSourceSessionId(db: Database.Database, messageId: string): string | null {
   const row = db.prepare('SELECT source_session_id FROM messages_in WHERE id = ?').get(messageId) as
-    { source_session_id: string | null } | undefined;
+    | { source_session_id: string | null }
+    | undefined;
   return row?.source_session_id ?? null;
 }
 
