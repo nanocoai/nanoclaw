@@ -1164,7 +1164,10 @@ export async function resolveProviderContribution(
     context.selectedSkills,
     {
       legacyOverlay: () => Promise.resolve(fn?.({ ...context, coreOwnsProviderSurfaces: true as const }) ?? {}),
-      composeProjectDocument: (spec) => composeGroupProjectDoc(agentGroup, context.groupDir, spec),
+      // Same gateway-adjusted selection as the skill links above: resident
+      // skill prose must follow the skills the container actually sees.
+      composeProjectDocument: (spec) =>
+        composeGroupProjectDoc(agentGroup, context.groupDir, spec, context.selectedSkills),
     },
   );
   return { provider, contribution: surfaces.contribution, surfaces };
