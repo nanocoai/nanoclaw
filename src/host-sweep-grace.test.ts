@@ -43,7 +43,7 @@ import { getContainerStartedAtMs, isContainerRunning, killContainer, wakeContain
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { log } from './log.js';
 import { getAgentMailbox } from './mailbox/index.js';
-import { outboundDbPath } from './mailbox/sqlite/paths.js';
+import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { initSessionFolder, writeSessionMessage } from './session-manager.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-host-sweep-grace';
@@ -232,6 +232,9 @@ describe('absolute-ceiling kill logging', () => {
     const db = new Database(outboundDbPath(AG, SESS));
     db.prepare('DELETE FROM processing_ack').run();
     db.close();
+    const inDb = new Database(inboundDbPath(AG, SESS));
+    inDb.prepare("UPDATE messages_in SET status = 'completed'").run();
+    inDb.close();
     const info = vi.spyOn(log, 'info');
     const warn = vi.spyOn(log, 'warn');
 
@@ -247,6 +250,17 @@ describe('absolute-ceiling kill logging', () => {
       info.mockRestore();
       warn.mockRestore();
     }
+  });
+
+  // #4558: the message that just arrived must not stop the container that
+  // is about to answer it.
+  it('does not stop an idle container for a message it has not claimed yet', async () => {
+    const db = new Database(outboundDbPath(AG, SESS));
+    db.prepare('DELETE FROM processing_ack').run();
+    db.close();
+
+    await runSweepTick();
+    expect(killContainer).not.toHaveBeenCalled();
   });
 
   it('keeps the warning when a message is in flight', async () => {
