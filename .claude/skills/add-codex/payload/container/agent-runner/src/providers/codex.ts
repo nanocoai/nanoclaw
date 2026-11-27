@@ -156,9 +156,9 @@ export class CodexProvider implements AgentProvider {
     };
 
     // An image note belongs to the turn that made the image, which the event
-    // names (a sub-agent's turn/started can move activeTurnId); a sub-agent's
-    // image is noted in its own turn, so only a sub-agent that can send_file
-    // delivers it. Never queued as a new turn: the runner never asked for one.
+    // names; a sub-agent's image is noted in its own turn, so only a sub-agent
+    // that can send_file delivers it. Never queued as a new turn: the runner
+    // never asked for one.
     const steerImageNote = (savedPath: string, threadId: string, turnId: string): void => {
       if (!activeServer) {
         console.error(`[codex] image note dropped, query ended: ${savedPath}`);
@@ -307,6 +307,24 @@ async function* runOneTurn(
     const params = n.params ?? {};
     buffer.push({ type: 'activity' });
 
+    // Before the thread guard: a sub-agent's image is noted in the sub-agent's
+    // own turn, which the event names; it never touches this turn.
+    if (method === 'item/completed') {
+      const item = params.item as { type?: string; savedPath?: string } | undefined;
+      const { threadId: itemThread, turnId: itemTurn } = params as { threadId?: string; turnId?: string };
+      if (item?.type === 'imageGeneration' && item.savedPath && itemThread && itemTurn) {
+        onImageSaved(item.savedPath, itemThread, itemTurn);
+      }
+    }
+
+    // Codex also streams every sub-agent thread it spawns on this connection.
+    // Their work still counts as activity for the host's liveness check, but
+    // only this thread's events may retarget, fill or end it.
+    if (typeof params.threadId === 'string' && params.threadId !== threadId) {
+      kick();
+      return;
+    }
+
     switch (method) {
       case 'thread/started': {
         const thread = params.thread as { id?: string } | undefined;
@@ -330,12 +348,8 @@ async function* runOneTurn(
         break;
       }
       case 'item/completed': {
-        const item = params.item as { type?: string; text?: string; savedPath?: string } | undefined;
+        const item = params.item as { type?: string; text?: string } | undefined;
         if (item?.type === 'agentMessage' && item.text) resultText = item.text;
-        const { threadId: itemThread, turnId: itemTurn } = params as { threadId?: string; turnId?: string };
-        if (item?.type === 'imageGeneration' && item.savedPath && itemThread && itemTurn) {
-          onImageSaved(item.savedPath, itemThread, itemTurn);
-        }
         break;
       }
       case 'thread/status/changed': {
