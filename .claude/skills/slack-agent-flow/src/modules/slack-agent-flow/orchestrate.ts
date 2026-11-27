@@ -537,13 +537,19 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
       factory: () => deps.slackInstanceBridgeFactory(slug),
       defaults: deps.SLACK_DEFAULTS,
     });
-    let started: 'started' | 'already-active' | 'no-credentials';
+    let started: 'started' | 'already-active' | 'no-credentials' | 'disabled';
     try {
       started = await deps.startChannelAdapter(instanceKey);
     } catch (err) {
       throw asFlowError(err, 'adapter-start');
     }
     // 'already-active' is the retry path — the instance survived a previous attempt.
+    if (started === 'disabled') {
+      throw new SlackFlowError(
+        'adapter-start',
+        `adapter '${instanceKey}' is disabled via NANOCLAW_DISABLED_CHANNELS — remove it from that list and restart to enable it`,
+      );
+    }
     if (started === 'no-credentials') {
       throw new SlackFlowError(
         'adapter-start',
