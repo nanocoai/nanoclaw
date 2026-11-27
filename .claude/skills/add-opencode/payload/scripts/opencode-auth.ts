@@ -28,12 +28,13 @@ import { apiKeyInjection, CHATGPT_SECRET, createOpenCodeVault } from './opencode
 type Backend = 'chatgpt' | 'local' | 'openrouter' | 'deepseek' | 'custom' | 'skip';
 type ChatGptLoginMethod = 'browser' | 'device';
 
-function answer<T>(value: T | symbol): T {
+// Exclude<T, symbol>: clack 1.6+ types cancel as a unique symbol (see opencode-model-config.ts).
+function answer<T>(value: T): Exclude<T, symbol> {
   if (p.isCancel(value)) {
     p.cancel('Setup cancelled.');
     process.exit(1);
   }
-  return value as T;
+  return value as Exclude<T, symbol>;
 }
 
 function validHttpUrl(value: string): string | undefined {

@@ -34,6 +34,11 @@ updates:
       default-days: 7
       semver-major-days: 14
     groups:
+      # @clack/prompts pins one exact @clack/core, and each core has its own
+      # cancel symbol: two cores break isCancel. Majors move together too. A
+      # lone core patch can still split them; bright-select.test.ts fails then.
+      clack:
+        patterns: ["@clack/*"]
       dev-minor-patch:
         dependency-type: development
         update-types: [minor, patch]
