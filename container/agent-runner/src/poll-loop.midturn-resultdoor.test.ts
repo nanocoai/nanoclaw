@@ -1138,3 +1138,261 @@ describe('buildInformedWrapNudge', () => {
     expect(nudge.match(/<\/undelivered_text>/g)).toHaveLength(1);
   });
 });
+
+// ── An empty result with nothing sent gets one no-answer nudge (#4564) ──
+
+function noAnswerNudges(pushes: string[]): string[] {
+  return pushes.filter((p) => p.includes('ended without a reply'));
+}
+
+describe('no-answer nudge', () => {
+  it.each(PROVIDER_MODES)(
+    'an empty result with nothing sent gets one nudge, and the retry answer is delivered (%s)',
+    async (provider, midTurn) => {
+      seedDest();
+      const answer = '<message to="discord-main">The answer is 4.</message>';
+      async function* events(): AsyncGenerator<ProviderEvent> {
+        yield { type: 'init', continuation: 's1' };
+        yield { type: 'result', text: '' };
+        // Answer only once the nudge arrived, as a real provider would.
+        if (noAnswerNudges(pushes).length !== 1) return;
+        if (midTurn) yield { type: 'text', text: answer };
+        yield { type: 'result', text: answer };
+      }
+      const { query, pushes } = makeStubQuery(events());
+
+      await processQuery(query, CHAT_ROUTING, ['m1'], provider, undefined, 'prompt', undefined, midTurn);
+
+      expect(noAnswerNudges(pushes)).toHaveLength(1);
+      expect(noAnswerNudges(pushes)[0]).toContain('Do not redo the work');
+      expect(noAnswerNudges(pushes)[0]).toContain('Your destinations: discord-main.');
+      expect(nudges(pushes)).toEqual([]);
+      expect(deliveredTexts()).toEqual(['The answer is 4.']);
+    },
+  );
+
+  it.each(PROVIDER_MODES)(
+    'a second empty result after the nudge gets no second nudge (%s)',
+    async (provider, midTurn) => {
+      seedDest();
+      async function* events(): AsyncGenerator<ProviderEvent> {
+        yield { type: 'init', continuation: 's1' };
+        yield { type: 'result', text: '' };
+        yield { type: 'result', text: '' };
+      }
+      const { query, pushes } = makeStubQuery(events());
+
+      await processQuery(query, CHAT_ROUTING, ['m1'], provider, undefined, 'prompt', undefined, midTurn);
+
+      expect(noAnswerNudges(pushes)).toHaveLength(1);
+      expect(deliveredTexts()).toEqual([]);
+    },
+  );
+
+  it.each(PROVIDER_MODES)('a tool send then an empty result gets no nudge (%s)', async (provider, midTurn) => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      toolSend('mcp-1', 'sent via tool');
+      yield { type: 'result', text: '' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], provider, undefined, 'prompt', undefined, midTurn);
+
+    expect(pushes).toEqual([]);
+    expect(deliveredTexts()).toEqual(['sent via tool']);
+  });
+
+  it.each(PROVIDER_MODES)('a card then an empty result gets no nudge (%s)', async (provider, midTurn) => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      writeMessageOut({
+        id: 'card-1',
+        kind: 'chat-sdk',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        thread_id: null,
+        content: JSON.stringify({ type: 'card', card: { title: 'Pick one' }, fallbackText: '' }),
+      });
+      yield { type: 'result', text: '' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], provider, undefined, 'prompt', undefined, midTurn);
+
+    expect(pushes).toEqual([]);
+  });
+
+  it('a block delivered mid-turn then an empty result gets no nudge', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'text', text: '<message to="discord-main">The answer is 4.</message>' };
+      yield { type: 'result', text: '' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
+
+    expect(pushes).toEqual([]);
+    expect(deliveredTexts()).toEqual(['The answer is 4.']);
+  });
+
+  it.each(PROVIDER_MODES)('a task run with an empty result gets no nudge (%s)', async (provider, midTurn) => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: '' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(
+      query,
+      { ...CHAT_ROUTING, taskRun: true },
+      ['m1'],
+      provider,
+      undefined,
+      'prompt',
+      undefined,
+      midTurn,
+    );
+
+    expect(pushes).toEqual([]);
+  });
+
+  it('a turn woken only by a failure notice gets no nudge', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: '' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(
+      query,
+      { ...CHAT_ROUTING, failureNoticeWake: true },
+      ['m1'],
+      'claude',
+      undefined,
+      'prompt',
+      undefined,
+      true,
+    );
+
+    expect(pushes).toEqual([]);
+  });
+
+  it.each(PROVIDER_MODES)('a whitespace-only result gets the nudge (%s)', async (provider, midTurn) => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: '\n  ' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], provider, undefined, 'prompt', undefined, midTurn);
+
+    expect(noAnswerNudges(pushes)).toHaveLength(1);
+  });
+
+  it('a block only to another agent then an empty result still gets the nudge', async () => {
+    seedDest();
+    seedAgentDest('helper', 'ag-helper');
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'text', text: '<message to="helper">Check this</message>' };
+      yield { type: 'result', text: '' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
+
+    expect(getUndeliveredMessages().filter((m) => m.channel_type === 'agent')).toHaveLength(1);
+    expect(noAnswerNudges(pushes)).toHaveLength(1);
+  });
+
+  it.each(PROVIDER_MODES)(
+    'a tool send only to another agent then an empty result still gets the nudge (%s)',
+    async (provider, midTurn) => {
+      seedDest();
+      seedAgentDest('helper', 'ag-helper');
+      async function* events(): AsyncGenerator<ProviderEvent> {
+        yield { type: 'init', continuation: 's1' };
+        writeMessageOut({
+          id: 'a2a-1',
+          kind: 'chat',
+          platform_id: 'ag-helper',
+          channel_type: 'agent',
+          thread_id: null,
+          content: JSON.stringify({ text: 'Check this' }),
+        });
+        yield { type: 'result', text: '' };
+      }
+      const { query, pushes } = makeStubQuery(events());
+
+      await processQuery(query, CHAT_ROUTING, ['m1'], provider, undefined, 'prompt', undefined, midTurn);
+
+      expect(noAnswerNudges(pushes)).toHaveLength(1);
+    },
+  );
+
+  it('a send back to the agent that woke the turn counts as the reply', async () => {
+    seedDest();
+    seedAgentDest('caller', 'ag-caller');
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      writeMessageOut({
+        id: 'a2a-1',
+        kind: 'chat',
+        platform_id: 'ag-caller',
+        channel_type: 'agent',
+        thread_id: null,
+        content: JSON.stringify({ text: 'Here is the result' }),
+      });
+      yield { type: 'result', text: '' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(
+      query,
+      { ...CHAT_ROUTING, platformId: 'ag-caller', channelType: 'agent' },
+      ['m1'],
+      'claude',
+      undefined,
+      'prompt',
+      undefined,
+      true,
+    );
+
+    expect(pushes).toEqual([]);
+  });
+
+  it('a whitespace-only result still reports the exchange', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: '\n  ' };
+    }
+    const { query } = makeStubQuery(events());
+    const exchanges: ProviderExchange[] = [];
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', (e) => exchanges.push(e), 'prompt', undefined, true);
+
+    expect(exchanges.map((e) => [e.prompt, e.status])).toEqual([['prompt', 'undelivered']]);
+  });
+
+  it('an idle pre-warmed query gets no nudge', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: '' };
+    }
+    const { query, pushes } = makeStubQuery(events());
+
+    await processQuery(query, CHAT_ROUTING, [], 'claude', undefined, '', undefined, true);
+
+    expect(pushes).toEqual([]);
+  });
+});
