@@ -191,7 +191,11 @@ fix, and re-run validation. Do not mutate the live checkout to repair staging.
 ## 4. Confirm and cut over
 
 Before downtime, show the exact changed files, required migrations, detected
-backup tag, and rollback command. Ask for one confirmation to begin cutover.
+backup tag, rollback command, and validate's `snapshotSpace.summary`. When
+`snapshotSpace.fits` is false, cutover refuses, with NanoClaw still running:
+with `neededBytes` set, help free space first; without it, the measure itself
+failed, so fix the cause the summary names. Ask for one confirmation to begin
+cutover.
 
 ```bash
 pnpm exec tsx "$controller_dir/scripts/update-nanoclaw.ts" cutover \
