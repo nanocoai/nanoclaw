@@ -133,7 +133,7 @@ it.each([
 ])('uses SDK notice %p plus its chat hint as the error when errors[] is empty', async (result, hint) => {
   sdkMessages.push({ type: 'result', subtype: 'success', is_error: true, result, errors: [] });
   expect(await resultEvents()).toEqual([
-    { type: 'result', text: null, isError: true, error: `${result.trim()}\n${hint}` },
+    { type: 'result', text: null, isError: true, error: `${result.trim()}\n${hint}`, retryable: true },
   ]);
 });
 
@@ -145,12 +145,16 @@ it.each([
   ['a multi-line SDK notice', `${AUTH_ERROR}\nsecond line`],
 ])('keeps the generic notice for %s', async (_label, result) => {
   sdkMessages.push({ type: 'result', subtype: 'success', is_error: true, result, errors: [] });
-  expect(await resultEvents()).toEqual([{ type: 'result', text: result, isError: true, error: undefined }]);
+  expect(await resultEvents()).toEqual([
+    { type: 'result', text: result, isError: true, error: undefined, retryable: true },
+  ]);
 });
 
 it('keeps errors[] as the error when the SDK provides it', async () => {
   sdkMessages.push({ type: 'result', subtype: 'success', is_error: true, result: AUTH_ERROR, errors: [BILLING_ERROR] });
-  expect(await resultEvents()).toEqual([{ type: 'result', text: AUTH_ERROR, isError: true, error: BILLING_ERROR }]);
+  expect(await resultEvents()).toEqual([
+    { type: 'result', text: AUTH_ERROR, isError: true, error: BILLING_ERROR, retryable: true },
+  ]);
 });
 
 it('leaves a successful result untouched', async () => {
