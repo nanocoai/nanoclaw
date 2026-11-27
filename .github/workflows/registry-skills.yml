@@ -65,6 +65,7 @@ jobs:
           - { skill: add-matrix, bun: false }
           - { skill: add-mattermost, bun: false }
           - { skill: add-opencode, bun: true }
+          - { skill: add-proton-mail, bun: false }
           - { skill: add-resend, bun: false }
           - { skill: add-signal, bun: false }
           - { skill: add-slack, bun: false }
