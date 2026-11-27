@@ -129,7 +129,7 @@ The registration tests import only the real barrels — they go red if a barrel 
 pnpm exec tsx setup/index.ts --step provider-auth codex
 ```
 
-The same walk-through fresh installs get from the setup picker: ChatGPT subscription (browser login or device pairing) or an OpenAI API key, landed in the selected gateway’s vault. Idempotent — it short-circuits when a matching secret already exists. It finishes with the install check.
+The same walk-through fresh installs get from the setup picker: ChatGPT subscription (browser login or device pairing) or an OpenAI API key, landed in the selected gateway’s vault. When the gateway already holds an OpenAI account, it asks whether to keep it or sign in again; signing in again replaces the stored sign-in. Without a terminal it keeps the stored one. It finishes with the install check.
 
 The ChatGPT sign-in needs no Codex CLI on the host: it uses the host's `codex` when one runs, and otherwise runs the exact version pinned in `container/cli-tools.json` through `pnpm dlx`, from pnpm's cache, with no global install. The sign-in runs under a throwaway Codex home in `data/codex-login/`, removed when it ends; the user's own `~/.codex` is never used.
 
@@ -171,4 +171,4 @@ This affects only groups created afterward. Per-group `ncl groups config update 
 
 - **Container dies at boot, channel silent:** `grep 'Container exited non-zero' logs/nanoclaw.error.log` — the `stderrTail` carries the reason (e.g. `Unknown provider: codex. Registered: claude` means the barrels aren't wired in the running build).
 - **In-channel `Error: spawn codex ENOENT` on every message:** the image predates the manifest entry — re-run `./container/build.sh`.
-- **Auth errors mid-conversation:** the vault secret is missing or stale — re-run `pnpm exec tsx setup/index.ts --step provider-auth codex` (subscription re-login updates the vault copy).
+- **Auth errors mid-conversation:** the vault secret is missing or stale — re-run `pnpm exec tsx setup/index.ts --step provider-auth codex` and choose **Sign in again**; the new sign-in replaces the stored one.
