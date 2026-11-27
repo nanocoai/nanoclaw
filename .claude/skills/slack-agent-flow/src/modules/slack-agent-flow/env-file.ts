@@ -24,8 +24,11 @@ function envPath(rootDir: string): string {
 function readEnvText(rootDir: string): string {
   try {
     return fs.readFileSync(envPath(rootDir), 'utf-8');
-  } catch {
-    return '';
+  } catch (err) {
+    // Only a missing file reads as empty: any other failure must not let
+    // upsertEnvKey overwrite an existing .env with a single line.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return '';
+    throw err;
   }
 }
 
@@ -76,7 +79,9 @@ export function upsertEnvKey(rootDir: string, key: string, value: string): void 
     return line;
   });
   const out = replaced ? next.join('\n') : text + (text.endsWith('\n') || text === '' ? '' : '\n') + line + '\n';
-  fs.writeFileSync(envPath(rootDir), out);
+  // The file holds live tokens. `mode` applies only when the file is created;
+  // an existing .env keeps the permissions its operator gave it.
+  fs.writeFileSync(envPath(rootDir), out, { mode: 0o600 });
 }
 
 /**
