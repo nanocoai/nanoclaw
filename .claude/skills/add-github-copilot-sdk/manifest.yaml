@@ -1,0 +1,16 @@
+skill: add-github-copilot-sdk
+version: 1.0.0
+description: "Replace Claude Agent SDK with GitHub Copilot SDK"
+core_version: 0.1.0
+adds: []
+modifies:
+  - container/agent-runner/package.json
+  - container/Dockerfile
+  - container/agent-runner/src/index.ts
+  - src/container-runner.ts
+structured:
+  env_additions:
+    - GITHUB_TOKEN
+conflicts: []
+depends: []
+test: "npx vitest run .claude/skills/add-github-copilot-sdk/tests/add-github-copilot-sdk.test.ts"
