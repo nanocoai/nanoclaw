@@ -188,6 +188,7 @@ export async function unbindSession(id: string, messagingGroupId: string): Promi
 }
 
 export async function deleteSession(id: string): Promise<void> {
+  await getDb().run('DELETE FROM conversation_timeline WHERE session_id = ?', id);
   await getDb().run('DELETE FROM sessions WHERE id = ?', id);
 }
 
