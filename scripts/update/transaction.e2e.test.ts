@@ -964,6 +964,20 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(reloaded.snapshot).toBeUndefined();
   });
 
+  it('creates a lightweight backup tag even when tag.gpgsign is enabled', () => {
+    const fixture = createForkFixture();
+    // An operator with tag.gpgsign=true makes every `git tag` signed-annotated,
+    // which needs a tag message and fails headless before anything is staged.
+    exec(fixture.install, 'git', ['config', 'tag.gpgsign', 'true']);
+    const { runtime } = fakeRuntime(fixture.install);
+
+    const state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: fixture.upstreamHead }, runtime);
+
+    expect(state.backupTag).toMatch(/^pre-update-/);
+    // A lightweight ref points straight at the commit, not a tag object.
+    expect(exec(fixture.install, 'git', ['cat-file', '-t', state.backupTag])).toBe('commit');
+  });
+
   it('names each skill that failed to refresh and its error, keeping both ends of a long one (#4429)', async () => {
     const fixture = createForkFixture();
     previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;

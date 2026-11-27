@@ -338,7 +338,10 @@ export function prepareUpdate(options: PrepareOptions, runtime = createUpdateRun
 
   fs.mkdirSync(transactionRoot, { recursive: true });
   git(runtime, projectRoot, ['branch', backupBranch, originalHead]);
-  git(runtime, projectRoot, ['tag', backupTag, originalHead]);
+  // tag.gpgSign=true in the user's git config would take the signed-annotated
+  // path, which demands a tag message and dies headless. The backup is only a
+  // lightweight ref, so force that explicitly.
+  git(runtime, projectRoot, ['-c', 'tag.gpgSign=false', 'tag', backupTag, originalHead]);
   git(runtime, projectRoot, ['worktree', 'add', '-b', stageBranch, stageRoot, originalHead]);
 
   const state: UpdateState = {
