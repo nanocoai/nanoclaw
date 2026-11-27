@@ -264,6 +264,7 @@ Check these first when something goes wrong:
 | Host logs | `logs/nanoclaw.error.log` first (delivery failures, crash-loop backoff, warnings), then `logs/nanoclaw.log` for the full routing chain |
 | Setup logs | `logs/setup.log` (overall), `logs/setup-steps/*.log` (per-step: bootstrap, environment, container, gateway, mounts, service, etc.) |
 | Session DBs | `data/v2-sessions/<agent-group>/<session>/` — `inbound.db` (`messages_in`: did the message reach the container?), `outbound.db` (`messages_out`: did the agent produce a response?) |
+| Watchdog log | `logs/watchdog.log` — auto-remediation runs, issues detected, claude output |
 
 Note: containers run with `--rm`, so their own logs are gone after exit. If an agent container this host started exits non-zero on its own, the host log keeps its last 10 stderr lines in a `Container exited non-zero` warning; `LOG_LEVEL=debug` logs every stderr line. A container adopted after a host restart gets neither.
 
