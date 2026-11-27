@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { findByName, getAllDestinations } from '../destinations.js';
+import { getMessageIn, type MessageInRow } from '../db/messages-in.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getCurrentInReplyTo, getCurrentReplyRoute } from '../db/session-state.js';
 import { resolveDestinationThread } from '../db/session-routing.js';
@@ -194,6 +195,21 @@ export const editMessage: McpToolDefinition = {
   },
 };
 
+/**
+ * A note the host wrote into this session (an approval, a restart, a system
+ * notice) rather than a message someone posted. It never reached a platform,
+ * so there is no message there to react to.
+ */
+function isHostNote(message: MessageInRow | undefined): boolean {
+  if (!message) return false;
+  try {
+    const content: unknown = JSON.parse(message.content);
+    return typeof content === 'object' && content !== null && (content as { senderId?: unknown }).senderId === 'system';
+  } catch {
+    return false;
+  }
+}
+
 export const addReaction: McpToolDefinition = {
   tool: {
     name: 'add_reaction',
@@ -214,6 +230,9 @@ export const addReaction: McpToolDefinition = {
 
     const platformId = getMessageIdBySeq(seq);
     if (!platformId) return err(`Message #${seq} not found`);
+    if (isHostNote(getMessageIn(platformId))) {
+      return err(`Message #${seq} is a note from the host, not a message in the chat, so it can't take a reaction`);
+    }
 
     const routing = getRoutingBySeq(seq);
     if (!routing || !routing.channel_type || !routing.platform_id) {
