@@ -1320,6 +1320,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
               });
             });
           if (linkButtons.length > 0) {
+            if (!title && cardChildren.length === 0) {
+              cardChildren.push(CardText(fallbackText || linkButtons[0].label));
+            }
             cardChildren.push(Actions(linkButtons));
           }
         }
