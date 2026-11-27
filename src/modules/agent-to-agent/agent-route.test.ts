@@ -331,6 +331,53 @@ describe('routeAgentMessage return-path', () => {
     expect(s2Rows).toHaveLength(0);
   });
 
+  it('relay: a reply to A carrying no in_reply_to (as the agent-runner sends a relay) lands in the asking session', async () => {
+    // A.S1 asks B; B consults C; C answers B; B passes the answer to A. The
+    // agent-runner never stamps C's message on a send to A, so the relay
+    // arrives with in_reply_to = null and peer affinity places it in S1, not
+    // in A's newer S2.
+    const C = 'ag-C';
+    await createAgentGroup({ id: C, name: 'C', folder: 'c', agent_provider: null, created_at: now() });
+    const SC: Session = {
+      id: 'sess-C',
+      agent_group_id: C,
+      messaging_group_id: null,
+      thread_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: '2026-03-01T00:00:00.000Z',
+    };
+    await createSession(SC);
+    initSessionFolder(C, SC.id);
+    await createDestination({
+      agent_group_id: C,
+      local_name: 'b',
+      target_type: 'agent',
+      target_id: B,
+      created_at: now(),
+    });
+
+    await routeAgentMessage(
+      { id: 'msg-ask', platform_id: B, content: JSON.stringify({ text: 'please ask C' }), in_reply_to: null },
+      S1,
+    );
+    await routeAgentMessage(
+      { id: 'msg-answer-from-C', platform_id: B, content: JSON.stringify({ text: 'answer' }), in_reply_to: null },
+      SC,
+    );
+    await routeAgentMessage(
+      { id: 'msg-relay', platform_id: A, content: JSON.stringify({ text: 'C says: answer' }), in_reply_to: null },
+      SB,
+    );
+
+    const s1Rows = readInbound(A, S1.id);
+    expect(s1Rows).toHaveLength(1);
+    expect(JSON.parse(s1Rows[0].content).text).toBe('C says: answer');
+    expect(readInbound(A, S2.id)).toHaveLength(0);
+  });
+
   it('stale origin fallback: closed origin session falls through to newest active', async () => {
     // A.S1 sends to B, establishing source_session_id = S1.id on B's inbound.
     await routeAgentMessage(

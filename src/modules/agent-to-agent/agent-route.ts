@@ -142,9 +142,12 @@ export interface RoutableAgentMessage {
   content: string;
   /**
    * For replies, the id of the inbound message being replied to. The
-   * container's formatter sets this from the first inbound in the batch
-   * (`container/agent-runner/src/formatter.ts`). Used here to route the
-   * reply back to the originating session — see `resolveTargetSession`.
+   * container sets it only when the turn answers a message from this same
+   * agent (`resolveRouting` in `container/agent-runner/src/mcp-tools/core.ts`,
+   * `resolveDestinationThread` for `<message to>`); a new request or a relay
+   * of a third agent's answer arrives with null and is placed by peer
+   * affinity. Used here to route the reply back to the originating session —
+   * see `resolveTargetSession`.
    */
   in_reply_to: string | null;
 }

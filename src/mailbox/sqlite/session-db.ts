@@ -328,9 +328,9 @@ export function getInboundSourceSessionId(db: Database.Database, messageId: stri
 /**
  * Find the source_session_id of the most recent a2a inbound row from a
  * specific peer (by agent group id). Used as a peer-affinity fallback in
- * a2a routing when an outbound reply has no `in_reply_to` (e.g. the
- * container's send_message MCP tool path didn't thread the batch's
- * in_reply_to through).
+ * a2a routing when an outbound message has no usable `in_reply_to`: a new
+ * request, a relay of another agent's answer (the container stamps null for
+ * both), or a container running older code.
  *
  * Heuristic: "the last time this peer talked to me, which session was it?"
  * Returns null when no prior a2a inbound from that peer carries a

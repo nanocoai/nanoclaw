@@ -11,7 +11,7 @@ import path from 'path';
 
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
-import { getCurrentInReplyTo, getCurrentReplyRoute } from '../db/session-state.js';
+import { getCurrentReplyRoute } from '../db/session-state.js';
 import { resolveDestinationThread } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -43,24 +43,46 @@ function destinationList(): string {
  *
  * A channel destination is threaded like the poll loop's explicit deliveries:
  * the thread of the message being answered (the published reply stamp) when it
- * came from that channel, else that channel's latest inbound thread. An agent
- * destination never carries a thread.
+ * came from that channel, else that channel's latest inbound thread. Its
+ * `in_reply_to` stays the turn's stamp: adapters read it to thread mail and to
+ * quote, and must never inherit an unrelated conversation.
+ *
+ * An agent destination never carries a thread. Its `in_reply_to` is the host's
+ * a2a return address (src/modules/agent-to-agent/agent-route.ts), so it is the
+ * turn's stamp only when the turn is answering that same agent. Otherwise it is
+ * null and the host picks the session by peer affinity: a relay (A asks B, B
+ * asks C, B passes C's answer to A) must never name C's message, which points
+ * the host at a session of C.
  */
-function resolveRouting(
-  to: string,
-): { channel_type: string; platform_id: string; thread_id: string | null; resolvedName: string } | { error: string } {
+function resolveRouting(to: string):
+  | {
+      channel_type: string;
+      platform_id: string;
+      thread_id: string | null;
+      in_reply_to: string | null;
+      resolvedName: string;
+    }
+  | { error: string } {
   const dest = findByName(to);
   if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
+  const route = getCurrentReplyRoute();
   if (dest.type === 'channel') {
     return {
       channel_type: dest.channelType!,
       platform_id: dest.platformId!,
-      thread_id:
-        resolveDestinationThread(dest.channelType!, dest.platformId!, getCurrentReplyRoute())?.threadId ?? null,
+      thread_id: resolveDestinationThread(dest.channelType!, dest.platformId!, route)?.threadId ?? null,
+      in_reply_to: route?.inReplyTo ?? null,
       resolvedName: to,
     };
   }
-  return { channel_type: 'agent', platform_id: dest.agentGroupId!, thread_id: null, resolvedName: to };
+  const answeringThisAgent = route?.channelType === 'agent' && route.platformId === dest.agentGroupId;
+  return {
+    channel_type: 'agent',
+    platform_id: dest.agentGroupId!,
+    thread_id: null,
+    in_reply_to: answeringThisAgent ? route.inReplyTo : null,
+    resolvedName: to,
+  };
 }
 
 export const sendMessage: McpToolDefinition = {
@@ -91,7 +113,7 @@ export const sendMessage: McpToolDefinition = {
     const id = generateId();
     const seq = await writeMessageOut({
       id,
-      in_reply_to: getCurrentInReplyTo(),
+      in_reply_to: routing.in_reply_to,
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
@@ -140,7 +162,7 @@ export const sendFile: McpToolDefinition = {
 
     await writeMessageOut({
       id,
-      in_reply_to: getCurrentInReplyTo(),
+      in_reply_to: routing.in_reply_to,
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
