@@ -19,6 +19,9 @@ function templateSkill(groupId: string, name: string, file: string, content: str
   const dir = path.join(DATA_DIR, 'v2-sessions', groupId, '.claude-shared', 'skills', name);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, file), content);
+  // writeFileSync's mode is masked by umask (002 yields 0664); pin it so
+  // assertions on the copied mode do not depend on the environment.
+  fs.chmodSync(path.join(dir, file), 0o644);
 }
 
 beforeEach(() => {
