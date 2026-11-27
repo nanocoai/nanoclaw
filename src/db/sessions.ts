@@ -187,8 +187,22 @@ export async function unbindSession(id: string, messagingGroupId: string): Promi
   );
 }
 
+/**
+ * Delete a session and the rows that reference it. `pending_questions` and
+ * `pending_approvals` reference sessions with no ON DELETE CASCADE, so a bare
+ * DELETE fails with "FOREIGN KEY constraint failed" while the session still has
+ * an unanswered question or approval. Same order as the groups delete cascade;
+ * `pending_approvals` is module-gated, hence the hasTable check.
+ */
 export async function deleteSession(id: string): Promise<void> {
-  await getDb().run('DELETE FROM sessions WHERE id = ?', id);
+  const db = getDb();
+  await db.transaction(async () => {
+    await db.run('DELETE FROM pending_questions WHERE session_id = ?', id);
+    if (await hasTable(db, 'pending_approvals')) {
+      await db.run('DELETE FROM pending_approvals WHERE session_id = ?', id);
+    }
+    await db.run('DELETE FROM sessions WHERE id = ?', id);
+  });
 }
 
 // ── Pending Questions ──
