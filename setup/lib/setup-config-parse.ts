@@ -29,6 +29,12 @@ function coerce(e: Entry, raw: string): string | number | boolean | undefined {
       const n = Number(raw);
       return Number.isFinite(n) ? n : undefined;
     }
+    case 'enum': {
+      // An empty option list is filled in at runtime, so any value passes here.
+      if (e.options.length === 0) return raw;
+      const v = raw.trim().toLowerCase();
+      return e.options.some((o) => o.value === v) ? v : undefined;
+    }
     default:
       return raw;
   }
@@ -43,6 +49,18 @@ export function readFromEnv(env: NodeJS.ProcessEnv = process.env): ConfigValues 
     if (v !== undefined) out[e.key] = v;
   }
   return out;
+}
+
+/** Enum env vars holding a value outside their options; other types keep ignoring bad input. */
+export function envErrors(env: NodeJS.ProcessEnv = process.env): string[] {
+  const errors: string[] = [];
+  for (const e of CONFIG) {
+    const raw = env[envVarFor(e)];
+    // A blank value counts as unset, as it does in nanoclaw.sh and readFromEnv.
+    if (e.type !== 'enum' || raw === undefined || raw.trim() === '' || coerce(e, raw) !== undefined) continue;
+    errors.push(`Invalid value for ${envVarFor(e)}: ${raw} (use one of: ${e.options.map((o) => o.value).join(', ')})`);
+  }
+  return errors;
 }
 
 export type FlagParseResult = {
@@ -110,7 +128,8 @@ export function parseFlags(argv: string[]): FlagParseResult {
     }
     const v = coerce(entry, raw);
     if (v === undefined) {
-      errors.push(`Invalid ${entry.type} for ${name}: ${raw}`);
+      const allowed = entry.type === 'enum' ? ` (use one of: ${entry.options.map((o) => o.value).join(', ')})` : '';
+      errors.push(`Invalid ${entry.type} for ${name}: ${raw}${allowed}`);
       continue;
     }
     if (entry.type === 'string' || entry.type === 'url') {
@@ -132,6 +151,17 @@ export function applyToEnv(values: ConfigValues, env: NodeJS.ProcessEnv = proces
     const v = values[e.key];
     env[envVarFor(e)] = typeof v === 'boolean' ? (v ? 'true' : 'false') : String(v);
   }
+}
+
+/**
+ * Errors that stop setup before it starts. A flag overrides its env var, so a bad env value
+ * counts only when it would be used; uninstall reads no setup value, so it is never blocked.
+ */
+export function startupErrors(flags: FlagParseResult, env: NodeJS.ProcessEnv = process.env): string[] {
+  const merged = { ...env };
+  applyToEnv(flags.values, merged);
+  if (readFromEnv(merged).uninstall === true) return flags.errors;
+  return [...flags.errors, ...envErrors(merged)];
 }
 
 export function printHelp(stream: NodeJS.WritableStream = process.stdout): void {

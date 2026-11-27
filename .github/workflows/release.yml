@@ -141,6 +141,23 @@ jobs:
             exit 1
           fi
 
+          # The channel-branches job holds the bypass App's key. It has no reviewers, since it runs
+          # only after the approved publish job (one approval per release), but it must allow main
+          # alone, so no other branch's workflow can mint the token.
+          if ! gh api "repos/${GITHUB_REPOSITORY}/environments/channel-branches" > "$RUNNER_TEMP/channel-environment.json"; then
+            echo "::error::Create the channel-branches environment (main only) before publishing."
+            exit 1
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/environments/channel-branches/deployment-branch-policies" \
+            > "$RUNNER_TEMP/channel-branch-policies.json"
+          if ! jq -e '.can_admins_bypass == false and .deployment_branch_policy.protected_branches == false and .deployment_branch_policy.custom_branch_policies == true and all((.protection_rules // [])[]; .type != "required_reviewers")' \
+            "$RUNNER_TEMP/channel-environment.json" >/dev/null ||
+            ! jq -e '.total_count == 1 and any(.branch_policies[]; .name == "main" and (.type // "branch") == "branch")' \
+              "$RUNNER_TEMP/channel-branch-policies.json" >/dev/null; then
+            echo "::error::The channel-branches environment must allow exactly the main branch, prevent admin bypass and have no required reviewers."
+            exit 1
+          fi
+
       - name: Verify main protects the release workflow
         if: ${{ !contains(inputs.version, '-') }}
         env:
@@ -233,6 +250,9 @@ jobs:
     permissions:
       actions: read
       contents: write
+    outputs:
+      channel_moves: ${{ steps.channel-plan.outputs.moves }}
+      channel_failed: ${{ steps.channel-plan.outputs.failed }}
     steps:
       # First step, before checkout: nothing from the target commit runs until it passes.
       - name: Check stable publish approval
@@ -459,3 +479,149 @@ jobs:
             echo "- State: \`$FINAL_STATE\`"
             echo "- URL: $RELEASE_URL"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # stable and beta are the branches a new install is cloned from
+      # (`git clone --branch stable`). Each moves only to its channel's newest tag,
+      # and only forward: the API refuses an update that is not a fast-forward.
+      # Last, after the release is out. The moves themselves run in the channel-branches
+      # job: this runner already ran target code, so nothing on it gets the bypass token.
+      - name: Plan the channel branch moves
+        id: channel-plan
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          # From this workflow's own commit, like the order check: an older target's release.mjs lacks it.
+          git ls-remote --tags --refs origin 'refs/tags/v*' > "$RUNNER_TEMP/release-tags.txt"
+          BRANCHES=$(node "$RUNNER_TEMP/release-order.mjs" branches "$RELEASE_VERSION" "$RUNNER_TEMP/release-tags.txt")
+          if [ -z "$BRANCHES" ]; then
+            echo "- Channel branches: unchanged, v${RELEASE_VERSION} is not the newest tag of a channel" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          MOVES=""
+          FAILED=""
+          for BRANCH in $BRANCHES; do
+            # Exit 2 is the only "no such branch": an auth or network failure must not fall through to creating it.
+            FOUND=0
+            REF=$(git ls-remote --exit-code --heads origin "refs/heads/${BRANCH}") || FOUND=$?
+            if [ "$FOUND" -ne 0 ] && [ "$FOUND" -ne 2 ]; then
+              echo "::error::Branch $BRANCH was not moved: looking it up failed (git ls-remote exit $FOUND)."
+              echo "- Branch \`${BRANCH}\` NOT moved: the lookup failed, see the step log." >> "$GITHUB_STEP_SUMMARY"
+              FAILED="$FAILED $BRANCH"
+              continue
+            fi
+            # Already there, e.g. an admin pushed it after a run without the token: a rerun goes green.
+            if [ "$FOUND" -eq 0 ] && [ "$(printf '%s\n' "$REF" | awk -v ref="refs/heads/${BRANCH}" '$2 == ref { print $1 }')" = "$TARGET_SHA" ]; then
+              echo "- Branch \`${BRANCH}\`: \`${TARGET_SHA}\` (already there)" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            # A beta clone of code without the channel helper records no channel, so the updater follows
+            # stable and stops on the pre-release that clone sits on. stable is the updater's default,
+            # so a stable clone of any release is fine; beta waits for a release that has the helper.
+            if [ "$FOUND" -eq 2 ] && [ "$BRANCH" = beta ] && ! git cat-file -e "${TARGET_SHA}:setup/lib/update-channel.sh" 2>/dev/null; then
+              echo "::notice::Branch beta was not created: v${RELEASE_VERSION} predates setup/lib/update-channel.sh."
+              echo "- Branch \`beta\` NOT created: v${RELEASE_VERSION} predates setup/lib/update-channel.sh. The next release that has it creates the branch." >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            if [ "$FOUND" -eq 0 ]; then MOVES="$MOVES ${BRANCH}:update"; else MOVES="$MOVES ${BRANCH}:create"; fi
+          done
+          echo "moves=${MOVES# }" >> "$GITHUB_OUTPUT"
+          echo "failed=${FAILED# }" >> "$GITHUB_OUTPUT"
+
+  # A fresh runner that runs no code from the repository: it gets the plan as
+  # outputs from publish, and is the only place the ruleset-bypass token exists.
+  # Its environment has no reviewers (publish already had its approval) and
+  # allows main only; the verify job checks both.
+  channel-branches:
+    if: inputs.mode == 'publish'
+    needs: publish
+    runs-on: ubuntu-26.04
+    environment: channel-branches
+    permissions: {}
+    steps:
+      # stable and beta's rulesets let only organisation admins and the channel
+      # App move them. Without the App the move step prints the push for an
+      # admin to run and fails the job; a failed mint fails it here.
+      - name: Mint the channel branch App token
+        id: app
+        if: vars.CHANNEL_BRANCH_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.CHANNEL_BRANCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CHANNEL_BRANCH_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Move the channel branches
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          MOVES: ${{ needs.publish.outputs.channel_moves }}
+          PLAN_FAILED: ${{ needs.publish.outputs.channel_failed }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          FAILED="${PLAN_FAILED:+ $PLAN_FAILED}"
+          # Move only to what GitHub says was released: an annotated tag on the target commit,
+          # with a published, immutable release. The plan alone is not proof of either.
+          if [ -n "$MOVES" ] && [ -n "${GH_TOKEN:-}" ]; then
+            TAG=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}" --jq '.object.type + " " + .object.sha') || TAG=""
+            ANNOTATED=false
+            for _ in 1 2 3 4 5; do
+              if [ "${TAG%% *}" != tag ]; then break; fi
+              ANNOTATED=true
+              TAG=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${TAG#* }" --jq '.object.type + " " + .object.sha') || TAG=""
+            done
+            # draft, immutable, prerelease: a stable version must not be a GitHub pre-release.
+            RELEASED=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}" --jq '[.draft, .immutable, .prerelease] | map(tostring) | join(" ")') || RELEASED=""
+            case "$RELEASE_VERSION" in *-*) WANT="false true true" ;; *) WANT="false true false" ;; esac
+            if [ "$ANNOTATED" != true ] || [ "$TAG" != "commit $TARGET_SHA" ] || [ "$RELEASED" != "$WANT" ]; then
+              echo "::error::Tag v${RELEASE_VERSION} does not point at ${TARGET_SHA} as an annotated tag with a published, immutable release (tag: ${TAG:-none}; draft, immutable, prerelease: ${RELEASED:-no release}). No branch was moved."
+              echo "- Channel branches NOT moved: \`v${RELEASE_VERSION}\` is not an annotated tag on \`${TARGET_SHA}\` with a published, immutable release (draft, immutable, prerelease: \`${RELEASED:-no release}\`; want \`${WANT}\`)." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          fi
+          for MOVE in $MOVES; do
+            BRANCH=${MOVE%%:*}
+            # The plan came from a step that ran code from disk: take only what it may ask for.
+            # A pre-release was approved for beta only, so it never moves stable.
+            case "$MOVE" in
+              stable:update | stable:create | beta:update | beta:create) ALLOWED=true ;;
+              *) ALLOWED=false ;;
+            esac
+            case "$RELEASE_VERSION" in *-*) [ "$BRANCH" = beta ] || ALLOWED=false ;; esac
+            if [ "$ALLOWED" != true ]; then
+              echo "::error::Unexpected planned move: $MOVE"
+              FAILED="$FAILED $MOVE"
+              continue
+            fi
+            # A failure, not a warning: a stale branch hands new installs old code, and only a red job gets seen.
+            if [ -z "${GH_TOKEN:-}" ]; then
+              echo "::error::Branch $BRANCH was not moved: no channel-branch App token. An admin must push it."
+              echo "- Branch \`${BRANCH}\` NOT moved. An admin must run: \`git push origin ${TARGET_SHA}:refs/heads/${BRANCH}\`" >> "$GITHUB_STEP_SUMMARY"
+              FAILED="$FAILED $BRANCH"
+              continue
+            fi
+            # A retry of this job replays the whole plan: a branch an earlier attempt moved is done.
+            CURRENT=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" --jq '.object.sha' 2>/dev/null) || CURRENT=""
+            if [ "$CURRENT" = "$TARGET_SHA" ]; then
+              echo "- Branch \`${BRANCH}\`: already at \`${TARGET_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            if [ "${MOVE#*:}" = update ]; then
+              ARGS=(-X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}" -f sha="$TARGET_SHA" -F force=false)
+            else
+              ARGS=(-X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/heads/${BRANCH}" -f sha="$TARGET_SHA")
+            fi
+            # One branch failing must not skip the other.
+            if ! gh api "${ARGS[@]}" >/dev/null; then
+              echo "::error::Branch $BRANCH was not moved to $TARGET_SHA, see the API error above."
+              echo "- Branch \`${BRANCH}\` NOT moved: the API refused it, see the step log." >> "$GITHUB_STEP_SUMMARY"
+              FAILED="$FAILED $BRANCH"
+              continue
+            fi
+            echo "- Branch \`${BRANCH}\`: \`${TARGET_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          done
+          if [ -n "$FAILED" ]; then
+            echo "::error::Channel branches not moved:${FAILED}. The release is published; the step summary says what each branch needs."
+            exit 1
+          fi

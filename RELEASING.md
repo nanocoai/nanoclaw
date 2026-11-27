@@ -61,6 +61,14 @@ Before any release run, a repository administrator must configure and re-check i
 
 Also create an active tag ruleset for `refs/tags/v*` that restricts updates and deletions, with no bypass. It closes the gap between the workflow pushing a tag and publishing the immutable release while still allowing a new tag to be created.
 
+The `stable` and `beta` branches are the update channels that installs follow. After a release is published, the `channel-branches` job moves `stable` (stable releases) or `beta` (all releases) to the release commit. It runs on a fresh runner that never checks out the repository, and it only moves a branch to the commit the new tag points at. To let it do so:
+
+- Create a `channel-branches` environment with no required reviewers, admin bypass off, and a deployment branch policy that permits only `main`. `verify` fails until it exists.
+- An organisation owner creates a GitHub App with **Contents: read and write** on this repository only, and adds it to the bypass list of the ruleset that locks `stable` and `beta`.
+- In the `channel-branches` environment, set the variable `CHANNEL_BRANCH_APP_CLIENT_ID` to the App's client ID and the secret `CHANNEL_BRANCH_APP_PRIVATE_KEY` to its private key.
+
+Without the App, the release still publishes, then the job fails and its summary prints the `git push origin <sha>:refs/heads/<branch>` command for an organisation admin to run.
+
 The workflow's `GITHUB_TOKEN` cannot read the immutable-release setting because GitHub's endpoint requires repository Administration-read permission. An administrator must therefore perform this preflight before the maintainer dispatches `verify`:
 
 ```bash

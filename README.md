@@ -51,10 +51,14 @@ NanoClaw provides that same core functionality, but in a codebase small enough t
 > ```
 
 ```bash
-git clone https://github.com/nanocoai/nanoclaw.git
+git clone --branch stable https://github.com/nanocoai/nanoclaw.git
 cd nanoclaw
 bash nanoclaw.sh
 ```
+
+The `stable` branch is the latest release, and updates follow releases. To get release candidates too, clone `--branch beta`. A clone of `main` runs the newest code but still follows releases, so its first update waits for the next one; to follow `main`, run `bash nanoclaw.sh --update-channel edge` instead.
+
+Switching branches later doesn't change the channel. To change it, run `pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel <stable|beta|edge>`.
 
 `nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It:
 
@@ -72,7 +76,7 @@ Run it from a fresh v2 checkout. Clone v2 into a separate parent folder (your v1
 
 ```bash
 mkdir -p ~/v2 && cd ~/v2
-git clone https://github.com/nanocoai/nanoclaw.git
+git clone --branch stable https://github.com/nanocoai/nanoclaw.git
 cd nanoclaw
 NANOCLAW_V1_PATH=~/nanoclaw bash migrate-v2.sh
 ```

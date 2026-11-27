@@ -27,10 +27,14 @@ NanoClaw는 그와 동일한 핵심 기능을 제공하지만, 이해할 수 있
 ## 빠른 시작
 
 ```bash
-git clone https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
+git clone --branch stable https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
 cd nanoclaw-v2
 bash nanoclaw.sh
 ```
+
+`stable` 브랜치는 최신 릴리스이며, 업데이트도 릴리스를 따릅니다. 릴리스 후보도 받으려면 `--branch beta`로 클론하세요. `main`을 클론하면 최신 코드가 실행되지만 업데이트는 여전히 릴리스를 따르므로, 첫 업데이트는 다음 릴리스까지 기다립니다. `main`을 따르려면 대신 `bash nanoclaw.sh --update-channel edge`를 실행하세요.
+
+나중에 브랜치를 바꿔도 업데이트 채널은 바뀌지 않습니다. 바꾸려면 `pnpm exec tsx scripts/update-nanoclaw.ts set-channel --channel <stable|beta|edge>`를 실행하세요.
 
 `nanoclaw.sh`는 갓 준비한 머신에서 시작해 메시지를 보낼 수 있는 이름 붙은 에이전트까지 안내합니다. 누락된 경우 Node, pnpm, Docker를 설치하고, Anthropic 자격 증명을 OneCLI에 등록하며, 에이전트 컨테이너를 빌드하고, 첫 채널(Telegram, Discord, WhatsApp 또는 로컬 CLI)을 페어링합니다. 어떤 단계가 실패하면 Claude Code가 자동으로 호출되어 원인을 진단하고 중단된 지점부터 재개합니다.
 
@@ -40,7 +44,7 @@ bash nanoclaw.sh
 기존 v1 설치 옆에 새로운 v2 체크아웃을 만들어 실행하세요:
 
 ```bash
-git clone https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
+git clone --branch stable https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
 cd nanoclaw-v2
 bash migrate-v2.sh
 ```
