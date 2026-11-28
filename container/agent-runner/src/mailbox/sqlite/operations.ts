@@ -28,6 +28,23 @@ function hasOnWakeColumn(db: Database): boolean {
   return hasOnWake;
 }
 
+// Keep each IN clause below SQLite's bound-parameter limit.
+const ACK_LOOKUP_BATCH_SIZE = 500;
+
+function findAcknowledgedIds(pending: MessageInRow[]): Set<string> {
+  const db = getOutboundDb();
+  const acknowledged = new Set<string>();
+  for (let start = 0; start < pending.length; start += ACK_LOOKUP_BATCH_SIZE) {
+    const ids = pending.slice(start, start + ACK_LOOKUP_BATCH_SIZE).map(({ id }) => id);
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = db
+      .prepare(`SELECT message_id FROM processing_ack WHERE message_id IN (${placeholders})`)
+      .all(...ids) as Array<{ message_id: string }>;
+    for (const { message_id } of rows) acknowledged.add(message_id);
+  }
+  return acknowledged;
+}
+
 export function sqliteGetPendingMessages(isFirstPoll: boolean, limit: number): MessageInRow[] {
   const pending = readInbound((inbound) => {
     const onWakeFilter = hasOnWakeColumn(inbound) ? 'AND (on_wake = 0 OR ?1 = 1)' : '';
@@ -42,11 +59,7 @@ export function sqliteGetPendingMessages(isFirstPoll: boolean, limit: number): M
       .all(isFirstPoll ? 1 : 0) as MessageInRow[];
   });
   if (pending.length === 0) return [];
-  const acked = new Set(
-    (getOutboundDb().prepare('SELECT message_id FROM processing_ack').all() as Array<{ message_id: string }>).map(
-      ({ message_id }) => message_id,
-    ),
-  );
+  const acked = findAcknowledgedIds(pending);
   const unclaimed = pending.filter(({ id }) => !acked.has(id));
   const wake = unclaimed.filter(({ trigger }) => trigger === 1).slice(0, limit);
   const remaining = limit - wake.length;
