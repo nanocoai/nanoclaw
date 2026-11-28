@@ -19,10 +19,9 @@ vi.mock('@whiskeysockets/baileys', () => ({
     const ev = new EventEmitter();
     // Like Baileys, merge each creds update into the creds before other listeners see it.
     ev.on('creds.update', (update: Creds) => Object.assign(config.auth.creds, update));
-    // Like Baileys, end() emits the close synchronously.
-    const end = vi.fn(() =>
-      ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: undefined } }),
-    );
+    const end = vi.fn(async () => {
+      ev.emit('connection.update', { connection: 'close', lastDisconnect: { error: undefined } });
+    });
     // Like Baileys, a requested code stores a placeholder `me` before any pairing.
     const requestPairingCode = vi.fn(async (phone: string) => {
       config.auth.creds.me = { id: `${phone}@s.whatsapp.net`, name: '~' };
@@ -257,24 +256,29 @@ describe('whatsapp-auth step', () => {
 
   it('does not report its own close after a successful link as a failure', async () => {
     const sock = await connected();
+    pair(sock);
+    vi.mocked(process.exit).mockImplementation(() => undefined as never);
 
     sock.ev.emit('connection.update', { connection: 'open' });
 
     expect(sock.end).toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
     expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'success', PHONE }]]);
-    expect(() => vi.advanceTimersByTime(1000)).toThrow('process.exit(0)');
+    expect(process.exit).toHaveBeenCalledExactlyOnceWith(0);
   });
 
   it.each(METHODS)('%s: reconnects after a 515 and reports the link once the new socket opens', async (method) => {
     const sock = await reconnectedAfter515(method, PAIRED);
+    vi.mocked(process.exit).mockImplementation(() => undefined as never);
     // A pairing code is requested on the first connect only.
     await vi.advanceTimersByTimeAsync(3000);
     expect(sock.requestPairingCode).not.toHaveBeenCalled();
 
     sock.ev.emit('connection.update', { connection: 'open' });
 
+    await vi.advanceTimersByTimeAsync(1000);
     expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'success', PHONE }]]);
-    expect(() => vi.advanceTimersByTime(1000)).toThrow('process.exit(0)');
+    expect(process.exit).toHaveBeenCalledExactlyOnceWith(0);
   });
 
   it.each([
@@ -310,6 +314,72 @@ describe('whatsapp-auth step', () => {
     pair(sock);
     return { sock, writes };
   }
+
+  it('waits for credentials written across the 515 reconnect before reporting success', async () => {
+    const { sock, writes } = await pairedWithPendingWrites('qr');
+    close(sock, 515, 'restart')();
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    sockets[1].ev.emit('connection.update', { connection: 'open' });
+
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(blocks()).toEqual([]);
+    expect(process.exit).not.toHaveBeenCalled();
+
+    writes[0].resolve();
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(0));
+    expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'success', PHONE }]]);
+  });
+
+  it('waits for a final credentials update during socket shutdown', async () => {
+    const { sock, writes } = await pairedWithPendingWrites('qr');
+    writes[0].resolve();
+    let closeSocket!: () => void;
+    sock.end.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          closeSocket = resolve;
+        }),
+    );
+    sock.ev.emit('connection.update', { connection: 'open' });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(blocks()).toEqual([]);
+
+    sock.ev.emit('creds.update', { me: PAIRED.me });
+    closeSocket();
+    writes[1].reject(new Error('ENOSPC'));
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledExactlyOnceWith(1));
+    expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'failed', ERROR: expect.stringContaining('credentials') }]]);
+  });
+
+  it('lets the setup driver receive the terminal status before exiting', async () => {
+    const { sock, writes } = await pairedWithPendingWrites('qr');
+    writes[0].resolve();
+    let flush: (() => void) | undefined;
+    vi.spyOn(process.stdout, 'write').mockImplementationOnce((_chunk, callback) => {
+      if (typeof callback === 'function') flush = callback;
+      return false;
+    });
+    sock.ev.emit('connection.update', { connection: 'open' });
+    await vi.waitFor(() => expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'success', PHONE }]]));
+    expect(process.exit).not.toHaveBeenCalled();
+    expect(flush).toBeTypeOf('function');
+    flush!();
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledExactlyOnceWith(0));
+  });
+
+  it.each(['rejects', 'hangs'] as const)('fails a link if its final credentials write %s', async (outcome) => {
+    const { sock, writes } = await pairedWithPendingWrites('qr');
+    sock.ev.emit('connection.update', { connection: 'open' });
+    if (outcome === 'rejects') writes[0].reject(new Error('ENOSPC'));
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(process.exit).toHaveBeenCalledExactlyOnceWith(1);
+    expect(blocks()).toEqual([['WHATSAPP_AUTH', { STATUS: 'failed', ERROR: expect.stringContaining('credentials') }]]);
+    if (outcome === 'hangs') {
+      writes[0].resolve();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(process.exit).toHaveBeenCalledTimes(1);
+    }
+  });
 
   /** ...then close it before the 515. */
   async function closedAfterPairing(method: Method) {

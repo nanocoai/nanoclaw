@@ -234,11 +234,35 @@ export async function run(args: string[]): Promise<void> {
       process.exit(1);
     }, 120_000);
 
-    let succeeded = false;
-    function succeed(phone?: string): void {
-      if (succeeded) return;
-      succeeded = true;
-      clearTimeout(timeout);
+    let opened = false;
+    // A 515 reconnect shares the same credentials file. Each write is a full
+    // snapshot; the newest one's outcome matters once all writes have finished.
+    let saving = Promise.resolve(true);
+    async function exitAfterStatus(code: number): Promise<void> {
+      // Let setup release its lock and flush the terminal block to the wizard's
+      // pipe before forcing the socket process to exit.
+      resolve();
+      const flushed = new Promise<void>((done) => process.stdout.write('', () => done()));
+      process.exit((await settled(flushed, 1000)) ? code : 1);
+    }
+    async function finishLink(phone: string, closing: Promise<void>): Promise<void> {
+      let saved = false;
+      const drain = async () => {
+        // Baileys can emit creds.update until end() finishes closing the socket.
+        await closing;
+        saved = await saving;
+      };
+      const done = await settled(drain(), 5000);
+      const creds = done && saved ? readSavedCreds() : undefined;
+      if (!creds || typeof creds === 'string' || creds instanceof Error || !creds.account) {
+        emitStatus('WHATSAPP_AUTH', {
+          STATUS: 'failed',
+          ERROR: done
+            ? 'Could not confirm the saved WhatsApp credentials. Run the link step again to check.'
+            : 'Timed out saving WhatsApp credentials. Run the link step again to check.',
+        });
+        return exitAfterStatus(1);
+      }
       try {
         if (fs.existsSync(PAIRING_CODE_FILE)) fs.unlinkSync(PAIRING_CODE_FILE);
       } catch {
@@ -251,9 +275,7 @@ export async function run(args: string[]): Promise<void> {
         STATUS: 'success',
         PHONE: phone || readAuthedPhoneFromFile(),
       });
-      resolve();
-      // Give a moment for creds to flush before exiting.
-      setTimeout(() => process.exit(0), 1000);
+      await exitAfterStatus(0);
     }
 
     async function connectSocket(isReconnect = false): Promise<void> {
@@ -262,7 +284,6 @@ export async function run(args: string[]): Promise<void> {
       // saves `me`), so a 515 reconnect finds it on disk; this socket's own
       // pairing shows up as isNewLogin below.
       let paired = Boolean(state.creds.account);
-      let saving: Promise<unknown> = Promise.resolve();
 
       const sock = makeWASocket({
         version,
@@ -307,13 +328,15 @@ export async function run(args: string[]): Promise<void> {
           });
         }
 
-        if (connection === 'open') {
-          succeed(phoneFromId(sock.user?.id ?? state.creds.me?.id));
-          sock.end(undefined);
+        if (connection === 'open' && !opened) {
+          opened = true;
+          clearTimeout(timeout);
+          const linkedPhone = phoneFromId(sock.user?.id ?? state.creds.me?.id);
+          void finishLink(linkedPhone, sock.end(undefined));
         }
 
         // Our own sock.end() after a successful link closes too; that is not a failure.
-        if (connection === 'close' && !succeeded) {
+        if (connection === 'close' && !opened) {
           const err = lastDisconnect?.error as { message?: string; output?: { statusCode?: number } } | undefined;
           const reason = err?.output?.statusCode;
           if (reason === DisconnectReason.loggedOut) {
@@ -375,7 +398,11 @@ export async function run(args: string[]): Promise<void> {
 
       // A close after pairing waits for every write to settle before it reads creds.json.
       sock.ev.on('creds.update', () => {
-        saving = Promise.allSettled([saving, saveCreds()]);
+        const write = saveCreds().then(
+          () => true,
+          () => false,
+        );
+        saving = Promise.all([saving, write]).then(([, saved]) => saved);
       });
     }
 
