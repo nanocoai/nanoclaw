@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb } from '../mailbox/sqlite/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
 import { getPendingMessages, markProcessing } from './messages-in.js';
 
 beforeEach(() => {
@@ -176,5 +176,44 @@ describe('existing selection semantics preserved', () => {
 
     expect(getPendingMessages(true).map((m) => m.id)).toEqual(['wake-1', 'ctx-1']);
     expect(getPendingMessages(false)).toHaveLength(0);
+  });
+});
+
+describe('expired ncl replies', () => {
+  it('acknowledges an abandoned CLI reply and leaves recent replies and question answers for their waiters', () => {
+    insertMessage('old', 2, 'system', { type: 'cli_response' }, { trigger: 0 });
+    insertMessage('question', 4, 'system', { type: 'question_response' }, { trigger: 0 });
+    insertMessage('recent', 6, 'system', { type: 'cli_response' }, { trigger: 0 });
+    insertMessage('chat', 8, 'chat', { type: 'cli_response' });
+    insertMessage('malformed', 10, 'system', {}, { trigger: 0 });
+    const db = getInboundDb();
+    db.prepare("UPDATE messages_in SET timestamp = ? WHERE id != 'recent'").run(
+      new Date(Date.now() - 3_600_000).toISOString(),
+    );
+    db.prepare("UPDATE messages_in SET content = '{' WHERE id = 'malformed'").run();
+
+    expect(getPendingMessages().map((row) => row.id)).toEqual(['question', 'recent', 'chat', 'malformed']);
+    expect(getOutboundDb().prepare('SELECT message_id, status FROM processing_ack').all()).toEqual([
+      { message_id: 'old', status: 'completed' },
+    ]);
+  });
+
+  it('drains an expired backlog across polls without crowding out a context message', () => {
+    insertContextRow('context', 1, 'keep this');
+    const backlog = 501;
+    const old = new Date(Date.now() - 3_600_000).toISOString();
+    const db = getInboundDb();
+    db.transaction(() => {
+      for (let i = 0; i < backlog; i++)
+        insertMessage('cli-' + i, i + 2, 'system', { type: 'cli_response' }, { trigger: 0 });
+      db.prepare("UPDATE messages_in SET timestamp = ? WHERE kind = 'system'").run(old);
+    })();
+    const ackCount = () =>
+      (getOutboundDb().prepare('SELECT count(*) AS n FROM processing_ack').get() as { n: number }).n;
+
+    expect(getPendingMessages().map((row) => row.id)).toEqual(['context']);
+    expect(ackCount()).toBeLessThan(backlog);
+    expect(getPendingMessages().map((row) => row.id)).toEqual(['context']);
+    expect(ackCount()).toBe(backlog);
   });
 });
